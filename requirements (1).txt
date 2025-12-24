@@ -1,0 +1,4 @@
+ifcopenshell
+gradio
+pandas
+openpyxl
