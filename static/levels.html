@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Levels manager</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body data-page="levels">
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-icon">IFC</div>
+      <div>
+        <p class="eyebrow">SEI-inspired workspace</p>
+        <h1>IFC Toolkit Hub</h1>
+      </div>
+    </div>
+    <nav class="nav-tabs" aria-label="Tool navigation">
+      <a class="nav-link" data-page="upload" href="/static/index.html">Uploads</a>
+      <a class="nav-link" data-page="cleaner" href="/static/cleaner.html">Cleaner</a>
+      <a class="nav-link" data-page="excel" href="/static/excel.html">Excel Sync</a>
+      <a class="nav-link" data-page="globalz" href="/static/globalz.html">Global Z</a>
+      <a class="nav-link" data-page="proxy" href="/static/proxy.html">Type Mapper</a>
+      <a class="nav-link" data-page="levels" href="/static/levels.html">Levels</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="panel active">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Level search & edits</p>
+          <h2>Manage building storeys</h2>
+          <p class="lede">List, create, move, or delete levels without losing element positions.</p>
+        </div>
+        <div class="pill">IFC → IFC</div>
+      </div>
+
+      <div class="card tool-card">
+        <div class="card-head">
+          <h3>IFC context</h3>
+          <button type="button" class="ghost" id="levels-refresh">Refresh list</button>
+        </div>
+        <div class="grid two">
+          <div class="field">
+            <label for="levels-ifc">IFC file</label>
+            <select id="levels-ifc"></select>
+          </div>
+          <div class="field">
+            <label>Current levels</label>
+            <div id="levels-table" class="log" style="min-height:120px"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="split">
+        <form id="level-add-form" class="card tool-card">
+          <div class="card-head"><h3>Add level</h3></div>
+          <div class="field">
+            <label for="level-name">Name</label>
+            <input id="level-name" required />
+          </div>
+          <div class="grid two">
+            <div class="field">
+              <label for="level-elev">Elevation (optional)</label>
+              <input type="number" id="level-elev" step="any" />
+            </div>
+            <div class="field">
+              <label for="level-units">Units</label>
+              <select id="level-units">
+                <option value="m">Meters</option>
+                <option value="mm">Millimeters</option>
+              </select>
+            </div>
+          </div>
+          <button type="submit" class="primary">Create level</button>
+          <div id="level-add-download" class="download-list"></div>
+        </form>
+
+        <form id="level-move-form" class="card tool-card">
+          <div class="card-head"><h3>Move elements to another level</h3></div>
+          <div class="field">
+            <label for="move-source">Move from</label>
+            <select id="move-source"></select>
+          </div>
+          <div class="field">
+            <label for="move-target">Move to</label>
+            <select id="move-target"></select>
+          </div>
+          <button type="submit" class="primary">Move elements</button>
+          <div id="level-move-download" class="download-list"></div>
+          <pre id="level-move-log" class="log"></pre>
+        </form>
+
+        <form id="level-delete-form" class="card tool-card">
+          <div class="card-head"><h3>Delete level</h3></div>
+          <div class="field">
+            <label for="delete-source">Delete</label>
+            <select id="delete-source"></select>
+          </div>
+          <div class="field">
+            <label for="delete-target">Move its elements to</label>
+            <select id="delete-target"></select>
+          </div>
+          <button type="submit" class="primary">Delete level</button>
+          <div id="level-delete-download" class="download-list"></div>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

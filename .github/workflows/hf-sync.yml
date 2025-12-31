@@ -1,0 +1,53 @@
+name: Sync to Hugging Face Space
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Hugging Face client
+        run: pip install "huggingface_hub>=0.23"
+
+      - name: Upload to Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ secrets.HF_SPACE }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from huggingface_hub import HfApi
+
+          token = os.environ.get("HF_TOKEN")
+          space = os.environ.get("HF_SPACE")
+          if not token or not space:
+              raise SystemExit("HF_TOKEN and HF_SPACE secrets are required")
+
+          api = HfApi(token=token)
+          folder = Path('.')
+          ignore = [
+              '.git', '.github', 'sessions', '__pycache__', '.pytest_cache',
+              '*.pyc', '*.pyo', '*.pyd', '*.swp', '*.bak', '*.tmp'
+          ]
+          api.upload_folder(
+              repo_id=space,
+              repo_type="space",
+              folder_path=str(folder),
+              path_in_repo=".",
+              allow_patterns=None,
+              ignore_patterns=ignore,
+          )
+          PY

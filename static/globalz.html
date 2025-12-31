@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Global Z</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body data-page="globalz">
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-icon">IFC</div>
+      <div>
+        <p class="eyebrow">SEI-inspired workspace</p>
+        <h1>IFC Toolkit Hub</h1>
+      </div>
+    </div>
+    <nav class="nav-tabs" aria-label="Tool navigation">
+      <a class="nav-link" data-page="upload" href="/static/index.html">Uploads</a>
+      <a class="nav-link" data-page="cleaner" href="/static/cleaner.html">Cleaner</a>
+      <a class="nav-link" data-page="excel" href="/static/excel.html">Excel Sync</a>
+      <a class="nav-link" data-page="globalz" href="/static/globalz.html">Global Z</a>
+      <a class="nav-link" data-page="proxy" href="/static/proxy.html">Type Mapper</a>
+      <a class="nav-link" data-page="levels" href="/static/levels.html">Levels</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="panel active">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Storey base quantities</p>
+          <h2>Global Z adjuster</h2>
+          <p class="lede">Set global Z, mirror quantities, and counter-shift placements.</p>
+        </div>
+        <div class="pill">IFC → IFC</div>
+      </div>
+      <form id="global-form" class="card tool-card">
+        <div class="field">
+          <label for="global-ifc">IFC file</label>
+          <select id="global-ifc"></select>
+        </div>
+        <div class="field">
+          <label for="storey">Storey</label>
+          <select id="storey"></select>
+        </div>
+        <div class="grid three">
+          <div class="field">
+            <label for="units">Units</label>
+            <select id="units">
+              <option value="m">Meters</option>
+              <option value="mm">Millimeters</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="gross">Gross height</label>
+            <input type="number" id="gross" step="any" />
+          </div>
+          <div class="field">
+            <label for="net">Net height</label>
+            <input type="number" id="net" step="any" />
+          </div>
+        </div>
+        <div class="grid two">
+          <div class="field">
+            <label for="target-z">Target Z</label>
+            <input type="number" id="target-z" step="any" />
+          </div>
+          <div class="field">
+            <label for="mom">Method of measurement</label>
+            <input id="mom" />
+          </div>
+        </div>
+        <div class="grid three switches">
+          <label class="switch"><input type="checkbox" id="mirror" /> <span>Mirror to QTO</span></label>
+          <label class="switch"><input type="checkbox" id="countershift" checked /> <span>Counter-shift geometry</span></label>
+          <label class="switch"><input type="checkbox" id="crs-mode" checked /> <span>CRS mode</span></label>
+          <label class="switch"><input type="checkbox" id="all-mcs" checked /> <span>Update all map conversions</span></label>
+          <label class="switch"><input type="checkbox" id="storey-elev" checked /> <span>Set storey elevation</span></label>
+          <label class="switch"><input type="checkbox" id="diag" checked /> <span>Show diagnostics</span></label>
+        </div>
+        <button type="submit" class="primary">Apply adjustments</button>
+      </form>
+      <div class="card">
+        <div class="card-head"><h3>Result</h3></div>
+        <pre id="global-log" class="log"></pre>
+        <div id="global-download" class="download-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
