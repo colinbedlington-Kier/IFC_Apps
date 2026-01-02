@@ -3,6 +3,7 @@ const state = {
   files: [],
   levels: [],
   selectedLevelId: null,
+  selectedFiles: new Set(),
 };
 
 const el = (id) => document.getElementById(id);
@@ -53,9 +54,30 @@ function renderFilesLists() {
     ul.innerHTML = "";
     state.files.forEach((f) => {
       const li = document.createElement("li");
-      li.innerHTML = `<span>${f.name}</span><span class="muted">${(f.size / 1024).toFixed(1)} KB</span>`;
+      const checked = state.selectedFiles.has(f.name) ? "checked" : "";
+      li.innerHTML = `
+        <label class="file-row">
+          <input type="checkbox" class="file-checkbox" value="${f.name}" ${checked}>
+          <span class="file-name">${f.name}</span>
+          <span class="muted">${(f.size / 1024).toFixed(1)} KB</span>
+        </label>
+        <button class="btn secondary sm download-file" data-file="${f.name}">Download</button>
+      `;
       ul.appendChild(li);
     });
+  });
+  document.querySelectorAll(".file-checkbox").forEach((cb) => {
+    cb.addEventListener("change", (e) => {
+      const name = e.target.value;
+      if (e.target.checked) {
+        state.selectedFiles.add(name);
+      } else {
+        state.selectedFiles.delete(name);
+      }
+    });
+  });
+  document.querySelectorAll(".download-file").forEach((btn) => {
+    btn.addEventListener("click", () => downloadFile(btn.dataset.file));
   });
 }
 
@@ -96,6 +118,7 @@ async function endSession() {
   localStorage.removeItem("ifc_session_id");
   state.sessionId = null;
   state.files = [];
+  state.selectedFiles = new Set();
   renderFilesLists();
   populateFileSelects();
   setSessionBadge("Session ended. Reload to start a new one.", false);
@@ -252,6 +275,33 @@ async function runProxyMapper() {
     await refreshFiles();
   } else if (el("proxyStatus")) {
     el("proxyStatus").textContent = JSON.stringify(data);
+  }
+}
+
+async function downloadFile(name) {
+  if (!name) return;
+  const url = `/api/session/${state.sessionId}/download?name=${encodeURIComponent(name)}`;
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error("Download failed");
+    const blob = await resp.blob();
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
+  } catch (e) {
+    alert(`Could not download ${name}`);
+  }
+}
+
+async function downloadSelected() {
+  if (!state.selectedFiles.size) return alert("Select at least one file to download.");
+  for (const name of state.selectedFiles) {
+    // eslint-disable-next-line no-await-in-loop
+    await downloadFile(name);
   }
 }
 
@@ -471,6 +521,10 @@ function wireEvents() {
 
   const addLevelBtn = el("addLevel");
   if (addLevelBtn) addLevelBtn.addEventListener("click", addLevelRequest);
+
+  document.querySelectorAll("[data-download-selected]").forEach((btn) => {
+    btn.addEventListener("click", downloadSelected);
+  });
 }
 
 document.addEventListener("DOMContentLoaded", async () => {

@@ -221,6 +221,7 @@ textarea {
   display: flex;
   justify-content: space-between;
   gap: 12px;
+  align-items: center;
 }
 
 .muted {
@@ -286,4 +287,16 @@ code {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 6px;
   margin-top: 8px;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+}
+
+.btn.sm {
+  padding: 6px 10px;
+  font-size: 13px;
 }
