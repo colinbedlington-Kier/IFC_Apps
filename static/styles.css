@@ -73,6 +73,18 @@ nav {
   box-shadow: 0 0 0 2px rgba(110, 231, 255, 0.2);
 }
 
+.nav-link.active {
+  border-color: var(--accent);
+  background: rgba(110, 231, 255, 0.08);
+}
+
+.nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+
 main {
   flex: 1;
   padding: 32px;
@@ -241,4 +253,14 @@ code {
 
 .success-text {
   color: var(--success);
+}
+
+.session-badge {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #1f223a;
+  color: var(--muted);
+  font-size: 13px;
+  border: 1px solid var(--border);
 }

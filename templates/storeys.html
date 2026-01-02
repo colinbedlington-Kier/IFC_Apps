@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title">
+    <h2>Storey & Global Z</h2>
+    <span class="badge">BaseQuantities + CRS</span>
+  </div>
+  <div class="two-col">
+    <div>
+      <label for="storeyIfc">IFC file</label>
+      <select id="storeyIfc" data-files-select></select>
+      <button class="btn" id="parseStoreys" style="margin-top: 8px">Parse Storeys</button>
+      <div class="muted" id="storeyMeta"></div>
+      <label for="storeySelect" style="margin-top: 10px">Storey</label>
+      <select id="storeySelect"></select>
+    </div>
+    <div>
+      <div class="two-col">
+        <div>
+          <label for="grossHeight">GrossHeight</label>
+          <input id="grossHeight" type="number" step="any" />
+        </div>
+        <div>
+          <label for="netHeight">NetHeight</label>
+          <input id="netHeight" type="number" step="any" />
+        </div>
+      </div>
+      <label for="mom">Method of Measurement</label>
+      <input id="mom" type="text" />
+      <div class="two-col" style="margin-top: 8px">
+        <div>
+          <label for="targetZ">Target Z</label>
+          <input id="targetZ" type="number" step="any" />
+        </div>
+        <div>
+          <label for="unitsSelect">Units</label>
+          <select id="unitsSelect">
+            <option value="m">m</option>
+            <option value="mm">mm</option>
+          </select>
+        </div>
+      </div>
+      <div class="inline" style="margin-top: 8px">
+        <label><input type="checkbox" id="mirrorQto" /> Mirror to Qto</label>
+        <label><input type="checkbox" id="countershift" checked /> Counter-shift geometry</label>
+        <label><input type="checkbox" id="useCRS" checked /> CRS-aware</label>
+        <label><input type="checkbox" id="allMC" checked /> Update all MapConversions</label>
+        <label><input type="checkbox" id="diag" checked /> Diagnostics</label>
+        <label><input type="checkbox" id="crsElev" checked /> CRS set storey elev</label>
+      </div>
+      <button class="btn" id="applyStoreys" style="margin-top: 10px">Apply</button>
+    </div>
+  </div>
+  <div class="status" id="storeyStatus"></div>
+</div>
+{% endblock %}

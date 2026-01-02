@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title">
+    <h2>IFC Cleaner</h2>
+    <span class="badge">InfoDrainage Pset removal</span>
+  </div>
+  <div class="two-col">
+    <div>
+      <label for="cleanerFiles">Choose IFC file(s)</label>
+      <select id="cleanerFiles" multiple data-files-select></select>
+    </div>
+    <div>
+      <label for="prefix">Prefix to remove</label>
+      <input id="prefix" type="text" value="InfoDrainage" />
+      <div class="inline" style="margin-top: 8px">
+        <label><input type="checkbox" id="caseInsensitive" checked /> Case-insensitive</label>
+        <label><input type="checkbox" id="deletePsets" checked /> Delete Psets</label>
+        <label><input type="checkbox" id="deleteProps" checked /> Delete Props</label>
+        <label><input type="checkbox" id="dropEmpty" checked /> Drop empty</label>
+        <label><input type="checkbox" id="looseProps" checked /> Loose props</label>
+      </div>
+    </div>
+  </div>
+  <button class="btn" id="runCleaner" style="margin-top: 10px">Run Cleaner</button>
+  <div class="status" id="cleanerStatus"></div>
+</div>
+{% endblock %}

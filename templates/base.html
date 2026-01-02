@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IFC Toolkit Hub</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <nav>
+        <div class="logo">SEI · IFC Toolkit</div>
+        <div class="tagline">
+          Local-first workflows for IFC cleaning, Excel round-tripping, storey adjustments, and proxy remapping.
+        </div>
+        <div class="nav-group">
+          <a class="nav-link {% if active=='upload' %}active{% endif %}" href="/">📂 Upload & Session</a>
+          <a class="nav-link {% if active=='cleaner' %}active{% endif %}" href="/cleaner">🧹 Cleaner</a>
+          <a class="nav-link {% if active=='excel' %}active{% endif %}" href="/excel">📑 Excel Extract/Update</a>
+          <a class="nav-link {% if active=='storeys' %}active{% endif %}" href="/storeys">🏢 Storey & Z Control</a>
+          <a class="nav-link {% if active=='proxy' %}active{% endif %}" href="/proxy">🧭 Proxy → Types</a>
+          <a class="nav-link {% if active=='files' %}active{% endif %}" href="/files">📁 Session Files</a>
+        </div>
+        <div class="session-badge" data-session-badge>Session establishing…</div>
+      </nav>
+
+      <main>
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

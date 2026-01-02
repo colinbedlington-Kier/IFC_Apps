@@ -1,409 +1,288 @@
 const state = {
-  files: [],
   sessionId: null,
+  files: [],
 };
 
-const endpoints = {
-  session: '/api/session',
-  upload: '/api/upload',
-  files: '/api/files',
-  clean: '/api/clean',
-  extract: '/api/extract',
-  update: '/api/update',
-  storeys: '/api/storeys',
-  global: '/api/global-z',
-  proxy: '/api/proxy-map',
-  levelsList: '/api/levels/list',
-  levelsAdd: '/api/levels/add',
-  levelsMove: '/api/levels/move',
-  levelsDelete: '/api/levels/delete',
-  close: '/api/session/close',
-};
+const el = (id) => document.getElementById(id);
 
-function humanSize(bytes) {
-  if (!bytes && bytes !== 0) return '';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let size = bytes;
-  let i = 0;
-  while (size >= 1024 && i < units.length - 1) {
-    size /= 1024;
-    i += 1;
+function setSessionBadge(text, ok = true) {
+  const badge = document.querySelector("[data-session-badge]");
+  if (!badge) return;
+  badge.textContent = text;
+  badge.classList.toggle("danger-text", !ok);
+  badge.classList.toggle("success-text", ok);
+}
+
+async function ensureSession() {
+  try {
+    const existing = localStorage.getItem("ifc_session_id");
+    const resp = await fetch("/api/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: existing }),
+    });
+    const data = await resp.json();
+    state.sessionId = data.session_id;
+    localStorage.setItem("ifc_session_id", state.sessionId);
+    setSessionBadge(`Session ${state.sessionId.slice(0, 8)}…`, true);
+    await refreshFiles();
+  } catch (err) {
+    setSessionBadge("Session error", false);
+    console.error(err);
   }
-  return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[i]}`;
-}
-
-function option(label, value) {
-  const opt = document.createElement('option');
-  opt.value = value;
-  opt.textContent = label;
-  return opt;
-}
-
-async function fetchJSON(url, options = {}) {
-  const resp = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    ...options,
-  });
-  if (!resp.ok) {
-    const detail = await resp.json().catch(() => ({}));
-    throw new Error(detail.detail || `Request failed: ${resp.status}`);
-  }
-  return resp.json();
-}
-
-function setActiveNav() {
-  const page = document.body.dataset.page;
-  document.querySelectorAll('.nav-link').forEach((link) => {
-    const active = link.dataset.page === page;
-    link.classList.toggle('active', active);
-  });
-}
-
-async function initSession() {
-  const data = await fetchJSON(endpoints.session);
-  state.sessionId = data.session_id;
-  state.files = data.files || [];
-  const pill = document.getElementById('session-pill');
-  if (pill) pill.textContent = `Session ${state.sessionId.slice(0, 6)}…`;
-  renderFiles();
-  populateSelects();
 }
 
 async function refreshFiles() {
-  const data = await fetchJSON(endpoints.files);
-  state.files = data.files || [];
-  renderFiles();
-  populateSelects();
-}
-
-function renderFiles() {
-  const list = document.getElementById('file-list');
-  if (!list) return;
-  list.innerHTML = '';
-  if (!state.files.length) {
-    list.innerHTML = '<p class="hint">No files uploaded yet.</p>';
-    return;
+  if (!state.sessionId) return;
+  try {
+    const resp = await fetch(`/api/session/${state.sessionId}/files`);
+    if (!resp.ok) throw new Error("Could not list files");
+    const data = await resp.json();
+    state.files = data.files || [];
+    renderFilesLists();
+    populateFileSelects();
+  } catch (err) {
+    console.error(err);
   }
-  state.files.forEach((file) => {
-    const pill = document.createElement('div');
-    pill.className = 'file-pill';
-    const left = document.createElement('div');
-    left.innerHTML = `<strong>${file.name}</strong><br><span class="hint">${humanSize(file.size)}</span>`;
-    const link = document.createElement('a');
-    link.href = `/api/files/${file.id}`;
-    link.textContent = 'Download';
-    link.className = 'ghost';
-    pill.append(left, link);
-    list.appendChild(pill);
-  });
 }
 
-function populateSelects() {
-  const ifcSelects = ['clean-files', 'extract-ifc', 'update-ifc', 'global-ifc', 'proxy-ifc', 'levels-ifc'];
-  const excelSelects = ['update-excel'];
-  ifcSelects.forEach((id) => {
-    const sel = document.getElementById(id);
-    if (!sel) return;
-    const wasValue = sel.value;
-    sel.innerHTML = '';
-    state.files
-      .filter((f) => f.name.toLowerCase().endsWith('.ifc') || f.name.toLowerCase().endsWith('.ifczip'))
-      .forEach((f) => {
-        sel.appendChild(option(f.name, f.id));
-      });
-    if (wasValue) sel.value = wasValue;
-  });
-  excelSelects.forEach((id) => {
-    const sel = document.getElementById(id);
-    if (!sel) return;
-    const wasValue = sel.value;
-    sel.innerHTML = '';
-    state.files.filter((f) => f.name.toLowerCase().endsWith('.xlsx')).forEach((f) => sel.appendChild(option(f.name, f.id)));
-    if (wasValue) sel.value = wasValue;
-  });
-  populateCleanerMulti();
-}
-
-function populateCleanerMulti() {
-  const select = document.getElementById('clean-files');
-  if (!select) return;
-  select.innerHTML = '';
-  state.files
-    .filter((f) => f.name.toLowerCase().endsWith('.ifc') || f.name.toLowerCase().endsWith('.ifczip'))
-    .forEach((f) => {
-      select.appendChild(option(f.name, f.id));
+function renderFilesLists() {
+  document.querySelectorAll("[data-files-list]").forEach((ul) => {
+    ul.innerHTML = "";
+    state.files.forEach((f) => {
+      const li = document.createElement("li");
+      li.innerHTML = `<span>${f.name}</span><span class="muted">${(f.size / 1024).toFixed(1)} KB</span>`;
+      ul.appendChild(li);
     });
+  });
 }
 
-async function uploadFiles(event) {
-  event?.preventDefault();
-  const input = document.getElementById('file-input');
-  if (!input || !input.files.length) return;
-  const formData = new FormData();
-  Array.from(input.files).forEach((file) => formData.append('files', file));
-  const resp = await fetch(endpoints.upload, { method: 'POST', body: formData, credentials: 'include' });
+function populateFileSelects() {
+  document.querySelectorAll("[data-files-select]").forEach((sel) => {
+    sel.innerHTML = "";
+    state.files.forEach((f) => {
+      const opt = document.createElement("option");
+      opt.value = f.name;
+      opt.textContent = f.name;
+      sel.appendChild(opt);
+    });
+  });
+}
+
+async function uploadFiles() {
+  const input = el("fileInput");
+  if (!input || !input.files.length) {
+    alert("Choose file(s) to upload.");
+    return;
+  }
+  const form = new FormData();
+  for (const f of input.files) {
+    form.append("files", f);
+  }
+  const resp = await fetch(`/api/session/${state.sessionId}/upload`, { method: "POST", body: form });
   if (!resp.ok) {
-    alert('Upload failed');
+    alert("Upload failed");
     return;
   }
-  input.value = '';
+  input.value = "";
   await refreshFiles();
 }
 
-function renderDownloads(containerId, files) {
-  const container = document.getElementById(containerId);
-  if (!container) return;
-  container.innerHTML = '';
-  if (!files || !files.length) return;
-  files.forEach((f) => {
-    const link = document.createElement('a');
-    link.href = `/api/files/${f.id}`;
-    link.textContent = `Download ${f.name}`;
-    container.appendChild(link);
-  });
+async function endSession() {
+  if (!state.sessionId) return;
+  await fetch(`/api/session/${state.sessionId}`, { method: "DELETE" });
+  localStorage.removeItem("ifc_session_id");
+  state.sessionId = null;
+  state.files = [];
+  renderFilesLists();
+  populateFileSelects();
+  setSessionBadge("Session ended. Reload to start a new one.", false);
 }
 
-function appendText(targetId, text) {
-  const el = document.getElementById(targetId);
-  if (el) el.textContent = text || '';
+function getSelectedMultiple(selectEl) {
+  return Array.from(selectEl.selectedOptions || []).map((o) => o.value);
 }
 
-async function runCleaner(event) {
-  event.preventDefault();
-  const select = document.getElementById('clean-files');
+async function runCleaner() {
+  const select = el("cleanerFiles");
   if (!select) return;
-  const files = Array.from(select.selectedOptions).map((o) => o.value);
-  if (!files.length) {
-    alert('Select at least one IFC file');
-    return;
+  const files = getSelectedMultiple(select);
+  if (!files.length) return alert("Select file(s) to clean.");
+  const payload = {
+    files,
+    prefix: (el("prefix")?.value || "InfoDrainage").trim(),
+    case_insensitive: el("caseInsensitive")?.checked ?? true,
+    delete_psets_with_prefix: el("deletePsets")?.checked ?? true,
+    delete_properties_in_other_psets: el("deleteProps")?.checked ?? true,
+    drop_empty_psets: el("dropEmpty")?.checked ?? true,
+    also_remove_loose_props: el("looseProps")?.checked ?? true,
+  };
+  const resp = await fetch(`/api/session/${state.sessionId}/clean`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await resp.json();
+  if (data.reports) {
+    const text = data.reports
+      .map((r) => `=== ${r.input} → ${r.output}\nstatus: ${r.status}\nremoved: ${JSON.stringify(r.removed, null, 2)}`)
+      .join("\n\n");
+    el("cleanerStatus").textContent = text;
+    await refreshFiles();
+  } else {
+    el("cleanerStatus").textContent = JSON.stringify(data);
   }
-  const payload = {
-    file_ids: files,
-    prefix: document.getElementById('prefix').value || 'InfoDrainage',
-    case_insensitive: document.getElementById('case-insensitive').checked,
-    delete_psets_with_prefix: document.getElementById('pset-delete').checked,
-    delete_properties_in_other_psets: document.getElementById('prop-delete').checked,
-    drop_empty_psets: document.getElementById('drop-empty').checked,
-    also_remove_loose_props: document.getElementById('loose').checked,
-  };
-  const data = await fetchJSON(endpoints.clean, { method: 'POST', body: JSON.stringify(payload) });
-  const lines = [];
-  data.reports.forEach((r) => {
-    lines.push(`=== ${r.input} -> ${r.output} ===`);
-    lines.push(`Status: ${r.status}`);
-    lines.push(`Prefix: ${r.prefix}`);
-    lines.push(`Case-insensitive: ${r.case_insensitive}`);
-    lines.push('Removed:');
-    Object.entries(r.removed || {}).forEach(([k, v]) => lines.push(`  - ${k}: ${v}`));
-    if (r.notes && r.notes.length) {
-      lines.push('Notes:');
-      r.notes.forEach((n) => lines.push(`  * ${n}`));
-    }
-    lines.push('');
+}
+
+async function extractExcel() {
+  const file = el("excelIfc")?.value;
+  if (!file) return alert("Select an IFC file.");
+  const payload = { ifc_file: file };
+  const resp = await fetch(`/api/session/${state.sessionId}/excel/extract`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
-  appendText('clean-log', lines.join('\n'));
-  renderDownloads('clean-downloads', data.outputs);
-  await refreshFiles();
-}
-
-async function runExtract(event) {
-  event.preventDefault();
-  const fileId = document.getElementById('extract-ifc').value;
-  if (!fileId) return alert('Choose an IFC file');
-  const data = await fetchJSON(endpoints.extract, { method: 'POST', body: JSON.stringify({ file_id: fileId }) });
-  renderDownloads('extract-output', [data.file]);
-  await refreshFiles();
-}
-
-async function runUpdate(event) {
-  event.preventDefault();
-  const ifc = document.getElementById('update-ifc').value;
-  const excel = document.getElementById('update-excel').value;
-  if (!ifc || !excel) return alert('Select both IFC and Excel files');
-  const payload = {
-    ifc_file_id: ifc,
-    excel_file_id: excel,
-    update_mode: document.getElementById('update-mode').value,
-    add_new: document.getElementById('add-new').value,
-  };
-  const data = await fetchJSON(endpoints.update, { method: 'POST', body: JSON.stringify(payload) });
-  renderDownloads('update-output', [data.file]);
-  await refreshFiles();
-}
-
-async function loadStoreys(ifcId, selectId = 'storey') {
-  const sel = document.getElementById(selectId);
-  if (!ifcId || !sel) return;
-  const data = await fetchJSON(endpoints.storeys, { method: 'POST', body: JSON.stringify({ file_id: ifcId }) });
-  sel.innerHTML = '';
-  (data.storeys || []).forEach((s) => sel.appendChild(option(s.label, s.id)));
-}
-
-async function runGlobal(event) {
-  event.preventDefault();
-  const ifcSel = document.getElementById('global-ifc');
-  const storeySel = document.getElementById('storey');
-  if (!ifcSel || !storeySel) return;
-  const ifc = ifcSel.value;
-  const storey = storeySel.value;
-  if (!ifc || !storey) return alert('Select an IFC and storey');
-  const payload = {
-    ifc_file_id: ifc,
-    storey_id: Number(storey),
-    units_code: document.getElementById('units').value,
-    gross: document.getElementById('gross').value || null,
-    net: document.getElementById('net').value || null,
-    mom: document.getElementById('mom').value || null,
-    mirror: document.getElementById('mirror').checked,
-    target_z: document.getElementById('target-z').value || null,
-    countershift: document.getElementById('countershift').checked,
-    crs_mode: document.getElementById('crs-mode').checked,
-    update_all_mcs: document.getElementById('all-mcs').checked,
-    show_diag: document.getElementById('diag').checked,
-    crs_set_storey_elev: document.getElementById('storey-elev').checked,
-  };
-  const data = await fetchJSON(endpoints.global, { method: 'POST', body: JSON.stringify(payload) });
-  appendText('global-log', data.summary);
-  renderDownloads('global-download', [data.file]);
-  await refreshFiles();
-}
-
-async function runProxy(event) {
-  event.preventDefault();
-  const ifcSel = document.getElementById('proxy-ifc');
-  if (!ifcSel) return;
-  const ifc = ifcSel.value;
-  if (!ifc) return alert('Select an IFC file');
-  const data = await fetchJSON(endpoints.proxy, { method: 'POST', body: JSON.stringify({ file_id: ifc }) });
-  appendText('proxy-log', data.summary);
-  renderDownloads('proxy-download', [data.file]);
-  await refreshFiles();
-}
-
-function renderLevels(levels) {
-  const container = document.getElementById('levels-table');
-  const selects = ['move-source', 'move-target', 'delete-source', 'delete-target'];
-  if (container) {
-    if (!levels || !levels.length) {
-      container.textContent = 'No levels found.';
-    } else {
-      const lines = levels.map((l) => `${l.label} • GUID=${l.guid} • elements=${l.element_count}`);
-      container.textContent = lines.join('\n');
-    }
+  const data = await resp.json();
+  if (data.excel) {
+    el("excelStatus").textContent = `Excel ready: ${data.excel.name}`;
+    await refreshFiles();
+  } else {
+    el("excelStatus").textContent = JSON.stringify(data);
   }
-  selects.forEach((id) => {
-    const sel = document.getElementById(id);
-    if (!sel) return;
-    const previous = sel.value;
-    sel.innerHTML = '';
-    (levels || []).forEach((l) => sel.appendChild(option(l.label, l.id)));
-    if (previous) sel.value = previous;
+}
+
+async function applyExcel() {
+  const ifcFile = el("excelIfcUpdate")?.value;
+  const xlsFile = el("excelFileUpdate")?.value;
+  if (!ifcFile || !xlsFile) return alert("Select IFC and Excel files.");
+  const payload = {
+    ifc_file: ifcFile,
+    excel_file: xlsFile,
+    update_mode: document.querySelector('input[name="updateMode"]:checked')?.value || "update",
+    add_new: document.querySelector('input[name="addNew"]:checked')?.value || "no",
+  };
+  const resp = await fetch(`/api/session/${state.sessionId}/excel/update`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
+  const data = await resp.json();
+  if (data.ifc) {
+    el("excelStatus").textContent = `Updated IFC: ${data.ifc.name}`;
+    await refreshFiles();
+  } else {
+    el("excelStatus").textContent = JSON.stringify(data);
+  }
 }
 
-async function refreshLevelsList() {
-  const ifcSel = document.getElementById('levels-ifc');
-  if (!ifcSel || !ifcSel.value) return;
-  const data = await fetchJSON(endpoints.levelsList, { method: 'POST', body: JSON.stringify({ file_id: ifcSel.value }) });
-  renderLevels(data.levels);
-}
-
-async function addLevel(event) {
-  event.preventDefault();
-  const ifcSel = document.getElementById('levels-ifc');
-  if (!ifcSel || !ifcSel.value) return alert('Select an IFC file');
-  const payload = {
-    ifc_file_id: ifcSel.value,
-    name: document.getElementById('level-name').value,
-    elevation: document.getElementById('level-elev').value || null,
-    units_code: document.getElementById('level-units').value,
-  };
-  const data = await fetchJSON(endpoints.levelsAdd, { method: 'POST', body: JSON.stringify(payload) });
-  renderDownloads('level-add-download', [data.file]);
-  renderLevels(data.levels);
-  await refreshFiles();
-}
-
-async function moveLevelElements(event) {
-  event.preventDefault();
-  const ifcSel = document.getElementById('levels-ifc');
-  if (!ifcSel || !ifcSel.value) return alert('Select an IFC file');
-  const payload = {
-    ifc_file_id: ifcSel.value,
-    source_storey_id: Number(document.getElementById('move-source').value),
-    target_storey_id: Number(document.getElementById('move-target').value),
-  };
-  const data = await fetchJSON(endpoints.levelsMove, { method: 'POST', body: JSON.stringify(payload) });
-  renderDownloads('level-move-download', [data.file]);
-  appendText('level-move-log', `Moved ${data.moved_count} elements.`);
-  renderLevels(data.levels);
-  await refreshFiles();
-}
-
-async function deleteLevel(event) {
-  event.preventDefault();
-  const ifcSel = document.getElementById('levels-ifc');
-  if (!ifcSel || !ifcSel.value) return alert('Select an IFC file');
-  const payload = {
-    ifc_file_id: ifcSel.value,
-    delete_storey_id: Number(document.getElementById('delete-source').value),
-    target_storey_id: Number(document.getElementById('delete-target').value),
-  };
-  const data = await fetchJSON(endpoints.levelsDelete, { method: 'POST', body: JSON.stringify(payload) });
-  renderDownloads('level-delete-download', [data.file]);
-  renderLevels(data.levels);
-  await refreshFiles();
-}
-
-function setupForms() {
-  const uploadForm = document.getElementById('upload-form');
-  if (uploadForm) uploadForm.addEventListener('submit', uploadFiles);
-  const refreshBtn = document.getElementById('refresh-files');
-  if (refreshBtn) refreshBtn.addEventListener('click', refreshFiles);
-
-  const cleanForm = document.getElementById('clean-form');
-  if (cleanForm) cleanForm.addEventListener('submit', runCleaner);
-
-  const extractForm = document.getElementById('extract-form');
-  if (extractForm) extractForm.addEventListener('submit', runExtract);
-  const updateForm = document.getElementById('update-form');
-  if (updateForm) updateForm.addEventListener('submit', runUpdate);
-
-  const globalForm = document.getElementById('global-form');
-  if (globalForm) globalForm.addEventListener('submit', runGlobal);
-  const globalIfc = document.getElementById('global-ifc');
-  if (globalIfc) globalIfc.addEventListener('change', (e) => loadStoreys(e.target.value));
-
-  const proxyForm = document.getElementById('proxy-form');
-  if (proxyForm) proxyForm.addEventListener('submit', runProxy);
-
-  const levelsRefresh = document.getElementById('levels-refresh');
-  if (levelsRefresh) levelsRefresh.addEventListener('click', refreshLevelsList);
-  const levelsIfc = document.getElementById('levels-ifc');
-  if (levelsIfc) levelsIfc.addEventListener('change', refreshLevelsList);
-  const levelAddForm = document.getElementById('level-add-form');
-  if (levelAddForm) levelAddForm.addEventListener('submit', addLevel);
-  const levelMoveForm = document.getElementById('level-move-form');
-  if (levelMoveForm) levelMoveForm.addEventListener('submit', moveLevelElements);
-  const levelDeleteForm = document.getElementById('level-delete-form');
-  if (levelDeleteForm) levelDeleteForm.addEventListener('submit', deleteLevel);
-}
-
-function setupSessionCleanup() {
-  window.addEventListener('beforeunload', () => {
-    const blob = new Blob([], { type: 'application/json' });
-    navigator.sendBeacon(endpoints.close, blob);
+async function parseStoreyInfo() {
+  const file = el("storeyIfc")?.value;
+  if (!file) return alert("Select an IFC file.");
+  const payload = { ifc_file: file };
+  const resp = await fetch(`/api/session/${state.sessionId}/storeys/parse`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
+  const data = await resp.json();
+  if (el("storeyMeta")) {
+    el("storeyMeta").textContent = `${data.summary || ""} (MapConversions: ${data.map_conversions || 0})`;
+  }
+  const select = el("storeySelect");
+  if (select) {
+    select.innerHTML = "";
+    (data.storeys || []).forEach((s) => {
+      const opt = document.createElement("option");
+      opt.value = s.id;
+      opt.textContent = s.label;
+      select.appendChild(opt);
+    });
+  }
 }
 
-async function boot() {
-  setActiveNav();
-  setupForms();
-  setupSessionCleanup();
-  await initSession();
-  const levelsPage = document.body.dataset.page === 'levels';
-  if (levelsPage) await refreshLevelsList();
+async function applyStoreyChanges() {
+  const file = el("storeyIfc")?.value;
+  if (!file) return alert("Select IFC file.");
+  const storeyId = el("storeySelect")?.value;
+  if (!storeyId) return alert("Choose a storey.");
+  const payload = {
+    ifc_file: file,
+    storey_id: Number(storeyId),
+    units: el("unitsSelect")?.value || "m",
+    gross: el("grossHeight")?.value ? Number(el("grossHeight").value) : null,
+    net: el("netHeight")?.value ? Number(el("netHeight").value) : null,
+    mom: el("mom")?.value || null,
+    mirror: el("mirrorQto")?.checked ?? false,
+    target_z: el("targetZ")?.value ? Number(el("targetZ").value) : null,
+    countershift_geometry: el("countershift")?.checked ?? true,
+    use_crs_mode: el("useCRS")?.checked ?? true,
+    update_all_mcs: el("allMC")?.checked ?? true,
+    show_diag: el("diag")?.checked ?? true,
+    crs_set_storey_elev: el("crsElev")?.checked ?? true,
+  };
+  const resp = await fetch(`/api/session/${state.sessionId}/storeys/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await resp.json();
+  if (data.summary && el("storeyStatus")) {
+    el("storeyStatus").textContent = data.summary;
+    await refreshFiles();
+  } else if (el("storeyStatus")) {
+    el("storeyStatus").textContent = JSON.stringify(data);
+  }
 }
 
-document.addEventListener('DOMContentLoaded', boot);
+async function runProxyMapper() {
+  const file = el("proxyIfc")?.value;
+  if (!file) return alert("Select IFC file.");
+  const payload = { ifc_file: file };
+  const resp = await fetch(`/api/session/${state.sessionId}/proxy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await resp.json();
+  if (data.summary && el("proxyStatus")) {
+    el("proxyStatus").textContent = data.summary;
+    await refreshFiles();
+  } else if (el("proxyStatus")) {
+    el("proxyStatus").textContent = JSON.stringify(data);
+  }
+}
+
+function wireEvents() {
+  const uploadBtn = el("uploadBtn");
+  if (uploadBtn) uploadBtn.addEventListener("click", uploadFiles);
+
+  const refreshBtn = el("refreshFiles");
+  if (refreshBtn) refreshBtn.addEventListener("click", refreshFiles);
+
+  const resetBtn = el("resetSession");
+  if (resetBtn) resetBtn.addEventListener("click", endSession);
+
+  const cleanerBtn = el("runCleaner");
+  if (cleanerBtn) cleanerBtn.addEventListener("click", runCleaner);
+
+  const extractBtn = el("extractExcel");
+  if (extractBtn) extractBtn.addEventListener("click", extractExcel);
+
+  const applyExcelBtn = el("applyExcel");
+  if (applyExcelBtn) applyExcelBtn.addEventListener("click", applyExcel);
+
+  const parseStoreysBtn = el("parseStoreys");
+  if (parseStoreysBtn) parseStoreysBtn.addEventListener("click", parseStoreyInfo);
+
+  const applyStoreysBtn = el("applyStoreys");
+  if (applyStoreysBtn) applyStoreysBtn.addEventListener("click", applyStoreyChanges);
+
+  const proxyBtn = el("runProxy");
+  if (proxyBtn) proxyBtn.addEventListener("click", runProxyMapper);
+}
+
+document.addEventListener("DOMContentLoaded", async () => {
+  await ensureSession();
+  wireEvents();
+});

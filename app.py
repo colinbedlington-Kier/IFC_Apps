@@ -83,6 +83,19 @@ class SessionStore:
         self.touch(session_id)
         return self.session_path(session_id)
 
+    def ensure(self, session_id: str) -> str:
+        if not self.exists(session_id):
+            raise HTTPException(status_code=404, detail="Session not found")
+        self.touch(session_id)
+        return self.session_path(session_id)
+
+
+SESSION_STORE = SessionStore(os.path.join(tempfile.gettempdir(), "ifc_app_sessions"))
+
+
+# ----------------------------------------------------------------------------
+# IFC cleaner (from original app.py)
+# ----------------------------------------------------------------------------
 
 SESSION_STORE = SessionStore(os.path.join(tempfile.gettempdir(), "ifc_app_sessions"))
 
@@ -1518,8 +1531,33 @@ def shutdown_cleanup():
 
 
 @app.get("/", response_class=HTMLResponse)
-def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+def upload_page(request: Request):
+    return templates.TemplateResponse("upload.html", {"request": request, "active": "upload"})
+
+
+@app.get("/cleaner", response_class=HTMLResponse)
+def cleaner_page(request: Request):
+    return templates.TemplateResponse("cleaner.html", {"request": request, "active": "cleaner"})
+
+
+@app.get("/excel", response_class=HTMLResponse)
+def excel_page(request: Request):
+    return templates.TemplateResponse("excel.html", {"request": request, "active": "excel"})
+
+
+@app.get("/storeys", response_class=HTMLResponse)
+def storeys_page(request: Request):
+    return templates.TemplateResponse("storeys.html", {"request": request, "active": "storeys"})
+
+
+@app.get("/proxy", response_class=HTMLResponse)
+def proxy_page(request: Request):
+    return templates.TemplateResponse("proxy.html", {"request": request, "active": "proxy"})
+
+
+@app.get("/files", response_class=HTMLResponse)
+def files_page(request: Request):
+    return templates.TemplateResponse("files.html", {"request": request, "active": "files"})
 
 
 @app.post("/api/session")
