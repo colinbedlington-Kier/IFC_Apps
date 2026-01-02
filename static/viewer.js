@@ -1,12 +1,12 @@
-import { IFCViewerAPI } from "https://cdn.jsdelivr.net/npm/web-ifc-viewer@1.0.172/dist/IFCViewerAPI.js";
-import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js";
-
 const state = {
   sessionId: null,
   files: [],
   viewer: null,
   activeModelID: null,
 };
+
+let IFCViewerAPI = null;
+let THREE = null;
 
 const el = (id) => document.getElementById(id);
 
@@ -71,7 +71,26 @@ function setStatus(text) {
   if (status) status.textContent = text;
 }
 
-function createViewer() {
+async function loadViewerLibs() {
+  if (IFCViewerAPI && THREE) return;
+  try {
+    const [viewerMod, threeMod] = await Promise.all([
+      import("https://cdn.jsdelivr.net/npm/web-ifc-viewer@1.0.172/dist/IFCViewerAPI.js"),
+      import("https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js"),
+    ]);
+    IFCViewerAPI = viewerMod.IFCViewerAPI;
+    THREE = threeMod;
+  } catch (err) {
+    console.error("Viewer dependencies failed to load", err);
+    setStatus(
+      "Viewer dependencies could not load. Allow CDN access to jsdelivr or provide local viewer assets."
+    );
+    throw err;
+  }
+}
+
+async function createViewer() {
+  await loadViewerLibs();
   const container = el("viewer-canvas");
   if (!container) return null;
   container.innerHTML = "";
@@ -103,7 +122,7 @@ async function loadSelectedFile() {
     const file = new File([blob], fileName);
 
     state.viewer?.dispose?.();
-    state.viewer = createViewer();
+    state.viewer = await createViewer();
     if (!state.viewer) throw new Error("Viewer could not start");
     const model = await state.viewer.IFC.loadIfcFile(file, true);
     state.activeModelID = model.modelID;
