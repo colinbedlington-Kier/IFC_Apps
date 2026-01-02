@@ -104,6 +104,13 @@ SESSION_STORE = SessionStore(os.path.join(tempfile.gettempdir(), "ifc_app_sessio
 # IFC cleaner (from original app.py)
 # ----------------------------------------------------------------------------
 
+SESSION_STORE = SessionStore(os.path.join(tempfile.gettempdir(), "ifc_app_sessions"))
+
+
+# ----------------------------------------------------------------------------
+# IFC cleaner (from original app.py)
+# ----------------------------------------------------------------------------
+
 def clean_ifc_file(
     in_path: str,
     out_path: str,
