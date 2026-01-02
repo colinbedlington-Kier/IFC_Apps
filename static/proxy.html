@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Type Mapper</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body data-page="proxy">
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-icon">IFC</div>
+      <div>
+        <p class="eyebrow">SEI-inspired workspace</p>
+        <h1>IFC Toolkit Hub</h1>
+      </div>
+    </div>
+    <nav class="nav-tabs" aria-label="Tool navigation">
+      <a class="nav-link" data-page="upload" href="/static/index.html">Uploads</a>
+      <a class="nav-link" data-page="cleaner" href="/static/cleaner.html">Cleaner</a>
+      <a class="nav-link" data-page="excel" href="/static/excel.html">Excel Sync</a>
+      <a class="nav-link" data-page="globalz" href="/static/globalz.html">Global Z</a>
+      <a class="nav-link" data-page="proxy" href="/static/proxy.html">Type Mapper</a>
+      <a class="nav-link" data-page="levels" href="/static/levels.html">Levels</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="panel active">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Civil 3D-friendly</p>
+          <h2>Proxy → Type mapper</h2>
+          <p class="lede">Retype IFCBUILDINGELEMENTPROXY instances and their types into IFC2x3 domain entities.</p>
+        </div>
+        <div class="pill">IFC → IFC</div>
+      </div>
+      <form id="proxy-form" class="card tool-card">
+        <div class="field">
+          <label for="proxy-ifc">IFC file</label>
+          <select id="proxy-ifc"></select>
+        </div>
+        <button type="submit" class="primary">Retype IFC</button>
+      </form>
+      <div class="card">
+        <div class="card-head"><h3>Summary</h3></div>
+        <pre id="proxy-log" class="log"></pre>
+        <div id="proxy-download" class="download-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
