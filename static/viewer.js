@@ -31,9 +31,11 @@ async function ensureSession() {
     localStorage.setItem("ifc_session_id", state.sessionId);
     setSessionBadge(`Session ${state.sessionId.slice(0, 8)}…`, true);
     await refreshFiles();
+    setStatus(state.files.length ? "Select an IFC to view." : "Session ready. Upload a file first.");
   } catch (err) {
     console.error(err);
     setSessionBadge("Session error", false);
+    setStatus("Session error. Check connectivity.");
   }
 }
 
