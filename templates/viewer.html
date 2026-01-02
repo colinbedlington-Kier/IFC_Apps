@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title">
+    <h2>IFC Viewer</h2>
+    <span class="badge">Session-aware</span>
+  </div>
+  <p class="muted">Open uploaded IFCs in-browser with IFC.js, inspect properties, and toggle overlays without re-uploading.</p>
+</div>
+
+<div class="card viewer-shell">
+  <div class="viewer-toolbar">
+    <div class="field">
+      <label for="viewer-files">Session file</label>
+      <select id="viewer-files" data-files-select></select>
+    </div>
+    <div class="toolbar-actions">
+      <button type="button" class="btn secondary" id="refresh-session-files">Refresh files</button>
+      <button type="button" class="btn secondary" id="load-selection">Load in viewer</button>
+      <button type="button" class="btn" id="fit-scene">Fit to view</button>
+    </div>
+  </div>
+
+  <div class="viewer-toggles">
+    <label class="inline"><input type="checkbox" id="toggle-layers" checked /> Show layer tree</label>
+    <label class="inline"><input type="checkbox" id="toggle-properties" checked /> Show properties</label>
+    <label class="inline"><input type="checkbox" id="toggle-edges" /> Outline edges</label>
+    <label class="inline"><input type="checkbox" id="toggle-section" /> Add section plane</label>
+  </div>
+
+  <div class="viewer-layout">
+    <aside class="viewer-panel" id="layers-panel">
+      <div class="section-title" style="margin:0 0 6px 0"><h3>Layers</h3></div>
+      <div id="layers-list" class="viewer-list muted">Load an IFC to see its spatial tree.</div>
+    </aside>
+
+    <div id="viewer-canvas" class="viewer-canvas" role="application" aria-label="IFC scene"></div>
+
+    <aside class="viewer-panel" id="properties-panel">
+      <div class="section-title" style="margin:0 0 6px 0"><h3>Properties</h3></div>
+      <div id="properties-list" class="viewer-list muted">Click an element to see its metadata.</div>
+    </aside>
+  </div>
+
+  <div id="viewer-status" class="muted">Checking session…</div>
+</div>
+
+<script type="module" src="/static/viewer.js"></script>
+{% endblock %}
