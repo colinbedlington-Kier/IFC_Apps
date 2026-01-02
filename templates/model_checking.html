@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title">
+    <h2>Model Checking (Editable)</h2>
+    <span class="badge">Editable tables + classification write-back</span>
+  </div>
+  <p class="muted">
+    Tables are generated from the DfE model checking spreadsheet. Pick an IFC file from your session, filter by RIBA stage, and edit values inline. Changes stay in-memory until you apply them.
+  </p>
+  <div class="controls-grid">
+    <div>
+      <label for="mcIfc">IFC file</label>
+      <select id="mcIfc" data-files-select></select>
+    </div>
+    <div>
+      <label for="mcStage">RIBA stage filter</label>
+      <select id="mcStage">
+        <option value="">All</option>
+      </select>
+    </div>
+    <div>
+      <label for="mcEntity">Entity filter (optional)</label>
+      <input id="mcEntity" type="text" placeholder="e.g. IfcSpace or IfcDoor" />
+    </div>
+    <div class="inline">
+      <button class="btn" id="mcLoad">Load tables</button>
+      <button class="btn secondary" id="mcApply">Apply changes</button>
+      <button class="btn secondary" id="mcDownload" disabled>Download updated IFC</button>
+    </div>
+  </div>
+
+  <div id="mcSummary" class="status" style="margin-top: 10px"></div>
+
+  <div class="mc-layout">
+    <div class="mc-sections">
+      <div id="mcSections"></div>
+    </div>
+    <div class="mc-sidebar">
+      <h3>Pending edits</h3>
+      <div id="mcChanges" class="status small-scroll"></div>
+      <h3>Session change log</h3>
+      <div id="mcAudit" class="status small-scroll"></div>
+    </div>
+  </div>
+</div>
+<script src="/static/model_checking.js"></script>
+{% endblock %}

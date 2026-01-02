@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title">
+    <h2>Admin / Mapping</h2>
+    <span class="badge">Define psets, quantities & expressions</span>
+  </div>
+  <p class="muted">
+    Unmapped checks from the spreadsheet appear below. Use this screen to bind them to attributes, properties, quantities, or classification systems. Expressions are stored in <code>config/check_expressions.json</code>.
+  </p>
+  <div class="two-col">
+    <div>
+      <label for="mapCheckSelect">Unmapped check</label>
+      <select id="mapCheckSelect"></select>
+      <label for="mapKind">Field type</label>
+      <select id="mapKind">
+        <option value="attribute">Attribute</option>
+        <option value="property">Property</option>
+        <option value="quantity">Quantity</option>
+        <option value="classification">Classification</option>
+        <option value="predefinedtype">PredefinedType</option>
+      </select>
+      <div class="two-col" style="margin-top: 8px">
+        <div>
+          <label for="mapAttribute">Attribute name</label>
+          <input id="mapAttribute" type="text" placeholder="Name, Description, Phase…" />
+        </div>
+        <div>
+          <label for="mapPset">Pset / Qto</label>
+          <input id="mapPset" type="text" placeholder="Pset_RoomCommon or BaseQuantities" />
+        </div>
+        <div>
+          <label for="mapProperty">Property / Quantity name</label>
+          <input id="mapProperty" type="text" placeholder="RoomTag, NetArea…" />
+        </div>
+        <div>
+          <label for="mapClassification">Classification system</label>
+          <input id="mapClassification" type="text" placeholder="Uniclass 2015" />
+        </div>
+      </div>
+      <label for="mapExpression" style="margin-top: 8px">Expression (optional)</label>
+      <input id="mapExpression" type="text" placeholder="{Pset_RoomCommon.RoomTag}-{Name}" />
+      <button class="btn" id="saveMapping" style="margin-top: 10px">Save mapping</button>
+      <div id="mapStatus" class="status" style="margin-top: 10px"></div>
+    </div>
+    <div>
+      <h3>Definitions overview</h3>
+      <div id="mapList" class="status tall-scroll"></div>
+    </div>
+  </div>
+</div>
+<script src="/static/mappings.js"></script>
+{% endblock %}

@@ -1,0 +1,7 @@
+{
+  "by_check_id": {},
+  "by_classification_system": {
+    "Uniclass 2015": "{Pset_RoomCommon.RoomTag}-{Name}",
+    "DfE ADS Classification": "{Class.Uniclass 2015}/{Name}"
+  }
+}
