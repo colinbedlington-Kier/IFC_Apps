@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IFC Toolkit Hub</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <nav>
+        <div class="logo">SEI · IFC Toolkit</div>
+        <div class="tagline">
+          Local-first workflows for IFC cleaning, Excel round-tripping, storey
+          adjustments, and proxy remapping. No Gradio required.
+        </div>
+        <a class="nav-link" href="#upload">📂 Upload & Session</a>
+        <a class="nav-link" href="#cleaner">🧹 Cleaner</a>
+        <a class="nav-link" href="#excel">📑 Excel Extract/Update</a>
+        <a class="nav-link" href="#storeys">🏢 Storey & Z Control</a>
+        <a class="nav-link" href="#proxy">🧭 Proxy → Types</a>
+        <a class="nav-link" href="#files">📁 Session Files</a>
+      </nav>
+
+      <main>
+        <div class="card" id="upload">
+          <div class="section-title">
+            <h2>Session & Uploads</h2>
+            <span class="badge" id="sessionStatus">Establishing session…</span>
+          </div>
+          <p class="muted">
+            Files live only for your session (TTL 6h). End the session to purge
+            everything immediately.
+          </p>
+          <div class="two-col">
+            <div>
+              <label for="fileInput">Upload IFC / Excel</label>
+              <input id="fileInput" type="file" multiple />
+              <div class="inline" style="margin-top: 10px">
+                <button class="btn" id="uploadBtn">Upload</button>
+                <button class="btn secondary" id="refreshFiles">Refresh list</button>
+                <button class="btn danger" id="resetSession">End session</button>
+              </div>
+            </div>
+            <div>
+              <label>Session Files</label>
+              <ul class="files-list" id="filesList"></ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid">
+          <div class="card" id="cleaner">
+            <div class="section-title">
+              <h3>IFC Cleaner</h3>
+              <span class="badge">InfoDrainage Pset removal</span>
+            </div>
+            <div class="two-col">
+              <div>
+                <label for="cleanerFiles">Choose IFC file(s)</label>
+                <select id="cleanerFiles" multiple></select>
+              </div>
+              <div>
+                <label for="prefix">Prefix to remove</label>
+                <input id="prefix" type="text" value="InfoDrainage" />
+                <div class="inline" style="margin-top: 8px">
+                  <label><input type="checkbox" id="caseInsensitive" checked /> Case-insensitive</label>
+                  <label><input type="checkbox" id="deletePsets" checked /> Delete Psets</label>
+                  <label><input type="checkbox" id="deleteProps" checked /> Delete Props</label>
+                  <label><input type="checkbox" id="dropEmpty" checked /> Drop empty</label>
+                  <label><input type="checkbox" id="looseProps" checked /> Loose props</label>
+                </div>
+              </div>
+            </div>
+            <button class="btn" id="runCleaner" style="margin-top: 10px">Run Cleaner</button>
+            <div class="status" id="cleanerStatus"></div>
+          </div>
+
+          <div class="card" id="excel">
+            <div class="section-title">
+              <h3>Excel Extract / Update</h3>
+              <span class="badge">COBie + Uniclass aware</span>
+            </div>
+            <div class="two-col">
+              <div>
+                <label for="excelIfc">IFC for extract</label>
+                <select id="excelIfc"></select>
+                <button class="btn" id="extractExcel" style="margin-top: 8px">Extract to Excel</button>
+              </div>
+              <div>
+                <label for="excelIfcUpdate">IFC to update</label>
+                <select id="excelIfcUpdate"></select>
+                <label for="excelFileUpdate" style="margin-top: 10px">Excel source</label>
+                <select id="excelFileUpdate"></select>
+                <div class="inline" style="margin-top: 8px">
+                  <label><input type="radio" name="updateMode" value="update" checked /> Update</label>
+                  <label><input type="radio" name="updateMode" value="refresh" /> Refresh</label>
+                  <label><input type="radio" name="addNew" value="no" checked /> No new</label>
+                  <label><input type="radio" name="addNew" value="yes" /> Add new</label>
+                </div>
+                <button class="btn" id="applyExcel" style="margin-top: 8px">Apply Excel → IFC</button>
+              </div>
+            </div>
+            <div class="status" id="excelStatus"></div>
+          </div>
+
+          <div class="card" id="storeys">
+            <div class="section-title">
+              <h3>Storey & Global Z</h3>
+              <span class="badge">BaseQuantities + CRS</span>
+            </div>
+            <div class="two-col">
+              <div>
+                <label for="storeyIfc">IFC file</label>
+                <select id="storeyIfc"></select>
+                <button class="btn" id="parseStoreys" style="margin-top: 8px">Parse Storeys</button>
+                <div class="muted" id="storeyMeta"></div>
+                <label for="storeySelect" style="margin-top: 10px">Storey</label>
+                <select id="storeySelect"></select>
+              </div>
+              <div>
+                <div class="two-col">
+                  <div>
+                    <label for="grossHeight">GrossHeight</label>
+                    <input id="grossHeight" type="number" step="any" />
+                  </div>
+                  <div>
+                    <label for="netHeight">NetHeight</label>
+                    <input id="netHeight" type="number" step="any" />
+                  </div>
+                </div>
+                <label for="mom">Method of Measurement</label>
+                <input id="mom" type="text" />
+                <div class="two-col" style="margin-top: 8px">
+                  <div>
+                    <label for="targetZ">Target Z</label>
+                    <input id="targetZ" type="number" step="any" />
+                  </div>
+                  <div>
+                    <label for="unitsSelect">Units</label>
+                    <select id="unitsSelect">
+                      <option value="m">m</option>
+                      <option value="mm">mm</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="inline" style="margin-top: 8px">
+                  <label><input type="checkbox" id="mirrorQto" /> Mirror to Qto</label>
+                  <label><input type="checkbox" id="countershift" checked /> Counter-shift geometry</label>
+                  <label><input type="checkbox" id="useCRS" checked /> CRS-aware</label>
+                  <label><input type="checkbox" id="allMC" checked /> Update all MapConversions</label>
+                  <label><input type="checkbox" id="diag" checked /> Diagnostics</label>
+                  <label><input type="checkbox" id="crsElev" checked /> CRS set storey elev</label>
+                </div>
+                <button class="btn" id="applyStoreys" style="margin-top: 10px">Apply</button>
+              </div>
+            </div>
+            <div class="status" id="storeyStatus"></div>
+          </div>
+
+          <div class="card" id="proxy">
+            <div class="section-title">
+              <h3>Proxy → Typed Mapper</h3>
+              <span class="badge">IFC2x3 patterns</span>
+            </div>
+            <label for="proxyIfc">IFC file</label>
+            <select id="proxyIfc"></select>
+            <button class="btn" id="runProxy" style="margin-top: 8px">Rewrite proxies</button>
+            <div class="status" id="proxyStatus"></div>
+          </div>
+        </div>
+
+        <div class="card" id="files">
+          <div class="section-title">
+            <h3>Session Files</h3>
+            <span class="badge">Download outputs</span>
+          </div>
+          <ul class="files-list" id="filesListBottom"></ul>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const state = {
+        sessionId: null,
+      };
+
+      const el = (id) => document.getElementById(id);
+
+      function setSessionBadge(text, ok = true) {
+        const badge = el("sessionStatus");
+        badge.textContent = text;
+        badge.classList.toggle("danger-text", !ok);
+        badge.classList.toggle("success-text", ok);
+      }
+
+      async function ensureSession() {
+        const existing = localStorage.getItem("ifc_session_id");
+        const resp = await fetch("/api/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: existing }),
+        });
+        const data = await resp.json();
+        state.sessionId = data.session_id;
+        localStorage.setItem("ifc_session_id", state.sessionId);
+        setSessionBadge(`Session ${state.sessionId.slice(0, 8)}…`, true);
+        await refreshFiles();
+      }
+
+      async function refreshFiles() {
+        if (!state.sessionId) return;
+        const resp = await fetch(`/api/session/${state.sessionId}/files`);
+        const data = await resp.json();
+        const ul = el("filesList");
+        const ul2 = el("filesListBottom");
+        ul.innerHTML = "";
+        ul2.innerHTML = "";
+        const selectIds = ["cleanerFiles", "excelIfc", "excelIfcUpdate", "excelFileUpdate", "storeyIfc", "proxyIfc"];
+        const selects = selectIds.map((id) => el(id));
+        selects.forEach((s) => (s.innerHTML = ""));
+        data.files.forEach((f) => {
+          const li = document.createElement("li");
+          li.innerHTML = `<span>${f.name}</span><span class=\"muted\">${(f.size / 1024).toFixed(1)} KB</span>`;
+          const li2 = li.cloneNode(true);
+          ul.appendChild(li);
+          ul2.appendChild(li2);
+          selects.forEach((s) => {
+            const opt = document.createElement("option");
+            opt.value = f.name;
+            opt.textContent = f.name;
+            s.appendChild(opt);
+          });
+        });
+      }
+
+      async function uploadFiles() {
+        const files = el("fileInput").files;
+        if (!files.length) return alert("Choose file(s) to upload.");
+        const form = new FormData();
+        for (const f of files) {
+          form.append("files", f);
+        }
+        const resp = await fetch(`/api/session/${state.sessionId}/upload`, { method: "POST", body: form });
+        if (!resp.ok) {
+          alert("Upload failed");
+          return;
+        }
+        await refreshFiles();
+        el("fileInput").value = "";
+      }
+
+      function appendStatus(elId, content) {
+        el(elId).textContent = content;
+      }
+
+      function getSelectedMultiple(selectEl) {
+        return Array.from(selectEl.selectedOptions).map((o) => o.value);
+      }
+
+      async function runCleaner() {
+        const files = getSelectedMultiple(el("cleanerFiles"));
+        if (!files.length) {
+          alert("Select file(s) to clean.");
+          return;
+        }
+        const payload = {
+          files,
+          prefix: el("prefix").value || "InfoDrainage",
+          case_insensitive: el("caseInsensitive").checked,
+          delete_psets_with_prefix: el("deletePsets").checked,
+          delete_properties_in_other_psets: el("deleteProps").checked,
+          drop_empty_psets: el("dropEmpty").checked,
+          also_remove_loose_props: el("looseProps").checked,
+        };
+        const resp = await fetch(`/api/session/${state.sessionId}/clean`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (data.reports) {
+          const text = data.reports
+            .map((r) => `=== ${r.input} → ${r.output}\nstatus: ${r.status}\nremoved: ${JSON.stringify(r.removed, null, 2)}`)
+            .join("\n\n");
+          appendStatus("cleanerStatus", text);
+          await refreshFiles();
+        } else {
+          appendStatus("cleanerStatus", JSON.stringify(data));
+        }
+      }
+
+      async function extractExcel() {
+        const file = el("excelIfc").value;
+        if (!file) return alert("Select an IFC file.");
+        const payload = { ifc_file: file };
+        const resp = await fetch(`/api/session/${state.sessionId}/excel/extract`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (data.excel) {
+          appendStatus("excelStatus", `Excel ready: ${data.excel.name}`);
+          await refreshFiles();
+        } else {
+          appendStatus("excelStatus", JSON.stringify(data));
+        }
+      }
+
+      async function applyExcel() {
+        const ifcFile = el("excelIfcUpdate").value;
+        const xlsFile = el("excelFileUpdate").value;
+        if (!ifcFile || !xlsFile) return alert("Select IFC and Excel files.");
+        const payload = {
+          ifc_file: ifcFile,
+          excel_file: xlsFile,
+          update_mode: document.querySelector('input[name="updateMode"]:checked').value,
+          add_new: document.querySelector('input[name="addNew"]:checked').value,
+        };
+        const resp = await fetch(`/api/session/${state.sessionId}/excel/update`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (data.ifc) {
+          appendStatus("excelStatus", `Updated IFC: ${data.ifc.name}`);
+          await refreshFiles();
+        } else {
+          appendStatus("excelStatus", JSON.stringify(data));
+        }
+      }
+
+      async function parseStoreyInfo() {
+        const file = el("storeyIfc").value;
+        if (!file) return alert("Select an IFC file.");
+        const payload = { ifc_file: file };
+        const resp = await fetch(`/api/session/${state.sessionId}/storeys/parse`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        el("storeyMeta").textContent = `${data.summary || ""} (MapConversions: ${data.map_conversions || 0})`;
+        const select = el("storeySelect");
+        select.innerHTML = "";
+        (data.storeys || []).forEach((s) => {
+          const opt = document.createElement("option");
+          opt.value = s.id;
+          opt.textContent = s.label;
+          select.appendChild(opt);
+        });
+      }
+
+      async function applyStoreyChanges() {
+        const file = el("storeyIfc").value;
+        if (!file) return alert("Select IFC file.");
+        const storeyId = el("storeySelect").value;
+        if (!storeyId) return alert("Choose a storey.");
+        const payload = {
+          ifc_file: file,
+          storey_id: Number(storeyId),
+          units: el("unitsSelect").value,
+          gross: el("grossHeight").value ? Number(el("grossHeight").value) : null,
+          net: el("netHeight").value ? Number(el("netHeight").value) : null,
+          mom: el("mom").value || null,
+          mirror: el("mirrorQto").checked,
+          target_z: el("targetZ").value ? Number(el("targetZ").value) : null,
+          countershift_geometry: el("countershift").checked,
+          use_crs_mode: el("useCRS").checked,
+          update_all_mcs: el("allMC").checked,
+          show_diag: el("diag").checked,
+          crs_set_storey_elev: el("crsElev").checked,
+        };
+        const resp = await fetch(`/api/session/${state.sessionId}/storeys/apply`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (data.summary) {
+          appendStatus("storeyStatus", data.summary);
+          await refreshFiles();
+        } else {
+          appendStatus("storeyStatus", JSON.stringify(data));
+        }
+      }
+
+      async function runProxyMapper() {
+        const file = el("proxyIfc").value;
+        if (!file) return alert("Select IFC file.");
+        const payload = { ifc_file: file };
+        const resp = await fetch(`/api/session/${state.sessionId}/proxy`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (data.summary) {
+          appendStatus("proxyStatus", data.summary);
+          await refreshFiles();
+        } else {
+          appendStatus("proxyStatus", JSON.stringify(data));
+        }
+      }
+
+      async function endSession() {
+        if (!state.sessionId) return;
+        await fetch(`/api/session/${state.sessionId}`, { method: "DELETE" });
+        localStorage.removeItem("ifc_session_id");
+        state.sessionId = null;
+        el("filesList").innerHTML = "";
+        el("filesListBottom").innerHTML = "";
+        setSessionBadge("Session ended. Refresh to start a new one.", false);
+      }
+
+      document.addEventListener("DOMContentLoaded", () => {
+        ensureSession();
+        el("uploadBtn").addEventListener("click", uploadFiles);
+        el("refreshFiles").addEventListener("click", refreshFiles);
+        el("resetSession").addEventListener("click", endSession);
+        el("runCleaner").addEventListener("click", runCleaner);
+        el("extractExcel").addEventListener("click", extractExcel);
+        el("applyExcel").addEventListener("click", applyExcel);
+        el("parseStoreys").addEventListener("click", parseStoreyInfo);
+        el("applyStoreys").addEventListener("click", applyStoreyChanges);
+        el("runProxy").addEventListener("click", runProxyMapper);
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,266 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap");
+
+:root {
+  --bg: #0c0d1a;
+  --panel: #15172b;
+  --border: #2b2f4a;
+  --accent: #6ee7ff;
+  --accent-2: #8b5cf6;
+  --text: #e5e7f3;
+  --muted: #9ca3af;
+  --danger: #f87171;
+  --success: #34d399;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+a {
+  color: var(--accent);
+}
+
+.wrap {
+  display: flex;
+  min-height: 100vh;
+}
+
+nav {
+  width: 260px;
+  background: #0f1024;
+  padding: 24px 16px;
+  border-right: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+
+.logo {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin-bottom: 12px;
+  display: block;
+  color: var(--accent);
+}
+
+.tagline {
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 24px;
+}
+
+.nav-link {
+  display: block;
+  padding: 12px 14px;
+  border-radius: 10px;
+  color: var(--text);
+  text-decoration: none;
+  margin-bottom: 8px;
+  border: 1px solid transparent;
+  transition: 0.2s ease;
+}
+
+.nav-link:hover,
+.nav-link:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(110, 231, 255, 0.2);
+}
+
+.nav-link.active {
+  border-color: var(--accent);
+  background: rgba(110, 231, 255, 0.08);
+}
+
+.nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+
+main {
+  flex: 1;
+  padding: 32px;
+}
+
+.grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
+}
+
+.card h2,
+.card h3 {
+  margin-top: 0;
+}
+
+label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+input[type="text"],
+input[type="number"],
+select,
+textarea {
+  width: 100%;
+  background: #0f1024;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.chips {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  background: #1f223a;
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  border-radius: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-weight: 600;
+  cursor: pointer;
+  color: #0d0f1a;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+
+.btn.secondary {
+  background: #1f223a;
+  color: var(--text);
+}
+
+.btn.danger {
+  background: var(--danger);
+  color: #0b0a14;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px 0;
+}
+
+.badge {
+  background: rgba(110, 231, 255, 0.12);
+  color: var(--accent);
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.status {
+  background: #0f1024;
+  border-radius: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  min-height: 80px;
+  white-space: pre-wrap;
+}
+
+.pill {
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #1f223a;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.files-list {
+  max-height: 200px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  background: #0f1024;
+}
+
+.files-list li {
+  list-style: none;
+  margin-bottom: 6px;
+  color: var(--text);
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.inline {
+  display: inline-flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.two-col {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+code {
+  background: #0f1024;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+.danger-text {
+  color: var(--danger);
+}
+
+.success-text {
+  color: var(--success);
+}
+
+.session-badge {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #1f223a;
+  color: var(--muted);
+  font-size: 13px;
+  border: 1px solid var(--border);
+}
