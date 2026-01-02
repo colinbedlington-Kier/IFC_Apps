@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IFC Toolkit Hub</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body data-page="upload">
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-icon">IFC</div>
+      <div>
+        <p class="eyebrow">SEI-inspired workspace</p>
+        <h1>IFC Toolkit Hub</h1>
+      </div>
+    </div>
+    <nav class="nav-tabs" aria-label="Tool navigation">
+      <a class="nav-link active" data-page="upload" href="/static/index.html">Uploads</a>
+      <a class="nav-link" data-page="cleaner" href="/static/cleaner.html">Cleaner</a>
+      <a class="nav-link" data-page="excel" href="/static/excel.html">Excel Sync</a>
+      <a class="nav-link" data-page="globalz" href="/static/globalz.html">Global Z</a>
+      <a class="nav-link" data-page="proxy" href="/static/proxy.html">Type Mapper</a>
+      <a class="nav-link" data-page="levels" href="/static/levels.html">Levels</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="panel active">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Session-aware</p>
+          <h2>Upload once, reuse everywhere</h2>
+          <p class="lede">Files uploaded in this session stay available to all tools until you close the page. We clear the cache after you leave.</p>
+        </div>
+        <div class="pill" id="session-pill">Session ready</div>
+      </div>
+      <form id="upload-form" class="card upload-card">
+        <div class="upload-drop">
+          <input type="file" id="file-input" name="files" multiple />
+          <p><strong>Drag & drop</strong> or choose IFC / Excel files.</p>
+          <p class="hint">Accepted: .ifc, .ifczip, .xlsx</p>
+        </div>
+        <button type="submit" class="primary">Upload</button>
+      </form>
+      <div class="card" id="file-inventory">
+        <div class="card-head">
+          <h3>Session files</h3>
+          <button type="button" class="ghost" id="refresh-files">Refresh</button>
+        </div>
+        <div id="file-list" class="file-list"></div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h3>Tools</h3>
+          <p class="hint">Each tool opens on its own page to leave room for future expansion.</p>
+        </div>
+        <div class="file-list">
+          <a class="nav-link" href="/static/cleaner.html">Cleaner</a>
+          <a class="nav-link" href="/static/excel.html">Excel Sync</a>
+          <a class="nav-link" href="/static/globalz.html">Global Z</a>
+          <a class="nav-link" href="/static/proxy.html">Type Mapper</a>
+          <a class="nav-link" href="/static/levels.html">Levels manager</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
