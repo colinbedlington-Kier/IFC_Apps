@@ -1,0 +1,28 @@
+{
+  "by_check_id": {},
+  "entity_defaults": {
+    "IfcProject": {
+      "Name": {"kind": "attribute", "attribute": "Name"},
+      "Description": {"kind": "attribute", "attribute": "Description"},
+      "Phase": {"kind": "attribute", "attribute": "Phase"}
+    },
+    "IfcBuildingStorey": {
+      "NominalHeight": {"kind": "attribute", "attribute": "ElevationOfRefHeight"},
+      "Height": {"kind": "quantity", "qto": "BaseQuantities", "quantity": "Height"}
+    },
+    "IfcSpace": {
+      "RoomTag": {"kind": "property", "pset": "Pset_RoomCommon", "property": "RoomTag"},
+      "NetArea": {"kind": "quantity", "qto": "BaseQuantities", "quantity": "NetArea"},
+      "GrossArea": {"kind": "quantity", "qto": "BaseQuantities", "quantity": "GrossArea"}
+    }
+  },
+  "classification_defaults": {
+    "Uniclass 2015": {
+      "system_name": "Uniclass 2015",
+      "source": "https://uniclass.thenbs.com"
+    },
+    "DfE ADS Classification": {
+      "system_name": "DfE ADS Classification"
+    }
+  }
+}
