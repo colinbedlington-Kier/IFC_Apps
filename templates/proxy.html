@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title">
+    <h2>Proxy → Typed Mapper</h2>
+    <span class="badge">IFC2x3 patterns</span>
+  </div>
+  <label for="proxyIfc">IFC file</label>
+  <select id="proxyIfc" data-files-select></select>
+  <button class="btn" id="runProxy" style="margin-top: 8px">Rewrite proxies</button>
+  <div class="status" id="proxyStatus"></div>
+</div>
+{% endblock %}
