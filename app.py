@@ -1774,6 +1774,11 @@ def levels_page(request: Request):
     return templates.TemplateResponse("levels.html", {"request": request, "active": "levels"})
 
 
+@app.get("/viewer", response_class=HTMLResponse)
+def viewer_page(request: Request):
+    return templates.TemplateResponse("viewer.html", {"request": request, "active": "viewer"})
+
+
 @app.post("/api/session")
 def create_session(payload: Dict[str, Any] = Body(default=None)):
     SESSION_STORE.cleanup_stale()
