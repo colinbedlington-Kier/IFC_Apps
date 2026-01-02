@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IFC Viewer</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body data-page="viewer">
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-icon">IFC</div>
+      <div>
+        <p class="eyebrow">SEI-inspired workspace</p>
+        <h1>IFC Toolkit Hub</h1>
+      </div>
+    </div>
+    <nav class="nav-tabs" aria-label="Tool navigation">
+      <a class="nav-link" data-page="upload" href="/static/index.html">Uploads</a>
+      <a class="nav-link" data-page="cleaner" href="/static/cleaner.html">Cleaner</a>
+      <a class="nav-link" data-page="excel" href="/static/excel.html">Excel Sync</a>
+      <a class="nav-link" data-page="globalz" href="/static/globalz.html">Global Z</a>
+      <a class="nav-link" data-page="proxy" href="/static/proxy.html">Type Mapper</a>
+      <a class="nav-link" data-page="levels" href="/static/levels.html">Levels</a>
+      <a class="nav-link active" data-page="viewer" href="/static/viewer.html">Viewer</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="panel active">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Session aware</p>
+          <h2>Interactive IFC viewer</h2>
+          <p class="lede">Open session files with IFC.js, inspect properties, and toggle overlays without re-uploading.</p>
+        </div>
+        <div class="pill" data-session-badge>Checking session…</div>
+      </div>
+
+      <div class="card viewer-shell">
+        <div class="viewer-toolbar">
+          <div class="field">
+            <label for="viewer-files">Session file</label>
+            <select id="viewer-files"></select>
+            <p class="hint">Uploads from this browser session only.</p>
+          </div>
+          <div class="toolbar-actions">
+            <button type="button" class="ghost" id="refresh-session-files">Refresh files</button>
+            <button type="button" class="ghost" id="load-selection">Load in viewer</button>
+            <button type="button" class="primary" id="fit-scene">Fit to view</button>
+          </div>
+        </div>
+
+        <div class="viewer-toggles">
+          <div class="switch"><input type="checkbox" id="toggle-layers" checked /> <label for="toggle-layers">Show layer tree</label></div>
+          <div class="switch"><input type="checkbox" id="toggle-properties" checked /> <label for="toggle-properties">Show properties</label></div>
+          <div class="switch"><input type="checkbox" id="toggle-edges" /> <label for="toggle-edges">Outline edges</label></div>
+          <div class="switch"><input type="checkbox" id="toggle-section" /> <label for="toggle-section">Add section plane</label></div>
+        </div>
+
+        <div class="viewer-layout">
+          <aside class="viewer-panel" id="layers-panel">
+            <div class="card-head"><h3>Layers</h3></div>
+            <div id="layers-list" class="viewer-list muted">Load an IFC to see its spatial tree.</div>
+          </aside>
+
+          <div id="viewer-canvas" class="viewer-canvas" role="application" aria-label="IFC scene"></div>
+
+          <aside class="viewer-panel" id="properties-panel">
+            <div class="card-head"><h3>Properties</h3></div>
+            <div id="properties-list" class="viewer-list muted">Click an element to see its metadata.</div>
+          </aside>
+        </div>
+
+        <div id="viewer-status" class="hint">Waiting for session…</div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/static/viewer.js"></script>
+</body>
+</html>
