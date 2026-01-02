@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title">
+    <h2>Session & Uploads</h2>
+  </div>
+  <p class="muted">
+    Files live only for your session (TTL 6h). End the session to purge everything immediately.
+  </p>
+  <div class="two-col">
+    <div>
+      <label for="fileInput">Upload IFC / Excel</label>
+      <input id="fileInput" type="file" multiple />
+      <div class="inline" style="margin-top: 10px">
+        <button class="btn" id="uploadBtn">Upload</button>
+        <button class="btn secondary" id="refreshFiles">Refresh list</button>
+        <button class="btn danger" id="resetSession">End session</button>
+      </div>
+    </div>
+    <div>
+      <label>Session Files</label>
+      <button class="btn secondary sm" data-download-selected style="margin-bottom: 8px;">Download selected</button>
+      <ul class="files-list" id="filesList" data-files-list></ul>
+    </div>
+  </div>
+</div>
+{% endblock %}
