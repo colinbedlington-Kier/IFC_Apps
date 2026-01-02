@@ -264,3 +264,26 @@ code {
   font-size: 13px;
   border: 1px solid var(--border);
 }
+
+.levels-table {
+  overflow-x: auto;
+}
+
+.levels-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.levels-table th,
+.levels-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}

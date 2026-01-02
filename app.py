@@ -83,26 +83,6 @@ class SessionStore:
         self.touch(session_id)
         return self.session_path(session_id)
 
-    def ensure(self, session_id: str) -> str:
-        if not self.exists(session_id):
-            raise HTTPException(status_code=404, detail="Session not found")
-        self.touch(session_id)
-        return self.session_path(session_id)
-
-
-SESSION_STORE = SessionStore(os.path.join(tempfile.gettempdir(), "ifc_app_sessions"))
-
-
-# ----------------------------------------------------------------------------
-# IFC cleaner (from original app.py)
-# ----------------------------------------------------------------------------
-
-SESSION_STORE = SessionStore(os.path.join(tempfile.gettempdir(), "ifc_app_sessions"))
-
-
-# ----------------------------------------------------------------------------
-# IFC cleaner (from original app.py)
-# ----------------------------------------------------------------------------
 
 SESSION_STORE = SessionStore(os.path.join(tempfile.gettempdir(), "ifc_app_sessions"))
 
@@ -1021,6 +1001,20 @@ def countershift_product_local_points(model, delta_model):
     return c
 
 
+def adjust_local_placement_z(lp, delta_model):
+    if lp is None or not lp.is_a("IfcLocalPlacement"):
+        return
+    rel = getattr(lp, "RelativePlacement", None)
+    if rel and rel.is_a("IfcAxis2Placement3D"):
+        loc = getattr(rel, "Location", None)
+        if loc and loc.is_a("IfcCartesianPoint"):
+            coords = list(loc.Coordinates)
+            if len(coords) < 3:
+                coords += [0.0] * (3 - len(coords))
+            coords[2] = float(coords[2] or 0.0) + delta_model
+            loc.Coordinates = tuple(coords)
+
+
 def parse_ifc_storeys(ifc_path: str) -> Dict[str, Any]:
     size = os.path.getsize(ifc_path)
     model = ifcopenshell.open(ifc_path)
@@ -1163,6 +1157,214 @@ def apply_storey_changes(
         parts.append(f" • MethodOfMeasurement = '{mom_txt}'")
     parts.append(f"Output: {os.path.basename(output_path)}")
     return "\n".join([p for p in parts if p]), output_path
+
+
+# ----------------------------------------------------------------------------
+# Level manager: list, update, delete (with reassignment), add
+# ----------------------------------------------------------------------------
+
+
+def storey_elevation(storey) -> float:
+    try:
+        return float(getattr(storey, "Elevation", 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def storey_comp_height(storey) -> Optional[float]:
+    # IFC4 adds ElevationOfRefHeight; fall back to None
+    if hasattr(storey, "ElevationOfRefHeight"):
+        val = getattr(storey, "ElevationOfRefHeight", None)
+        return float(val) if val not in (None, "") else None
+    return None
+
+
+def list_storey_objects(storey) -> List[Any]:
+    objs = []
+    for rel in storey.ContainsElements or []:
+        if rel.is_a("IfcRelContainedInSpatialStructure"):
+            for el in rel.RelatedElements or []:
+                objs.append(el)
+    return objs
+
+
+def move_objects_to_storey(model, objects, source_storey, target_storey):
+    if target_storey is None:
+        return
+    delta = storey_elevation(source_storey) - storey_elevation(target_storey)
+    # Ensure target containment relation
+    target_rel = None
+    for rel in target_storey.ContainsElements or []:
+        if rel.is_a("IfcRelContainedInSpatialStructure"):
+            target_rel = rel
+            break
+    if target_rel is None:
+        target_rel = model.create_entity(
+            "IfcRelContainedInSpatialStructure",
+            GlobalId=new_guid(),
+            RelatedElements=[],
+            RelatingStructure=target_storey,
+        )
+        if getattr(target_storey, "ContainsElements", None):
+            target_storey.ContainsElements = list(target_storey.ContainsElements) + [target_rel]
+        else:
+            target_storey.ContainsElements = [target_rel]
+
+    for obj in objects:
+        # Remove from current containment
+        for rel in obj.ContainedInStructure or []:
+            if rel.RelatingStructure == source_storey and rel.is_a("IfcRelContainedInSpatialStructure"):
+                rel.RelatedElements = [e for e in rel.RelatedElements if e != obj]
+        # Adjust placement to keep world position
+        adjust_local_placement_z(getattr(obj, "ObjectPlacement", None), delta)
+        # Add to target relation
+        if obj not in target_rel.RelatedElements:
+            target_rel.RelatedElements = list(target_rel.RelatedElements) + [obj]
+
+
+def cleanup_empty_containment(model, storey):
+    for rel in list(storey.ContainsElements or []):
+        if rel.is_a("IfcRelContainedInSpatialStructure") and not rel.RelatedElements:
+            try:
+                storey.ContainsElements = [r for r in storey.ContainsElements if r != rel]
+                model.remove(rel)
+            except Exception:
+                pass
+
+
+def remove_storey_from_aggregates(model, storey):
+    for rel in list(storey.Decomposes or []):
+        if rel.is_a("IfcRelAggregates"):
+            rel.RelatedObjects = [o for o in rel.RelatedObjects if o != storey]
+            if not rel.RelatedObjects:
+                model.remove(rel)
+
+
+def list_levels(ifc_path: str) -> Dict[str, Any]:
+    model = ifcopenshell.open(ifc_path)
+    result = []
+    for st in model.by_type("IfcBuildingStorey"):
+        objs = list_storey_objects(st)
+        result.append(
+            {
+                "id": st.id(),
+                "name": getattr(st, "Name", ""),
+                "description": getattr(st, "Description", ""),
+                "elevation": storey_elevation(st),
+                "comp_height": storey_comp_height(st),
+                "object_count": len(objs),
+                "objects": [
+                    {"id": o.id(), "name": getattr(o, "Name", ""), "type": o.is_a()}
+                    for o in objs
+                ],
+            }
+        )
+    return {"levels": result}
+
+
+def update_level(ifc_path: str, storey_id: int, payload: Dict[str, Any], output_path: str) -> str:
+    model = ifcopenshell.open(ifc_path)
+    storey = model.by_id(int(storey_id))
+    if not storey:
+        raise ValueError("Storey not found")
+    if "name" in payload:
+        storey.Name = payload.get("name")
+    if "description" in payload:
+        storey.Description = payload.get("description")
+    if "elevation" in payload and payload.get("elevation") not in (None, ""):
+        storey.Elevation = float(payload.get("elevation"))
+    if "comp_height" in payload and hasattr(storey, "ElevationOfRefHeight"):
+        comp = payload.get("comp_height")
+        if comp not in (None, ""):
+            storey.ElevationOfRefHeight = float(comp)
+    model.write(output_path)
+    return output_path
+
+
+def delete_level(ifc_path: str, storey_id: int, target_storey_id: int, object_ids: Optional[List[int]], output_path: str) -> str:
+    model = ifcopenshell.open(ifc_path)
+    storey = model.by_id(int(storey_id))
+    target = model.by_id(int(target_storey_id)) if target_storey_id else None
+    if not storey or not target:
+        raise ValueError("Storey or target storey not found")
+
+    objs = list_storey_objects(storey)
+    if object_ids:
+        objs = [o for o in objs if o.id() in object_ids]
+    move_objects_to_storey(model, objs, storey, target)
+    cleanup_empty_containment(model, storey)
+    remove_storey_from_aggregates(model, storey)
+    try:
+        model.remove(storey)
+    except Exception:
+        pass
+    model.write(output_path)
+    return output_path
+
+
+def add_level(
+    ifc_path: str,
+    name: str,
+    description: Optional[str],
+    elevation: Optional[float],
+    comp_height: Optional[float],
+    object_ids: Optional[List[int]],
+    output_path: str,
+) -> str:
+    model = ifcopenshell.open(ifc_path)
+    building = (model.by_type("IfcBuilding") or [None])[0]
+    site = (model.by_type("IfcSite") or [None])[0]
+    parent = building or site
+    if parent is None:
+        raise ValueError("No Building or Site found to host the new level")
+
+    storey = model.create_entity(
+        "IfcBuildingStorey",
+        GlobalId=new_guid(),
+        Name=name or "New Storey",
+        Description=description,
+        Elevation=float(elevation) if elevation not in (None, "") else None,
+    )
+    if comp_height not in (None, "") and hasattr(storey, "ElevationOfRefHeight"):
+        storey.ElevationOfRefHeight = float(comp_height)
+
+    ensure_aggregates(parent, storey, model)
+
+    if object_ids:
+        objs = [model.by_id(int(oid)) for oid in object_ids if model.by_id(int(oid))]
+        for obj in objs:
+            # find original storey for delta
+            origin_storey = None
+            for rel in obj.ContainedInStructure or []:
+                if rel.is_a("IfcRelContainedInSpatialStructure"):
+                    origin_storey = rel.RelatingStructure
+                    break
+            delta = 0.0
+            if origin_storey:
+                delta = storey_elevation(origin_storey) - storey_elevation(storey)
+            adjust_local_placement_z(getattr(obj, "ObjectPlacement", None), delta)
+            # remove from old relations
+            for rel in obj.ContainedInStructure or []:
+                if rel.is_a("IfcRelContainedInSpatialStructure"):
+                    rel.RelatedElements = [e for e in rel.RelatedElements if e != obj]
+            # add to new relation
+            target_rel = None
+            for rel in storey.ContainsElements or []:
+                if rel.is_a("IfcRelContainedInSpatialStructure"):
+                    target_rel = rel
+                    break
+            if target_rel is None:
+                target_rel = model.create_entity(
+                    "IfcRelContainedInSpatialStructure",
+                    GlobalId=new_guid(),
+                    RelatedElements=[],
+                    RelatingStructure=storey,
+                )
+                storey.ContainsElements = list(storey.ContainsElements or []) + [target_rel]
+            target_rel.RelatedElements = list(target_rel.RelatedElements) + [obj]
+
+    model.write(output_path)
+    return output_path
 
 
 # ----------------------------------------------------------------------------
@@ -1567,6 +1769,11 @@ def files_page(request: Request):
     return templates.TemplateResponse("files.html", {"request": request, "active": "files"})
 
 
+@app.get("/levels", response_class=HTMLResponse)
+def levels_page(request: Request):
+    return templates.TemplateResponse("levels.html", {"request": request, "active": "levels"})
+
+
 @app.post("/api/session")
 def create_session(payload: Dict[str, Any] = Body(default=None)):
     SESSION_STORE.cleanup_stale()
@@ -1767,6 +1974,88 @@ def proxy_mapper(session_id: str, payload: Dict[str, Any] = Body(...)):
         "summary": summary,
         "ifc": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"},
     }
+
+
+@app.post("/api/session/{session_id}/levels/list")
+def api_levels_list(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    src = payload.get("ifc_file")
+    if not src:
+        raise HTTPException(status_code=400, detail="No IFC file provided")
+    in_path = os.path.join(root, sanitize_filename(src))
+    if not os.path.isfile(in_path):
+        raise HTTPException(status_code=404, detail="IFC file not found")
+    return list_levels(in_path)
+
+
+@app.post("/api/session/{session_id}/levels/update")
+def api_levels_update(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    src = payload.get("ifc_file")
+    storey_id = payload.get("storey_id")
+    if not src or storey_id is None:
+        raise HTTPException(status_code=400, detail="ifc_file and storey_id are required")
+    in_path = os.path.join(root, sanitize_filename(src))
+    if not os.path.isfile(in_path):
+        raise HTTPException(status_code=404, detail="IFC file not found")
+    base = os.path.splitext(os.path.basename(in_path))[0]
+    out_name = f"{base}_levels.ifc"
+    out_path = os.path.join(root, out_name)
+    try:
+        update_level(in_path, int(storey_id), payload, out_path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ifc": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"}}
+
+
+@app.post("/api/session/{session_id}/levels/delete")
+def api_levels_delete(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    src = payload.get("ifc_file")
+    storey_id = payload.get("storey_id")
+    target_id = payload.get("target_storey_id")
+    object_ids = payload.get("object_ids")
+    if not src or storey_id is None or target_id is None:
+        raise HTTPException(status_code=400, detail="ifc_file, storey_id, and target_storey_id are required")
+    in_path = os.path.join(root, sanitize_filename(src))
+    if not os.path.isfile(in_path):
+        raise HTTPException(status_code=404, detail="IFC file not found")
+    base = os.path.splitext(os.path.basename(in_path))[0]
+    out_name = f"{base}_levels.ifc"
+    out_path = os.path.join(root, out_name)
+    try:
+        delete_level(in_path, int(storey_id), int(target_id), object_ids, out_path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ifc": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"}}
+
+
+@app.post("/api/session/{session_id}/levels/add")
+def api_levels_add(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    src = payload.get("ifc_file")
+    name = payload.get("name")
+    if not src or not name:
+        raise HTTPException(status_code=400, detail="ifc_file and name are required")
+    in_path = os.path.join(root, sanitize_filename(src))
+    if not os.path.isfile(in_path):
+        raise HTTPException(status_code=404, detail="IFC file not found")
+    base = os.path.splitext(os.path.basename(in_path))[0]
+    out_name = f"{base}_levels.ifc"
+    out_path = os.path.join(root, out_name)
+    try:
+        add_level(
+            ifc_path=in_path,
+            name=name,
+            description=payload.get("description"),
+            elevation=payload.get("elevation"),
+            comp_height=payload.get("comp_height"),
+            object_ids=payload.get("object_ids"),
+            output_path=out_path,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ifc": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"}}
 
 
 if __name__ == "__main__":
