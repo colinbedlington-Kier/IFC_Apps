@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IFC Cleaner</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body data-page="cleaner">
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-icon">IFC</div>
+      <div>
+        <p class="eyebrow">SEI-inspired workspace</p>
+        <h1>IFC Toolkit Hub</h1>
+      </div>
+    </div>
+    <nav class="nav-tabs" aria-label="Tool navigation">
+      <a class="nav-link" data-page="upload" href="/static/index.html">Uploads</a>
+      <a class="nav-link" data-page="cleaner" href="/static/cleaner.html">Cleaner</a>
+      <a class="nav-link" data-page="excel" href="/static/excel.html">Excel Sync</a>
+      <a class="nav-link" data-page="globalz" href="/static/globalz.html">Global Z</a>
+      <a class="nav-link" data-page="proxy" href="/static/proxy.html">Type Mapper</a>
+      <a class="nav-link" data-page="levels" href="/static/levels.html">Levels</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="panel active">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">InfoDrainage scrub</p>
+          <h2>Remove prefixed property sets</h2>
+          <p class="lede">Upload IFCs on the Upload page, then pick them here to clean InfoDrainage-prefixed data.</p>
+        </div>
+        <div class="pill">IFC → IFC</div>
+      </div>
+      <form id="clean-form" class="card tool-card">
+        <div class="field">
+          <label for="clean-files">Choose IFC files</label>
+          <select id="clean-files" name="clean-files" multiple></select>
+          <p class="hint">Hold Ctrl/Cmd to pick more than one.</p>
+        </div>
+        <div class="grid two">
+          <div class="field">
+            <label for="prefix">Prefix</label>
+            <input id="prefix" name="prefix" value="InfoDrainage" />
+          </div>
+          <div class="field checkbox">
+            <input type="checkbox" id="case-insensitive" checked />
+            <label for="case-insensitive">Case insensitive</label>
+          </div>
+        </div>
+        <div class="grid three">
+          <label class="switch"><input type="checkbox" id="pset-delete" checked /><span>Delete matching psets</span></label>
+          <label class="switch"><input type="checkbox" id="prop-delete" checked /><span>Delete matching props</span></label>
+          <label class="switch"><input type="checkbox" id="drop-empty" checked /><span>Drop empty psets</span></label>
+          <label class="switch"><input type="checkbox" id="loose" checked /><span>Remove loose props</span></label>
+        </div>
+        <button type="submit" class="primary">Run cleaner</button>
+      </form>
+      <div class="card" id="clean-results">
+        <div class="card-head"><h3>Cleaner report</h3></div>
+        <pre id="clean-log" class="log"></pre>
+        <div id="clean-downloads" class="download-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
