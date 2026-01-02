@@ -1,10 +1,12 @@
 import datetime
+import json
 import os
 import re
 import shutil
 import tempfile
 import traceback
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import ifcopenshell
@@ -16,6 +18,19 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from ifcopenshell.guid import new as new_guid
+
+from check_definitions_loader import load_check_definitions, summarize_sections
+from expression_engine import ExpressionEngine
+from field_access import FieldDescriptor, FieldKind, get_value, set_value
+from mapping_store import (
+    EXPRESSIONS_PATH,
+    MAPPINGS_PATH,
+    load_expression_config,
+    load_mapping_config,
+    save_expression_for_check,
+    save_mapping_for_check,
+)
+from validation import validate_value
 
 
 # ----------------------------------------------------------------------------
@@ -1720,6 +1735,214 @@ def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
 
 
 # ----------------------------------------------------------------------------
+# Model checking helpers
+# ----------------------------------------------------------------------------
+
+CHECK_CACHE: Dict[str, Any] = {"definitions": None, "summary": {}}
+
+
+def _expression_lookup() -> Dict[str, str]:
+    expr_cfg = load_expression_config()
+    merged: Dict[str, str] = {}
+    merged.update(expr_cfg.get("by_classification_system", {}))
+    merged.update(expr_cfg.get("by_check_id", {}))
+    return merged
+
+
+def load_definitions() -> List[Any]:
+    mapping_cfg = load_mapping_config()
+    definitions = load_check_definitions(mapping_cfg, _expression_lookup())
+    CHECK_CACHE["definitions"] = definitions
+    CHECK_CACHE["summary"] = summarize_sections(definitions)
+    return definitions
+
+
+def _ensure_definitions() -> List[Any]:
+    return CHECK_CACHE["definitions"] or load_definitions()
+
+
+def serialize_field_descriptor(fd: FieldDescriptor) -> Dict[str, Any]:
+    return {
+        "kind": fd.kind.value,
+        "attribute": fd.attribute_name,
+        "property": fd.property_name,
+        "pset": fd.pset_name,
+        "quantity": fd.quantity_name,
+        "qto": fd.qto_name,
+        "classification_system": fd.classification_system,
+        "expression": fd.expression,
+    }
+
+
+def serialize_definition(defn) -> Dict[str, Any]:
+    return {
+        "check_id": defn.check_id,
+        "description": defn.description,
+        "entity_scope": defn.entity_scope,
+        "info": defn.info_to_check,
+        "applicable_models": defn.applicable_models,
+        "milestones": defn.milestones,
+        "section": defn.section,
+        "mapping_status": defn.mapping_status,
+        "field": serialize_field_descriptor(defn.field) if defn.field else None,
+    }
+
+
+def _to_serializable(val: Any):
+    if isinstance(val, (int, float, str)) or val is None:
+        return val
+    try:
+        return float(val)
+    except Exception:
+        try:
+            return str(val)
+        except Exception:
+            return None
+
+
+def _filter_defs(defs: List[Any], section: Optional[str], riba_stage: Optional[str]) -> List[Any]:
+    filtered = []
+    for d in defs:
+        if section and d.section != section:
+            continue
+        if riba_stage and d.milestones and riba_stage not in d.milestones:
+            continue
+        filtered.append(d)
+    return filtered
+
+
+def _collect_targets(model, defs: List[Any], entity_filter: Optional[str]) -> List[Any]:
+    targets = []
+    entity_names = set()
+    if entity_filter:
+        entity_names.add(entity_filter)
+    else:
+        for d in defs:
+            for ent in d.entity_scope:
+                entity_names.add(ent)
+    for ent in entity_names:
+        try:
+            for obj in model.by_type(ent):
+                targets.append(obj)
+        except Exception:
+            continue
+    return targets
+
+
+def _row_id(obj) -> str:
+    gid = getattr(obj, "GlobalId", None) or getattr(obj, "GlobalID", None)
+    return f"{gid or obj.id()}"
+
+
+def build_table_data(model, section: str, riba_stage: Optional[str], entity_filter: Optional[str]) -> Dict[str, Any]:
+    defs = _filter_defs(_ensure_definitions(), section, riba_stage)
+    targets = _collect_targets(model, defs, entity_filter)
+    expr_engine = ExpressionEngine(model)
+    columns = [serialize_definition(d) for d in defs]
+    rows = []
+    for obj in targets:
+        row_values: Dict[str, Dict[str, Any]] = {}
+        issues_count = 0
+        for d in defs:
+            if d.field is None:
+                continue
+            val = get_value(obj, d.field)
+            generated = expr_engine.evaluate(d.field.expression, obj) if d.field.expression else None
+            validation = validate_value(model, obj, d.field, val, check_id=d.check_id)
+            issues_count += len(validation)
+            row_values[d.check_id] = {
+                "value": _to_serializable(val),
+                "generated": generated,
+                "issues": [vars(v) for v in validation],
+                "descriptor": serialize_field_descriptor(d.field),
+            }
+        rows.append(
+            {
+                "id": obj.id(),
+                "global_id": getattr(obj, "GlobalId", None),
+                "name": getattr(obj, "Name", None) or getattr(obj, "LongName", None),
+                "type": obj.is_a(),
+                "issues": issues_count,
+                "values": row_values,
+            }
+        )
+    return {
+        "columns": columns,
+        "rows": rows,
+        "summary": {
+            "rows": len(rows),
+            "columns": len(columns),
+            "issues": sum(r["issues"] for r in rows),
+        },
+    }
+
+
+def _change_log_path(session_id: str) -> Path:
+    return Path(SESSION_STORE.session_path(session_id)) / "change_log.json"
+
+
+def read_change_log(session_id: str) -> List[Dict[str, Any]]:
+    path = _change_log_path(session_id)
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def append_change_log(session_id: str, entries: List[Dict[str, Any]]):
+    path = _change_log_path(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = read_change_log(session_id)
+    existing.extend(entries)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2)
+
+
+def apply_edits(session_id: str, in_path: str, edits: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
+    if not edits:
+        raise HTTPException(status_code=400, detail="No edits supplied")
+    model = ifcopenshell.open(in_path)
+    defs = _ensure_definitions()
+    def_by_id = {d.check_id: d for d in defs}
+    expr_engine = ExpressionEngine(model)
+    audits = []
+    for e in edits:
+        check_id = e.get("check_id")
+        obj_id = e.get("object_id")
+        if check_id not in def_by_id:
+            continue
+        desc = def_by_id[check_id].field
+        if desc is None:
+            continue
+        target = model.by_id(int(obj_id))
+        if target is None:
+            continue
+        mode = e.get("mode", "manual")
+        value = e.get("value")
+        if mode == "generated" and desc.expression:
+            value = expr_engine.evaluate(desc.expression, target)
+        old_val, new_val = set_value(model, target, desc, value)
+        audits.append(
+            {
+                "object_id": target.id(),
+                "global_id": getattr(target, "GlobalId", None),
+                "check_id": check_id,
+                "field": desc.path_label(),
+                "old": _to_serializable(old_val),
+                "new": _to_serializable(new_val),
+                "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            }
+        )
+    base, ext = os.path.splitext(os.path.basename(in_path))
+    ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    out_name = f"{base}_checked_{ts}{ext or '.ifc'}"
+    out_path = os.path.join(os.path.dirname(in_path), out_name)
+    model.write(out_path)
+    append_change_log(session_id, audits)
+    return out_name, audits
+
+
+# ----------------------------------------------------------------------------
 # FastAPI app + routes
 # ----------------------------------------------------------------------------
 
@@ -1779,6 +2002,16 @@ def viewer_page(request: Request):
     return templates.TemplateResponse("viewer.html", {"request": request, "active": "viewer"})
 
 
+@app.get("/model-checking", response_class=HTMLResponse)
+def model_checking_page(request: Request):
+    return templates.TemplateResponse("model_checking.html", {"request": request, "active": "model-checking"})
+
+
+@app.get("/admin/mappings", response_class=HTMLResponse)
+def admin_mappings_page(request: Request):
+    return templates.TemplateResponse("mappings.html", {"request": request, "active": "mappings"})
+
+
 @app.post("/api/session")
 def create_session(payload: Dict[str, Any] = Body(default=None)):
     SESSION_STORE.cleanup_stale()
@@ -1836,6 +2069,85 @@ def download_file(session_id: str, name: str):
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path, filename=safe)
+
+
+@app.get("/api/checks/definitions")
+def api_check_definitions():
+    defs = load_definitions()
+    return {"definitions": [serialize_definition(d) for d in defs], "sections": CHECK_CACHE.get("summary", {})}
+
+
+@app.get("/api/checks/mappings")
+def api_check_mappings():
+    return {
+        "mapping_path": str(MAPPINGS_PATH),
+        "expression_path": str(EXPRESSIONS_PATH),
+        "mapping": load_mapping_config(),
+        "expressions": load_expression_config(),
+    }
+
+
+@app.post("/api/checks/mappings")
+def api_save_mapping(payload: Dict[str, Any] = Body(...)):
+    check_id = payload.get("check_id")
+    mapping = payload.get("mapping")
+    if not check_id or not mapping:
+        raise HTTPException(status_code=400, detail="check_id and mapping are required")
+    data = save_mapping_for_check(check_id, mapping)
+    load_definitions()
+    return {"status": "ok", "mapping": data}
+
+
+@app.post("/api/checks/expressions")
+def api_save_expression(payload: Dict[str, Any] = Body(...)):
+    check_id = payload.get("check_id")
+    expression = payload.get("expression", "")
+    if not check_id:
+        raise HTTPException(status_code=400, detail="check_id is required")
+    data = save_expression_for_check(check_id, expression)
+    load_definitions()
+    return {"status": "ok", "expressions": data}
+
+
+@app.post("/api/session/{session_id}/checks/data")
+def api_checks_data(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    ifc_file = payload.get("ifc_file")
+    if not ifc_file:
+        raise HTTPException(status_code=400, detail="ifc_file is required")
+    path = os.path.join(root, sanitize_filename(ifc_file))
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="IFC file not found")
+    model = ifcopenshell.open(path)
+    section = payload.get("section", "Spaces")
+    riba = payload.get("riba_stage")
+    ent_filter = payload.get("entity_filter")
+    table = build_table_data(model, section, riba, ent_filter)
+    table["change_log"] = read_change_log(session_id)
+    return table
+
+
+@app.post("/api/session/{session_id}/checks/apply")
+def api_checks_apply(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    ifc_file = payload.get("ifc_file")
+    edits = payload.get("edits", [])
+    if not ifc_file:
+        raise HTTPException(status_code=400, detail="ifc_file is required")
+    path = os.path.join(root, sanitize_filename(ifc_file))
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="IFC file not found")
+    out_name, audits = apply_edits(session_id, path, edits)
+    return {
+        "ifc": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"},
+        "audit": audits,
+    }
+
+
+@app.get("/api/session/{session_id}/checks/log")
+def api_checks_log(session_id: str):
+    SESSION_STORE.ensure(session_id)
+    return {"entries": read_change_log(session_id)}
 
 
 @app.post("/api/session/{session_id}/clean")
