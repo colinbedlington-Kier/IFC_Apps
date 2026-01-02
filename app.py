@@ -83,6 +83,19 @@ class SessionStore:
         self.touch(session_id)
         return self.session_path(session_id)
 
+    def ensure(self, session_id: str) -> str:
+        if not self.exists(session_id):
+            raise HTTPException(status_code=404, detail="Session not found")
+        self.touch(session_id)
+        return self.session_path(session_id)
+
+
+SESSION_STORE = SessionStore(os.path.join(tempfile.gettempdir(), "ifc_app_sessions"))
+
+
+# ----------------------------------------------------------------------------
+# IFC cleaner (from original app.py)
+# ----------------------------------------------------------------------------
 
 SESSION_STORE = SessionStore(os.path.join(tempfile.gettempdir(), "ifc_app_sessions"))
 

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Excel Sync</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body data-page="excel">
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-icon">IFC</div>
+      <div>
+        <p class="eyebrow">SEI-inspired workspace</p>
+        <h1>IFC Toolkit Hub</h1>
+      </div>
+    </div>
+    <nav class="nav-tabs" aria-label="Tool navigation">
+      <a class="nav-link" data-page="upload" href="/static/index.html">Uploads</a>
+      <a class="nav-link" data-page="cleaner" href="/static/cleaner.html">Cleaner</a>
+      <a class="nav-link" data-page="excel" href="/static/excel.html">Excel Sync</a>
+      <a class="nav-link" data-page="globalz" href="/static/globalz.html">Global Z</a>
+      <a class="nav-link" data-page="proxy" href="/static/proxy.html">Type Mapper</a>
+      <a class="nav-link" data-page="levels" href="/static/levels.html">Levels</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="panel active">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">COBie + Uniclass</p>
+          <h2>Excel extraction & update</h2>
+          <p class="lede">Create a workbook from your IFC, then apply edits back into a new IFC.</p>
+        </div>
+        <div class="pill">IFC ↔️ Excel</div>
+      </div>
+      <div class="split">
+        <form id="extract-form" class="card tool-card">
+          <div class="card-head">
+            <h3>Extract to Excel</h3>
+          </div>
+          <div class="field">
+            <label for="extract-ifc">IFC file</label>
+            <select id="extract-ifc"></select>
+          </div>
+          <button type="submit" class="primary">Create workbook</button>
+          <div id="extract-output" class="download-list"></div>
+        </form>
+        <form id="update-form" class="card tool-card">
+          <div class="card-head">
+            <h3>Apply Excel changes</h3>
+          </div>
+          <div class="field">
+            <label for="update-ifc">IFC file</label>
+            <select id="update-ifc"></select>
+          </div>
+          <div class="field">
+            <label for="update-excel">Excel file</label>
+            <select id="update-excel"></select>
+          </div>
+          <div class="grid two">
+            <div class="field">
+              <label for="update-mode">Update mode</label>
+              <select id="update-mode">
+                <option value="update">Update</option>
+                <option value="refresh">Refresh</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="add-new">Allow new data?</label>
+              <select id="add-new">
+                <option value="no">No</option>
+                <option value="yes">Yes</option>
+              </select>
+            </div>
+          </div>
+          <button type="submit" class="primary">Generate updated IFC</button>
+          <div id="update-output" class="download-list"></div>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
