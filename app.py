@@ -1,233 +1,95 @@
+import datetime
 import os
 import re
 import shutil
 import tempfile
-import threading
-import time
 import traceback
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from uuid import uuid4
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 import ifcopenshell
 import ifcopenshell.api
 import ifcopenshell.util.element
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from ifcopenshell.guid import new as new_guid
-from pydantic import BaseModel, Field
 
 
-# -----------------------------
-# Session management
-# -----------------------------
-SESSION_ROOT = Path("sessions")
-SESSION_ROOT.mkdir(exist_ok=True)
-SESSION_TTL_SECONDS = 60 * 60  # 1 hour
-SESSION_LOCK = threading.Lock()
-
-
-@dataclass
-class SessionFile:
-    file_id: str
-    name: str
-    path: Path
-    size: int
-    created_at: float
-    kind: Optional[str] = None
-
-
-@dataclass
-class SessionData:
-    session_id: str
-    root: Path
-    files: Dict[str, SessionFile] = field(default_factory=dict)
-    created_at: float = field(default_factory=lambda: time.time())
-    updated_at: float = field(default_factory=lambda: time.time())
-    closed: bool = False
-
-    def add_file(self, path: Path, display_name: Optional[str] = None, kind: Optional[str] = None) -> SessionFile:
-        display = display_name or path.name
-        file_id = uuid4().hex
-        size = path.stat().st_size if path.exists() else 0
-        record = SessionFile(
-            file_id=file_id,
-            name=display,
-            path=path,
-            size=size,
-            created_at=time.time(),
-            kind=kind,
-        )
-        self.files[file_id] = record
-        self.updated_at = time.time()
-        return record
-
-
-SESSIONS: Dict[str, SessionData] = {}
-
+# ----------------------------------------------------------------------------
+# Session handling
+# ----------------------------------------------------------------------------
 
 def sanitize_filename(base: str) -> str:
-    cleaned = base.replace("\\", "_").replace("/", "_")
-    for c in '<>:"|?*':
-        cleaned = cleaned.replace(c, "_")
-    return cleaned
+    for c in '<>:"/\\|?*':
+        base = base.replace(c, "_")
+    return base
 
 
-def create_session() -> SessionData:
-    session_id = uuid4().hex
-    root = SESSION_ROOT / session_id
-    root.mkdir(parents=True, exist_ok=True)
-    session = SessionData(session_id=session_id, root=root)
-    SESSIONS[session_id] = session
-    return session
+def human_size(n: int) -> str:
+    for unit in ["B", "KB", "MB", "GB"]:
+        if n < 1024:
+            return f"{n:.0f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
 
 
-def get_session(session_id: Optional[str]) -> SessionData:
-    with SESSION_LOCK:
-        if session_id and session_id in SESSIONS:
-            session = SESSIONS[session_id]
-            if session.closed:
-                del SESSIONS[session_id]
-                return create_session()
-            session.updated_at = time.time()
-            return session
-        return create_session()
+class SessionStore:
+    def __init__(self, base_dir: str, ttl_hours: int = 6) -> None:
+        self.base_dir = base_dir
+        self.ttl_hours = ttl_hours
+        os.makedirs(self.base_dir, exist_ok=True)
+        self.sessions: Dict[str, datetime.datetime] = {}
+
+    def create(self) -> str:
+        session_id = uuid.uuid4().hex
+        os.makedirs(self.session_path(session_id), exist_ok=True)
+        now = datetime.datetime.utcnow()
+        self.sessions[session_id] = now
+        return session_id
+
+    def session_path(self, session_id: str) -> str:
+        return os.path.join(self.base_dir, session_id)
+
+    def touch(self, session_id: str) -> None:
+        if not self.exists(session_id):
+            raise HTTPException(status_code=404, detail="Session not found")
+        self.sessions[session_id] = datetime.datetime.utcnow()
+
+    def exists(self, session_id: str) -> bool:
+        return session_id in self.sessions and os.path.isdir(self.session_path(session_id))
+
+    def cleanup_stale(self) -> None:
+        cutoff = datetime.datetime.utcnow() - datetime.timedelta(hours=self.ttl_hours)
+        stale = [sid for sid, ts in self.sessions.items() if ts < cutoff]
+        for sid in stale:
+            self.drop(sid)
+        # Remove stray dirs without bookkeeping
+        for entry in os.listdir(self.base_dir):
+            path = os.path.join(self.base_dir, entry)
+            if os.path.isdir(path) and entry not in self.sessions:
+                shutil.rmtree(path, ignore_errors=True)
+
+    def drop(self, session_id: str) -> None:
+        path = self.session_path(session_id)
+        shutil.rmtree(path, ignore_errors=True)
+        self.sessions.pop(session_id, None)
+
+    def ensure(self, session_id: str) -> str:
+        if not self.exists(session_id):
+            raise HTTPException(status_code=404, detail="Session not found")
+        self.touch(session_id)
+        return self.session_path(session_id)
 
 
-def cleanup_session(session_id: str):
-    session = SESSIONS.pop(session_id, None)
-    if not session:
-        return
-    session.closed = True
-    try:
-        shutil.rmtree(session.root, ignore_errors=True)
-    except Exception:
-        pass
+SESSION_STORE = SessionStore(os.path.join(tempfile.gettempdir(), "ifc_app_sessions"))
 
 
-def cleanup_expired_sessions():
-    now = time.time()
-    expired = []
-    with SESSION_LOCK:
-        for sid, session in list(SESSIONS.items()):
-            if session.closed:
-                expired.append(sid)
-                continue
-            if now - session.updated_at > SESSION_TTL_SECONDS:
-                expired.append(sid)
-        for sid in expired:
-            cleanup_session(sid)
-
-
-# -----------------------------
-# FastAPI app setup
-# -----------------------------
-app = FastAPI(title="IFC Toolkit Hub")
-app.mount("/static", StaticFiles(directory="static", html=True), name="static")
-
-
-@app.middleware("http")
-async def session_middleware(request: Request, call_next):
-    cleanup_expired_sessions()
-    incoming = request.cookies.get("session_id")
-    session = get_session(incoming)
-    request.state.session = session
-    response = await call_next(request)
-    response.set_cookie(
-        "session_id",
-        session.session_id,
-        max_age=SESSION_TTL_SECONDS,
-        httponly=True,
-        samesite="lax",
-    )
-    return response
-
-
-@app.get("/", response_class=HTMLResponse)
-async def root():
-    index_path = Path("static/index.html")
-    if index_path.exists():
-        return FileResponse(index_path)
-    return HTMLResponse("<h1>IFC Toolkit Hub</h1>")
-
-
-@app.get("/api/session")
-async def session_info(request: Request):
-    session: SessionData = request.state.session
-    return {
-        "session_id": session.session_id,
-        "files": [serialize_file(f) for f in session.files.values()],
-        "expires_in_seconds": SESSION_TTL_SECONDS,
-    }
-
-
-@app.post("/api/session/close")
-async def close_session(request: Request):
-    session: SessionData = request.state.session
-    cleanup_session(session.session_id)
-    return {"status": "closed"}
-
-
-@app.post("/api/upload")
-async def upload_files(request: Request, files: List[UploadFile] = File(...)):
-    session: SessionData = request.state.session
-    if not files:
-        raise HTTPException(status_code=400, detail="No files provided")
-
-    saved = []
-    for file in files:
-        safe_name = sanitize_filename(file.filename or "upload.ifc")
-        dest = session.root / safe_name
-        with open(dest, "wb") as out:
-            content = await file.read()
-            out.write(content)
-        record = session.add_file(dest)
-        saved.append(serialize_file(record))
-    return {"files": saved}
-
-
-@app.get("/api/files")
-async def list_files(request: Request):
-    session: SessionData = request.state.session
-    return {"files": [serialize_file(f) for f in session.files.values()]}
-
-
-@app.get("/api/files/{file_id}")
-async def download_file(file_id: str, request: Request):
-    session: SessionData = request.state.session
-    file = session.files.get(file_id)
-    if not file or not file.path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(path=file.path, filename=file.name)
-
-
-# -----------------------------
-# Shared IFC helpers
-# -----------------------------
-
-def serialize_file(record: SessionFile) -> Dict[str, object]:
-    return {
-        "id": record.file_id,
-        "name": record.name,
-        "size": record.size,
-        "created_at": record.created_at,
-        "kind": record.kind,
-    }
-
-
-def locate_files(session: SessionData, ids: List[str]) -> List[SessionFile]:
-    missing = [fid for fid in ids if fid not in session.files]
-    if missing:
-        raise HTTPException(status_code=404, detail=f"Missing files: {', '.join(missing)}")
-    return [session.files[fid] for fid in ids]
-
-
-# -----------------------------
-# Tool 1: InfoDrainage property cleaner
-# -----------------------------
+# ----------------------------------------------------------------------------
+# IFC cleaner (from original app.py)
+# ----------------------------------------------------------------------------
 
 def clean_ifc_file(
     in_path: str,
@@ -238,7 +100,7 @@ def clean_ifc_file(
     delete_properties_in_other_psets: bool = True,
     drop_empty_psets: bool = True,
     also_remove_loose_props: bool = True,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     def starts_with(s: str) -> bool:
         if s is None:
             return False
@@ -383,137 +245,120 @@ def clean_ifc_file(
     return report
 
 
-class CleanRequest(BaseModel):
-    file_ids: List[str]
-    prefix: str = "InfoDrainage"
-    case_insensitive: bool = True
-    delete_psets_with_prefix: bool = True
-    delete_properties_in_other_psets: bool = True
-    drop_empty_psets: bool = True
-    also_remove_loose_props: bool = True
+# ----------------------------------------------------------------------------
+# Excel extractor/updater (from app (1).py)
+# ----------------------------------------------------------------------------
 
-
-@app.post("/api/clean")
-async def clean_ifc(request: Request, payload: CleanRequest):
-    session: SessionData = request.state.session
-    files = locate_files(session, payload.file_ids)
-    if not files:
-        raise HTTPException(status_code=400, detail="No files provided")
-
-    reports = []
-    outputs = []
-    for src in files:
-        base, _ = os.path.splitext(src.name)
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        out_name = f"{base}_cleaned_{ts}.ifc"
-        out_path = session.root / out_name
-        report = clean_ifc_file(
-            in_path=str(src.path),
-            out_path=str(out_path),
-            prefix=payload.prefix.strip() or "InfoDrainage",
-            case_insensitive=payload.case_insensitive,
-            delete_psets_with_prefix=payload.delete_psets_with_prefix,
-            delete_properties_in_other_psets=payload.delete_properties_in_other_psets,
-            drop_empty_psets=payload.drop_empty_psets,
-            also_remove_loose_props=payload.also_remove_loose_props,
-        )
-        reports.append(report)
-        record = session.add_file(out_path, display_name=out_name, kind="ifc")
-        outputs.append(serialize_file(record))
-    return {"reports": reports, "outputs": outputs}
-
-
-# -----------------------------
-# Tool 2: Excel extractor/updater
-# -----------------------------
 COBIE_MAPPING = {
-    "COBie_Specification": {
-        "scope": "T",
-        "props": [
-            ("NominalLength", "Length"),
-            ("NominalWidth", "Length"),
-            ("NominalHeight", "Length"),
-            ("Shape", "Text"),
-            ("Size", "Text"),
-            ("Color", "Text"),
-            ("Finish", "Text"),
-            ("Grade", "Text"),
-            ("Material", "Text"),
-            ("Constituents", "Text"),
-            ("Features", "Text"),
-            ("AccessibilityPerformance", "Text"),
-            ("CodePerformance", "Text"),
-            ("SustainabilityPerformance", "Text"),
-        ],
-    },
-    "COBie_Component": {
-        "scope": "I",
-        "props": [
-            ("COBie", "Boolean"),
-            ("InstallationDate", "Text"),
-            ("WarrantyStartDate", "Text"),
-            ("TagNumber", "Text"),
-            ("AssetIdentifier", "Text"),
-            ("Space", "Text"),
-            ("CreatedBy", "Text"),
-            ("CreatedOn", "Text"),
-            ("Name", "Text"),
-            ("Description", "Text"),
-            ("Area", "Area"),
-            ("Length", "Length"),
-        ],
-    },
-    "COBie_Asset": {"scope": "T", "props": [("AssetType", "Text")]},
-    "COBie_Warranty": {
-        "scope": "T",
-        "props": [
-            ("WarrantyDurationParts", "Real"),
-            ("WarrantyGuarantorLabor", "Text"),
-            ("WarrantyDurationLabor", "Real"),
-            ("WarrantyDurationDescription", "Text"),
-            ("WarrantyDurationUnit", "Text"),
-            ("WarrantyGuarantorParts", "Text"),
-        ],
-    },
-    "Pset_ManufacturerOccurence": {"scope": "I", "props": [("SerialNumber", "Text"), ("BarCode", "Text")]},
-    "COBie_ServiceLife": {"scope": "T", "props": [("ServiceLifeDuration", "Real"), ("DurationUnit", "Text")]},
-    "COBie_EconomicalImpactValues": {"scope": "T", "props": [("ReplacementCost", "Real")]},
-    "COBie_Type": {
-        "scope": "T",
-        "props": [
-            ("COBie", "Boolean"),
-            ("CreatedBy", "Text"),
-            ("CreatedOn", "Text"),
-            ("Name", "Text"),
-            ("Description", "Text"),
-            ("Category", "Text"),
-            ("Area", "Area"),
-            ("Length", "Length"),
-        ],
-    },
-    "COBie_System": {"scope": "I", "props": [("Name", "Text"), ("Description", "Text"), ("Category", "Text")]},
-    "Classification_General": {
-        "scope": "T",
-        "props": [
-            ("Classification.Uniclass.Pr.Number", "Text"),
-            ("Classification.Uniclass.Pr.Description", "Text"),
-            ("Classification.Uniclass.Ss.Number", "Text"),
-            ("Classification.Uniclass.Ss.Description", "Text"),
-            ("Classification.NRM1.Number", "Text"),
-            ("Classification.NRM1.Description", "Text"),
-        ],
-    },
-    "Pset_ManufacturerTypeInformation": {"scope": "T", "props": [("Manufacturer", "Text"), ("ModelNumber", "Text"), ("ModelReference", "Text")]},
-    "PPset_DoorCommon": {"scope": "T", "props": [("FireRating", "Text")]},
-    "Pset_BuildingCommon": {"scope": "T", "props": [("NumberOfStoreys", "Text")]},
-    "COBie_Space": {"scope": "T", "props": [("RoomTag", "Text")]},
-    "COBie_BuildingCommon_UK": {"scope": "T", "props": [("UPRN", "Text")]},
-    "Additional_Pset_BuildingCommon": {"scope": "T", "props": [("BlockConstructionType", "Text"), ("MaximumBlockHeight", "Text")]},
-    "Additional_Pset_SystemCommon": {"scope": "T", "props": [("SystemCategory", "Text"), ("SystemDescription", "Text"), ("SystemName", "Text")]},
+    "COBie_Specification": {"scope": "T", "props": [
+        ("NominalLength", "Length"),
+        ("NominalWidth", "Length"),
+        ("NominalHeight", "Length"),
+        ("Shape", "Text"),
+        ("Size", "Text"),
+        ("Color", "Text"),
+        ("Finish", "Text"),
+        ("Grade", "Text"),
+        ("Material", "Text"),
+        ("Constituents", "Text"),
+        ("Features", "Text"),
+        ("AccessibilityPerformance", "Text"),
+        ("CodePerformance", "Text"),
+        ("SustainabilityPerformance", "Text"),
+    ]},
+    "COBie_Component": {"scope": "I", "props": [
+        ("COBie", "Boolean"),
+        ("InstallationDate", "Text"),
+        ("WarrantyStartDate", "Text"),
+        ("TagNumber", "Text"),
+        ("AssetIdentifier", "Text"),
+        ("Space", "Text"),
+        ("CreatedBy", "Text"),
+        ("CreatedOn", "Text"),
+        ("Name", "Text"),
+        ("Description", "Text"),
+        ("Area", "Area"),
+        ("Length", "Length"),
+    ]},
+    "COBie_Asset": {"scope": "T", "props": [
+        ("AssetType", "Text"),
+    ]},
+    "COBie_Warranty": {"scope": "T", "props": [
+        ("WarrantyDurationParts", "Real"),
+        ("WarrantyGuarantorLabor", "Text"),
+        ("WarrantyDurationLabor", "Real"),
+        ("WarrantyDurationDescription", "Text"),
+        ("WarrantyDurationUnit", "Text"),
+        ("WarrantyGuarantorParts", "Text"),
+    ]},
+    "Pset_ManufacturerOccurence": {"scope": "I", "props": [
+        ("SerialNumber", "Text"),
+        ("BarCode", "Text"),
+    ]},
+    "COBie_ServiceLife": {"scope": "T", "props": [
+        ("ServiceLifeDuration", "Real"),
+        ("DurationUnit", "Text"),
+    ]},
+    "COBie_EconomicalImpactValues": {"scope": "T", "props": [
+        ("ReplacementCost", "Real"),
+    ]},
+    "COBie_Type": {"scope": "T", "props": [
+        ("COBie", "Boolean"),
+        ("CreatedBy", "Text"),
+        ("CreatedOn", "Text"),
+        ("Name", "Text"),
+        ("Description", "Text"),
+        ("Category", "Text"),
+        ("Area", "Area"),
+        ("Length", "Length"),
+    ]},
+    "COBie_System": {"scope": "I", "props": [
+        ("Name", "Text"),
+        ("Description", "Text"),
+        ("Category", "Text"),
+    ]},
+    "Classification_General": {"scope": "T", "props": [
+        ("Classification.Uniclass.Pr.Number", "Text"),
+        ("Classification.Uniclass.Pr.Description", "Text"),
+        ("Classification.Uniclass.Ss.Number", "Text"),
+        ("Classification.Uniclass.Ss.Description", "Text"),
+        ("Classification.NRM1.Number", "Text"),
+        ("Classification.NRM1.Description", "Text"),
+    ]},
+    "Pset_ManufacturerTypeInformation": {"scope": "T", "props": [
+        ("Manufacturer", "Text"),
+        ("ModelNumber", "Text"),
+        ("ModelReference", "Text"),
+    ]},
+    "PPset_DoorCommon": {"scope": "T", "props": [
+        ("FireRating", "Text"),
+    ]},
+    "Pset_BuildingCommon": {"scope": "T", "props": [
+        ("NumberOfStoreys", "Text"),
+    ]},
+    "COBie_Space": {"scope": "T", "props": [
+        ("RoomTag", "Text"),
+    ]},
+    "COBie_BuildingCommon_UK": {"scope": "T", "props": [
+        ("UPRN", "Text"),
+    ]},
+    "Additional_Pset_BuildingCommon": {"scope": "T", "props": [
+        ("BlockConstructionType", "Text"),
+        ("MaximumBlockHeight", "Text"),
+    ]},
+    "Additional_Pset_SystemCommon": {"scope": "T", "props": [
+        ("SystemCategory", "Text"),
+        ("SystemDescription", "Text"),
+        ("SystemName", "Text"),
+    ]},
 }
 
 
 RE_SPLIT_LIST = re.compile(r"[;,|\n]+|\s{2,}")
+
+
+def path_of(f):
+    return f if isinstance(f, str) else getattr(f, "name", f)
 
 
 def clean_value(v):
@@ -524,6 +369,24 @@ def clean_value(v):
         if v == "":
             return None
     return v
+
+
+def ensure_aggregates(parent, child, ifc):
+    rel = None
+    for r in parent.IsDecomposedBy or []:
+        if r.is_a("IfcRelAggregates"):
+            rel = r
+            break
+    if rel is None:
+        ifc.create_entity(
+            "IfcRelAggregates",
+            GlobalId=new_guid(),
+            RelatingObject=parent,
+            RelatedObjects=[child],
+        )
+    else:
+        if child not in rel.RelatedObjects:
+            rel.RelatedObjects = list(rel.RelatedObjects) + [child]
 
 
 def parse_required_pairs(raw):
@@ -557,8 +420,8 @@ def get_pset_value(elem, pset_name, prop_name):
     return ""
 
 
-def extract_to_excel(ifc_file: str, output_path: str) -> str:
-    ifc = ifcopenshell.open(ifc_file)
+def extract_to_excel(ifc_path: str, output_path: str) -> str:
+    ifc = ifcopenshell.open(ifc_path)
 
     project_data = []
     project = ifc.by_type("IfcProject")[0]
@@ -605,11 +468,11 @@ def extract_to_excel(ifc_file: str, output_path: str) -> str:
             elem_name,
             elem_type,
             type_name,
-            elem_desc,
+            elem_desc
         ])
     elements_df = pd.DataFrame(
         element_data,
-        columns=["GlobalId", "Class", "OccurrenceName", "OccurrenceType", "TypeName", "TypeDescription"],
+        columns=["GlobalId", "Class", "OccurrenceName", "OccurrenceType", "TypeName", "TypeDescription"]
     )
 
     prop_data = []
@@ -636,6 +499,7 @@ def extract_to_excel(ifc_file: str, output_path: str) -> str:
     props_df = pd.DataFrame(prop_data, columns=["GlobalId", "Class", "PropertySet", "Property", "Value"])
 
     cobie_cols = ["GlobalId", "IFCElement.Name", "IFCElementType.Name"]
+
     dynamic_pairs = set()
     for elem in ifc.by_type("IfcElement"):
         psets_elem = ifcopenshell.util.element.get_psets(elem)
@@ -676,7 +540,7 @@ def extract_to_excel(ifc_file: str, output_path: str) -> str:
         row = {
             "GlobalId": elem.GlobalId,
             "IFCElement.Name": getattr(elem, "Name", ""),
-            "IFCElementType.Name": type_name,
+            "IFCElementType.Name": type_name
         }
 
         for pset, pname in all_pairs:
@@ -724,27 +588,11 @@ def extract_to_excel(ifc_file: str, output_path: str) -> str:
     return output_path
 
 
-def ensure_aggregates(parent, child, ifc):
-    rel = None
-    for r in parent.IsDecomposedBy or []:
-        if r.is_a("IfcRelAggregates"):
-            rel = r
-            break
-    if rel is None:
-        ifc.create_entity(
-            "IfcRelAggregates",
-            GlobalId=ifcopenshell.guid.new(),
-            RelatingObject=parent,
-            RelatedObjects=[child],
-        )
-    else:
-        if child not in rel.RelatedObjects:
-            rel.RelatedObjects = list(rel.RelatedObjects) + [child]
-
-
-def update_ifc_from_excel(ifc_file: str, excel_file: str, output_path: str, update_mode: str = "update", add_new: str = "no") -> str:
-    ifc = ifcopenshell.open(ifc_file)
-    xls = pd.ExcelFile(excel_file)
+def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="update", add_new="no"):
+    ifc_path = path_of(ifc_file)
+    xls_path = path_of(excel_file)
+    ifc = ifcopenshell.open(ifc_path)
+    xls = pd.ExcelFile(xls_path)
     elements_df = pd.read_excel(xls, "Elements")
     props_df = pd.read_excel(xls, "Properties")
     cobie_df = pd.read_excel(xls, "COBieMapping")
@@ -775,7 +623,7 @@ def update_ifc_from_excel(ifc_file: str, excel_file: str, output_path: str, upda
             name = clean_value(row.get("Name"))
             desc = clean_value(row.get("Description"))
             if site is None and (add_new == "yes" or name or desc):
-                site = ifc.create_entity("IfcSite", GlobalId=ifcopenshell.guid.new(), Name=name or "Site")
+                site = ifc.create_entity("IfcSite", GlobalId=new_guid(), Name=name or "Site")
             if site is not None:
                 if name is not None:
                     site.Name = name
@@ -788,7 +636,7 @@ def update_ifc_from_excel(ifc_file: str, excel_file: str, output_path: str, upda
             if building is None and add_new == "yes":
                 building = ifc.create_entity(
                     "IfcBuilding",
-                    GlobalId=ifcopenshell.guid.new(),
+                    GlobalId=new_guid(),
                     Name=clean_value(row.get("Name")) or "Building",
                 )
             if building is not None:
@@ -828,7 +676,7 @@ def update_ifc_from_excel(ifc_file: str, excel_file: str, output_path: str, upda
                 except Exception:
                     type_obj = ifc.create_entity(
                         "IfcBuildingElementType",
-                        GlobalId=ifcopenshell.guid.new(),
+                        GlobalId=new_guid(),
                         Name=type_name,
                     )
                 ifcopenshell.api.run("type.assign_type", ifc, related_objects=[elem], relating_type=type_obj)
@@ -934,7 +782,7 @@ def update_ifc_from_excel(ifc_file: str, excel_file: str, output_path: str, upda
                 cref.ReferencedSource = cls_src
                 ifc.create_entity(
                     "IfcRelAssociatesClassification",
-                    GlobalId=ifcopenshell.guid.new(),
+                    GlobalId=new_guid(),
                     RelatedObjects=[elem],
                     RelatingClassification=cref,
                 )
@@ -946,56 +794,9 @@ def update_ifc_from_excel(ifc_file: str, excel_file: str, output_path: str, upda
     return output_path
 
 
-class ExtractRequest(BaseModel):
-    file_id: str
-
-
-class UpdateRequest(BaseModel):
-    ifc_file_id: str
-    excel_file_id: str
-    update_mode: str = Field(default="update")
-    add_new: str = Field(default="no")
-
-
-@app.post("/api/extract")
-async def extract_excel(request: Request, payload: ExtractRequest):
-    session: SessionData = request.state.session
-    src = locate_files(session, [payload.file_id])[0]
-    base, _ = os.path.splitext(src.name)
-    out_path = session.root / f"{base}_extracted.xlsx"
-    extract_to_excel(str(src.path), str(out_path))
-    record = session.add_file(out_path, display_name=out_path.name, kind="excel")
-    return {"file": serialize_file(record)}
-
-
-@app.post("/api/update")
-async def update_from_excel(request: Request, payload: UpdateRequest):
-    session: SessionData = request.state.session
-    ifc_file = locate_files(session, [payload.ifc_file_id])[0]
-    excel_file = locate_files(session, [payload.excel_file_id])[0]
-    base, _ = os.path.splitext(ifc_file.name)
-    out_path = session.root / f"{base}_updated.ifc"
-    update_ifc_from_excel(str(ifc_file.path), str(excel_file.path), str(out_path), payload.update_mode, payload.add_new)
-    record = session.add_file(out_path, display_name=out_path.name, kind="ifc")
-    return {"file": serialize_file(record)}
-
-
-# -----------------------------
-# Tool 3: Global Z & BaseQuantities
-# -----------------------------
-
-
-def human_size(n: int) -> str:
-    for unit in ["B", "KB", "MB", "GB"]:
-        if n < 1024:
-            return f"{n:.0f} {unit}"
-        n /= 1024
-    return f"{n:.1f} TB"
-
-
-def sanitize_label(base: str) -> str:
-    return sanitize_filename(base)
-
+# ----------------------------------------------------------------------------
+# Storey / Global Z + BaseQuantities (from app (2).py)
+# ----------------------------------------------------------------------------
 
 _SI_PREFIX_TO_M = {None: 1.0, "MILLI": 1e-3, "CENTI": 1e-2, "DECI": 1e-1, "KILO": 1e3}
 
@@ -1005,48 +806,42 @@ def model_length_unit_in_m(model) -> float:
         projs = model.by_type("IfcProject")
         if not projs:
             return 1.0
-        ua = getattr(projs[0], "UnitsInContext", None)
-        if not ua:
-            return 1.0
-        for u in ua.Units or []:
-            if u.is_a("IfcSIUnit") and getattr(u, "UnitType", None) == "LENGTHUNIT":
-                if getattr(u, "Name", None) == "METRE":
-                    pref = getattr(u, "Prefix", None)
-                    return _SI_PREFIX_TO_M.get(pref, 1.0)
-            if u.is_a("IfcConversionBasedUnit") and getattr(u, "UnitType", None) == "LENGTHUNIT":
-                mu = getattr(u, "ConversionFactor", None)
-                try:
-                    v = getattr(mu, "ValueComponent", None)
-                    if v is not None:
-                        return float(v)
-                except Exception:
-                    pass
-        return 1.0
+        units = projs[0].UnitsInContext
+        if units and getattr(units, "Units", None):
+            for u in units.Units:
+                if u.is_a("IfcSIUnit") and getattr(u, "UnitType", None) == "LENGTHUNIT":
+                    prefix = getattr(u, "Prefix", None)
+                    factor = _SI_PREFIX_TO_M.get(prefix, 1.0)
+                    return factor
     except Exception:
-        return 1.0
+        pass
+    return 1.0
 
 
 def to_model_units_length(value, input_unit_code, model) -> float:
     if value in (None, ""):
         return None
-    val_m = float(value) if input_unit_code == "m" else float(value) / 1000.0
-    mu = model_length_unit_in_m(model)
-    if mu <= 0:
-        mu = 1.0
-    return val_m / mu
+    try:
+        val = float(value)
+    except Exception:
+        return None
+    if input_unit_code == "m":
+        return val / model_length_unit_in_m(model)
+    if input_unit_code == "mm":
+        return (val * 0.001) / model_length_unit_in_m(model)
+    return val
 
 
 def ui_to_meters(value, units_code) -> float:
     if value in (None, ""):
-        return None
-    return float(value) if units_code == "m" else float(value) / 1000.0
+        return 0.0
+    val = float(value)
+    return val if units_code == "m" else val / 1000.0
 
 
 def meters_to_model_units(val_m, model) -> float:
     mu = model_length_unit_in_m(model)
-    if mu <= 0:
-        mu = 1.0
-    return float(val_m) / mu
+    return val_m / mu if mu else val_m
 
 
 def get_first_owner_history(model):
@@ -1055,53 +850,53 @@ def get_first_owner_history(model):
 
 
 def find_storeys(model):
-    rows = []
-    for s in model.by_type("IfcBuildingStorey"):
-        name = getattr(s, "Name", "") or ""
-        elev = getattr(s, "Elevation", None)
-        label = f"#{s.id()} • {name or '(no name)'} • Elev={elev if isinstance(elev,(int,float)) else '—'}"
-        rows.append((s.id(), label, s, elev))
-    rows.sort(key=lambda r: (r[3] if isinstance(r[3], (int, float)) else float("inf"), r[1]))
-    return rows
+    storeys = []
+    for st in model.by_type("IfcBuildingStorey"):
+        label = f"{st.Name or '(unnamed)'} — Elev: {getattr(st, 'Elevation', None)}"
+        storeys.append((st.id(), label, st, getattr(st, "Elevation", None)))
+    storeys.sort(key=lambda s: (s[3] is None, s[3]))
+    return storeys
 
 
 def get_existing_elq(model, storey):
-    for rel in model.by_type("IfcRelDefinesByProperties"):
-        try:
-            if storey in (rel.RelatedObjects or ()):
-                elq = rel.RelatingPropertyDefinition
-                if elq and elq.is_a("IfcElementQuantity") and elq.Name == "BaseQuantities":
-                    return elq, rel
-        except Exception:
-            pass
-    return None, None
+    if not storey or not storey.IsDefinedBy:
+        return None
+    for rel in storey.IsDefinedBy:
+        if rel.is_a("IfcRelDefinesByProperties"):
+            pdef = rel.RelatingPropertyDefinition
+            if pdef and pdef.is_a("IfcElementQuantity") and getattr(pdef, "Name", "") == "BaseQuantities":
+                return pdef
+    return None
 
 
 def find_qtylength(elq, name):
-    if not elq:
+    if not elq or not getattr(elq, "Quantities", None):
         return None
-    for q in elq.Quantities or []:
-        if q.is_a("IfcQuantityLength") and q.Name == name:
+    for q in elq.Quantities:
+        if q.is_a("IfcQuantityLength") and getattr(q, "Name", "") == name:
             return q
     return None
 
 
 def ensure_qtylength(model, elq, name, value_model_units, description=None):
-    q = find_qtylength(elq, name)
-    if q:
-        q.LengthValue = float(value_model_units)
+    ql = find_qtylength(elq, name)
+    if ql:
+        ql.LengthValue = float(value_model_units)
         if description is not None:
-            q.Description = description
-        return q
-    q = model.create_entity(
+            ql.Description = description
+        return ql
+    ql = model.create_entity(
         "IfcQuantityLength",
         Name=name,
-        Description=description if description else None,
-        Unit=None,
         LengthValue=float(value_model_units),
+        Description=description,
+        Unit=None,
     )
-    elq.Quantities = tuple((elq.Quantities or ())) + (q,)
-    return q
+    if getattr(elq, "Quantities", None):
+        elq.Quantities = list(elq.Quantities) + [ql]
+    else:
+        elq.Quantities = [ql]
+    return ql
 
 
 def create_or_update_storey_basequantities(
@@ -1114,212 +909,140 @@ def create_or_update_storey_basequantities(
     mirror_to_qto=False,
 ):
     owner_history = get_first_owner_history(model)
-    elq, rel = get_existing_elq(model, storey)
-
-    if elq is None:
-        if model.schema.lower().startswith("ifc2x"):
-            elq = model.create_entity(
-                "IfcElementQuantity",
-                GlobalId=new_guid(),
-                OwnerHistory=owner_history,
-                Name="BaseQuantities",
-                Quantities=(),
-            )
-            rel = model.create_entity(
-                "IfcRelDefinesByProperties",
-                GlobalId=new_guid(),
-                OwnerHistory=owner_history,
-                RelatedObjects=(storey,),
-                RelatingPropertyDefinition=elq,
-            )
+    elq = get_existing_elq(model, storey)
+    if not elq:
+        elq = model.create_entity(
+            "IfcElementQuantity",
+            GlobalId=new_guid(),
+            OwnerHistory=owner_history,
+            Name="BaseQuantities",
+            MethodOfMeasurement=method_of_measurement,
+        )
+        rel = model.create_entity(
+            "IfcRelDefinesByProperties",
+            GlobalId=new_guid(),
+            OwnerHistory=owner_history,
+            Name="BaseQuantities",
+            Description=None,
+            RelatingPropertyDefinition=elq,
+            RelatedObjects=[storey],
+        )
+        if getattr(storey, "IsDefinedBy", None):
+            storey.IsDefinedBy = list(storey.IsDefinedBy) + [rel]
         else:
-            elq = model.create_entity(
-                "IfcElementQuantity",
-                GlobalId=new_guid(),
-                Name="BaseQuantities",
-                Quantities=(),
-            )
-            rel = model.create_entity(
-                "IfcRelDefinesByProperties",
-                GlobalId=new_guid(),
-                RelatedObjects=(storey,),
-                RelatingPropertyDefinition=elq,
-            )
+            storey.IsDefinedBy = [rel]
+    else:
+        if method_of_measurement is not None:
+            elq.MethodOfMeasurement = method_of_measurement
 
+    mu_factor = model_length_unit_in_m(model)
     if gross_val_ui is not None:
-        gross_model = to_model_units_length(gross_val_ui, input_unit_code, model)
-        ensure_qtylength(model, elq, "GrossHeight", gross_model)
+        gross_in_model = to_model_units_length(gross_val_ui, input_unit_code, model)
+        ensure_qtylength(model, elq, "GrossHeight", gross_in_model)
     if net_val_ui is not None:
-        net_model = to_model_units_length(net_val_ui, input_unit_code, model)
-        ensure_qtylength(model, elq, "NetHeight", net_model)
+        net_in_model = to_model_units_length(net_val_ui, input_unit_code, model)
+        ensure_qtylength(model, elq, "NetHeight", net_in_model)
 
     if mirror_to_qto:
-        qto_elq = None
-        for rel2 in model.by_type("IfcRelDefinesByProperties"):
-            try:
-                if storey in (rel2.RelatedObjects or (())):
-                    elq2 = rel2.RelatingPropertyDefinition
-                    if elq2 and elq2.is_a("IfcElementQuantity") and elq2.Name == "Qto_BuildingStoreyBaseQuantities":
-                        qto_elq = elq2
-                        break
-            except Exception:
-                pass
-        if qto_elq is None:
-            owner_history = get_first_owner_history(model)
-            if model.schema.lower().startswith("ifc2x"):
-                qto_elq = model.create_entity(
-                    "IfcElementQuantity",
-                    GlobalId=new_guid(),
-                    OwnerHistory=owner_history,
-                    Name="Qto_BuildingStoreyBaseQuantities",
-                    Quantities=(),
-                )
-                model.create_entity(
-                    "IfcRelDefinesByProperties",
-                    GlobalId=new_guid(),
-                    OwnerHistory=owner_history,
-                    RelatedObjects=(storey,),
-                    RelatingPropertyDefinition=qto_elq,
-                )
-            else:
-                qto_elq = model.create_entity(
-                    "IfcElementQuantity",
-                    GlobalId=new_guid(),
-                    Name="Qto_BuildingStoreyBaseQuantities",
-                    Quantities=(),
-                )
-                model.create_entity(
-                    "IfcRelDefinesByProperties",
-                    GlobalId=new_guid(),
-                    RelatedObjects=(storey,),
-                    RelatingPropertyDefinition=qto_elq,
-                )
-        if gross_val_ui is not None:
-            ensure_qtylength(model, qto_elq, "GrossHeight", to_model_units_length(gross_val_ui, input_unit_code, model))
-        if net_val_ui is not None:
-            ensure_qtylength(model, qto_elq, "NetHeight", to_model_units_length(net_val_ui, input_unit_code, model))
-
-    return elq, rel
+        elq.Name = "Qto_BuildingStoreyBaseQuantities"
 
 
 def ascend_to_root_local_placement(lp):
     cur = lp
-    guard = 0
-    while cur and getattr(cur, "PlacementRelTo", None) is not None and guard < 200:
+    while cur and getattr(cur, "PlacementRelTo", None) is not None:
         cur = cur.PlacementRelTo
-        guard += 1
     return cur
 
 
 def get_location_cartesian_point(lp):
-    if not lp:
+    if lp is None:
         return None
-    rel = getattr(lp, "RelativePlacement", None)
-    if not rel or not rel.is_a("IfcAxis2Placement3D"):
-        return None
-    loc = getattr(rel, "Location", None)
+    loc = getattr(lp, "Location", None)
     if loc and loc.is_a("IfcCartesianPoint"):
         return loc
     return None
 
 
 def get_all_map_conversions(model):
-    if model.schema == "IFC2X3":
-        return []
-
-    seen, out = set(), []
-    for mc in model.by_type("IfcMapConversion") or []:
-        try:
-            if mc and mc.id() not in seen:
-                out.append(mc)
-                seen.add(mc.id())
-        except Exception:
-            pass
-    for ctx in model.by_type("IfcGeometricRepresentationContext") or []:
-        try:
-            ops = getattr(ctx, "HasCoordinateOperation", None)
-            if not ops:
-                continue
-            iterable = ops if isinstance(ops, (list, tuple)) else [ops]
-            for op in iterable:
-                if op and op.is_a("IfcMapConversion") and op.id() not in seen:
-                    out.append(op)
-                    seen.add(op.id())
-        except Exception:
-            pass
-    return out
+    mcs = []
+    for site in model.by_type("IfcSite"):
+        if getattr(site, "RefLatitude", None) is not None:
+            for rel in site.HasCoordinateOperation or []:
+                if rel.is_a("IfcMapConversion"):
+                    mcs.append(rel)
+    return mcs
 
 
 def countershift_product_local_points(model, delta_model):
     c = 0
     for prod in model.by_type("IfcProduct"):
-        if prod.is_a("IfcProject") or prod.is_a("IfcSite") or prod.is_a("IfcBuilding") or prod.is_a("IfcBuildingStorey") or prod.is_a("IfcSpace"):
-            continue
-
         lp = getattr(prod, "ObjectPlacement", None)
-        if not lp:
-            continue
-        rel = getattr(lp, "RelativePlacement", None)
-        if not (rel and rel.is_a("IfcAxis2Placement3D")):
-            continue
-        loc = getattr(rel, "Location", None)
-        if not (loc and loc.is_a("IfcCartesianPoint")):
-            continue
-
-        coords = list(loc.Coordinates)
-        if len(coords) >= 3 and coords[2] is not None:
+        if lp and lp.is_a("IfcLocalPlacement"):
+            loc = get_location_cartesian_point(lp.RelativePlacement)
+            if loc is None:
+                continue
+            coords = list(loc.Coordinates)
+            if len(coords) < 3:
+                coords += [0.0] * (3 - len(coords))
             try:
-                new_z = float(coords[2]) - float(delta_model)
+                coords[2] = float(coords[2] or 0.0) - delta_model
                 new_pt = model.create_entity(
                     "IfcCartesianPoint",
                     Coordinates=(
                         float(coords[0]) if coords[0] is not None else 0.0,
                         float(coords[1]) if coords[1] is not None else 0.0,
-                        new_z,
+                        coords[2],
                     ),
                 )
-                rel.Location = new_pt
+                lp.RelativePlacement.Location = new_pt
                 c += 1
             except Exception:
                 pass
     return c
 
 
-def describe_storeys(ifc_path: str) -> List[Dict[str, object]]:
+def parse_ifc_storeys(ifc_path: str) -> Dict[str, Any]:
+    size = os.path.getsize(ifc_path)
     model = ifcopenshell.open(ifc_path)
     storeys = find_storeys(model)
-    return [
+    unit_m = model_length_unit_in_m(model)
+    unit_label = "m" if abs(unit_m - 1.0) < 1e-12 else ("mm" if abs(unit_m - 1e-3) < 1e-12 else f"{unit_m} m/unit")
+    mc_list = get_all_map_conversions(model)
+    choices = [
         {
             "id": sid,
             "label": lbl,
-            "elevation": elev,
-            "name": getattr(storey, "Name", ""),
-            "guid": getattr(storey, "GlobalId", ""),
         }
-        for sid, lbl, storey, elev in storeys
+        for (sid, lbl, _ent, _elev) in storeys
     ]
+    return {
+        "storeys": choices,
+        "summary": f"{len(choices)} storey level(s); model unit: {unit_label}; size {human_size(size)}",
+        "map_conversions": len(mc_list),
+        "unit_label": unit_label,
+    }
 
 
-def apply_global_adjustment(
+def apply_storey_changes(
     ifc_path: str,
-    storey_id: int,
+    storey_id: Optional[int],
     units_code: str,
-    gross_val,
-    net_val,
+    gross_val: Optional[float],
+    net_val: Optional[float],
     mom_txt: Optional[str],
     mirror: bool,
-    target_z,
+    target_z: Optional[float],
     countershift_geometry: bool,
     use_crs_mode: bool,
     update_all_mcs: bool,
     show_diag: bool,
     crs_set_storey_elev: bool,
-    output_path: Path,
-) -> Tuple[str, Path]:
+    output_path: str,
+) -> Tuple[str, str]:
     model = ifcopenshell.open(ifc_path)
     storey = model.by_id(int(storey_id)) if storey_id else None
     if not storey:
-        raise HTTPException(status_code=400, detail="Storey not found")
+        raise ValueError("Selected storey not found")
 
     gross_maybe = gross_val if gross_val not in (None, "") else None
     net_maybe = net_val if net_val not in (None, "") else None
@@ -1336,7 +1059,7 @@ def apply_global_adjustment(
 
     delta_model = 0.0
     used_path = "root-local"
-    diag_lines = []
+    diag_lines: List[str] = []
 
     mc_list = []
     if use_crs_mode and target_z not in (None, ""):
@@ -1346,22 +1069,18 @@ def apply_global_adjustment(
 
     if mc_list:
         new_m = ui_to_meters(target_z, units_code)
-        old_m_first = float(getattr(mc_list[0], "OrthogonalHeight", 0.0) or 0.0)
-        delta_m = new_m - old_m_first
-        for idx, mc in enumerate(mc_list):
-            old_m = float(getattr(mc, "OrthogonalHeight", 0.0) or 0.0)
-            mc.OrthogonalHeight = float(new_m)
+        delta_m = new_m
+        for mc in mc_list:
+            old_height = float(getattr(mc, "OrthogonalHeight", 0.0) or 0.0)
+            mc.OrthogonalHeight = new_m
             if show_diag:
-                diag_lines.append(f"CRS[{idx}] {old_m} m → {new_m} m (Δ={new_m-old_m} m)")
+                diag_lines.append(f"MapConversion {mc.id()} OrthogonalHeight {old_height} → {new_m} m")
         if crs_set_storey_elev:
-            target_mu = to_model_units_length(target_z, units_code, model)
-            old_storey_elev = float(getattr(storey, "Elevation", 0.0) or 0.0)
             delta_model = meters_to_model_units(delta_m, model)
-            storey.Elevation = float(target_mu)
+            old_storey_elev = float(getattr(storey, "Elevation", 0.0) or 0.0)
+            storey.Elevation = old_storey_elev + delta_model
             if show_diag:
-                diag_lines.append(
-                    f"Storey.Elevation (CRS mode ABS) {old_storey_elev} mu → {storey.Elevation} mu (target_mu={target_mu} mu, Δ={delta_model} mu)"
-                )
+                diag_lines.append(f"Storey.Elevation {old_storey_elev} mu → {storey.Elevation} mu")
         else:
             delta_model = meters_to_model_units(delta_m, model)
         used_path = "crs-mapconversion(all)" if (update_all_mcs and len(mc_list) > 1) else "crs-mapconversion"
@@ -1370,10 +1089,10 @@ def apply_global_adjustment(
             root_lp = ascend_to_root_local_placement(storey.ObjectPlacement)
             root_pt = get_location_cartesian_point(root_lp)
             if root_pt is None:
-                raise HTTPException(status_code=400, detail="Could not find root CartesianPoint for storey placement")
+                raise ValueError("Could not find root CartesianPoint for the storey's placement.")
             coords = list(root_pt.Coordinates)
             if len(coords) < 3:
-                raise HTTPException(status_code=400, detail="Root CartesianPoint has no Z coordinate")
+                raise ValueError("Root CartesianPoint has no Z coordinate.")
             old_z = float(coords[2]) if coords[2] is not None else 0.0
             new_z = to_model_units_length(target_z, units_code, model)
             delta_model = new_z - old_z
@@ -1404,8 +1123,8 @@ def apply_global_adjustment(
         (f"Counter-shifted {shifted} product placements by −Δ (kept world positions)." if shifted else None),
     ]
     try:
-        site = (model.by_type('IfcSite') or [None])[0]
-        site_ref = float(getattr(site, 'RefElevation', 0.0) or 0.0) if site else 0.0
+        site = (model.by_type("IfcSite") or [None])[0]
+        site_ref = float(getattr(site, "RefElevation", 0.0) or 0.0) if site else 0.0
         parts.append(f"Site.RefElevation = {site_ref} mu")
         parts.append(f"Storey.Elevation = {float(getattr(storey,'Elevation',0.0) or 0.0)} mu")
         mcs = get_all_map_conversions(model)
@@ -1422,66 +1141,14 @@ def apply_global_adjustment(
         parts.append(f" • NetHeight  (UI {units_code}) = {net_maybe}")
     if mom_txt:
         parts.append(f" • MethodOfMeasurement = '{mom_txt}'")
-    parts.append(f"Output: {output_path.name}")
+    parts.append(f"Output: {os.path.basename(output_path)}")
     return "\n".join([p for p in parts if p]), output_path
 
 
-class StoreyRequest(BaseModel):
-    file_id: str
+# ----------------------------------------------------------------------------
+# Proxy / Type mapper (from app (3).py)
+# ----------------------------------------------------------------------------
 
-
-class GlobalAdjustRequest(BaseModel):
-    ifc_file_id: str
-    storey_id: int
-    units_code: str = "m"
-    gross: Optional[float] = None
-    net: Optional[float] = None
-    mom: Optional[str] = None
-    mirror: bool = False
-    target_z: Optional[float] = None
-    countershift: bool = True
-    crs_mode: bool = True
-    update_all_mcs: bool = True
-    show_diag: bool = True
-    crs_set_storey_elev: bool = True
-
-
-@app.post("/api/storeys")
-async def list_storeys(request: Request, payload: StoreyRequest):
-    session: SessionData = request.state.session
-    src = locate_files(session, [payload.file_id])[0]
-    return {"storeys": describe_storeys(str(src.path))}
-
-
-@app.post("/api/global-z")
-async def apply_global(request: Request, payload: GlobalAdjustRequest):
-    session: SessionData = request.state.session
-    src = locate_files(session, [payload.ifc_file_id])[0]
-    base, _ = os.path.splitext(src.name)
-    out_path = session.root / f"{base}_gsb_adjusted.ifc"
-    summary, new_path = apply_global_adjustment(
-        ifc_path=str(src.path),
-        storey_id=payload.storey_id,
-        units_code=payload.units_code,
-        gross_val=payload.gross,
-        net_val=payload.net,
-        mom_txt=payload.mom,
-        mirror=payload.mirror,
-        target_z=payload.target_z,
-        countershift_geometry=payload.countershift,
-        use_crs_mode=payload.crs_mode,
-        update_all_mcs=payload.update_all_mcs,
-        show_diag=payload.show_diag,
-        crs_set_storey_elev=payload.crs_set_storey_elev,
-        output_path=out_path,
-    )
-    record = session.add_file(new_path, display_name=new_path.name, kind="ifc")
-    return {"file": serialize_file(record), "summary": summary}
-
-
-# -----------------------------
-# Tool 4: Proxy to type mapper
-# -----------------------------
 FALLBACK_ENUM_LIBRARY = {
     "IfcWasteTerminalTypeEnum": {
         "FLOORTRAP",
@@ -1614,13 +1281,14 @@ def enum_from_token(raw: str, enum_set: str, enumlib: dict) -> str:
     return candidate if candidate in values else "USERDEFINED"
 
 
-def process_ifc_proxy(input_path: str, output_path: str) -> Tuple[str, str]:
-    with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
+def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
+    with open(in_path, "r", encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
 
     enumlib = {}
+    model = None
     try:
-        model = ifcopenshell.open(input_path)
+        model = ifcopenshell.open(in_path)
         enumlib = build_enum_library(model)
     except Exception:
         enumlib = FALLBACK_ENUM_LIBRARY.copy()
@@ -1691,10 +1359,14 @@ def process_ifc_proxy(input_path: str, output_path: str) -> Tuple[str, str]:
             enum_set = lib_entry["enum_set"]
 
             forced = FORCED_PREDEFINED.get(target_type.lower())
-            enum_val = forced if forced else enum_from_token(predef_raw, enum_set, enumlib)
+            if forced:
+                enum_val = forced
+            else:
+                enum_val = enum_from_token(predef_raw, enum_set, enumlib)
 
             new_line = (
-                f"{ws}{type_id}={target_type}('{guid}',{owner}," f"'{type_name}',{mid},.{enum_val}.);"
+                f"{ws}{type_id}={target_type}('{guid}',{owner},"
+                f"'{type_name}',{mid},.{enum_val}.);"
             )
             updated_lines.append(new_line)
             stats["proxy_types_converted"] += 1
@@ -1731,9 +1403,15 @@ def process_ifc_proxy(input_path: str, output_path: str) -> Tuple[str, str]:
             enum_set = lib_entry["enum_set"]
 
             forced = FORCED_PREDEFINED.get(target_type.lower())
-            enum_val = forced if forced else enum_from_token(predef_raw, enum_set, enumlib)
+            if forced:
+                enum_val = forced
+            else:
+                enum_val = enum_from_token(predef_raw, enum_set, enumlib)
 
-            new_line = f"{ws}{type_id}={target_type}('{guid}',{owner}," f"'{type_name}',{mid},.{enum_val}.);"
+            new_line = (
+                f"{ws}{type_id}={target_type}('{guid}',{owner},"
+                f"'{type_name}',{mid},.{enum_val}.);"
+            )
             updated_lines.append(new_line)
             stats["building_types_converted"] += 1
 
@@ -1741,8 +1419,6 @@ def process_ifc_proxy(input_path: str, output_path: str) -> Tuple[str, str]:
             continue
 
         updated_lines.append(line)
-
-    occid_to_entity = {}
 
     rel_def_type_re = re.compile(
         r"^(?P<ws>\s*)#(?P<relid>\d+)=IFCRELDEFINESBYTYPE\("
@@ -1755,16 +1431,15 @@ def process_ifc_proxy(input_path: str, output_path: str) -> Tuple[str, str]:
         re.IGNORECASE,
     )
 
+    occid_to_entity = {}
     for line in updated_lines:
         m = rel_def_type_re.match(line)
         if not m:
             continue
-
         d = m.groupdict()
         type_id = d["typeid"]
         if type_id not in typeid_to_occ_entity:
             continue
-
         occ_entity = typeid_to_occ_entity[type_id]
         objs_raw = d["objs"]
         obj_ids = [o.strip() for o in objs_raw.split(",") if o.strip()]
@@ -1796,236 +1471,260 @@ def process_ifc_proxy(input_path: str, output_path: str) -> Tuple[str, str]:
         final_lines.append(new_line)
         stats["occurrences_converted"] += 1
 
-    with open(output_path, "w", encoding="utf-8") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         f.writelines(final_lines)
 
+    base = os.path.basename(in_path)
     summary = (
-        f"Input file:  {os.path.basename(input_path)}\n"
-        f"Output file: {os.path.basename(output_path)}\n\n"
+        f"Input file:  {base}\n"
+        f"Output file: {os.path.basename(out_path)}\n\n"
         f"Proxy types (IFCBUILDINGELEMENTPROXYTYPE) found: {stats['proxy_types_total']}\n"
         f"  → converted to specific IFC types: {stats['proxy_types_converted']}\n"
         f"  → left as IFCBUILDINGELEMENTPROXYTYPE: {stats['left_as_proxy_type']}\n\n"
         f"Building types (IFCBUILDINGELEMENTTYPE) found: {stats['building_types_total']}\n"
         f"  → converted to specific IFC types: {stats['building_types_converted']}\n"
         f"  → left as IFCBUILDINGELEMENTTYPE: {stats['left_as_building_type']}\n\n"
-        f"Occurrences converted from IfcBuildingElementProxy to typed entities: {stats['occurrences_converted']}\n\n"
-        "Occurrences are retyped only when an IfcRelDefinesByType exists and the referenced type could be mapped. "
-        "Mapping is IFC2x3-compliant: waste terminals → IfcFlowTerminal/IfcWasteTerminalType, pipe segments → "
-        "IfcFlowSegment/IfcPipeSegmentType, tanks → IfcFlowStorageDevice/IfcTankType, distribution chambers → "
+        f"Occurrences converted from IfcBuildingElementProxy to typed entities: "
+        f"{stats['occurrences_converted']}\n\n"
+        "Occurrences are retyped only when an IfcRelDefinesByType exists and the "
+        "referenced type could be mapped. Mapping is IFC2x3-compliant: waste terminals "
+        "→ IfcFlowTerminal/IfcWasteTerminalType, pipe segments → "
+        "IfcFlowSegment/IfcPipeSegmentType, tanks → "
+        "IfcFlowStorageDevice/IfcTankType, distribution chambers → "
         "IfcDistributionChamberElement/IfcDistributionChamberElementType.\n"
     )
 
-    return output_path, summary
+    return out_path, summary
 
 
-class ProxyMapRequest(BaseModel):
-    file_id: str
+# ----------------------------------------------------------------------------
+# FastAPI app + routes
+# ----------------------------------------------------------------------------
+
+app = FastAPI(title="IFC Toolkit Hub")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 
-@app.post("/api/proxy-map")
-async def proxy_map(request: Request, payload: ProxyMapRequest):
-    session: SessionData = request.state.session
-    src = locate_files(session, [payload.file_id])[0]
-    base, ext = os.path.splitext(src.name)
-    out_path = session.root / f"{base}_typed{ext}"
-    output_path, summary = process_ifc_proxy(str(src.path), str(out_path))
-    record = session.add_file(Path(output_path), display_name=Path(output_path).name, kind="ifc")
-    return {"file": serialize_file(record), "summary": summary}
+@app.on_event("startup")
+def startup_cleanup():
+    SESSION_STORE.cleanup_stale()
 
 
-# -----------------------------
-# Tool 5: Level manager (list/add/move/delete)
-# -----------------------------
+@app.on_event("shutdown")
+def shutdown_cleanup():
+    for sid in list(SESSION_STORE.sessions.keys()):
+        SESSION_STORE.drop(sid)
 
 
-def list_storeys_with_counts(ifc_path: str) -> List[Dict[str, object]]:
-    model = ifcopenshell.open(ifc_path)
-    storey_lookup = {s.id(): s for s in model.by_type("IfcBuildingStorey")}
-    counts = {sid: 0 for sid in storey_lookup}
-    for rel in model.by_type("IfcRelContainedInSpatialStructure"):
-        try:
-            sid = getattr(rel.RelatingStructure, "id", lambda: None)()
-            if sid in counts:
-                counts[sid] += len(rel.RelatedElements or [])
-        except Exception:
-            continue
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
-    rows = []
-    for s in storey_lookup.values():
-        elev = getattr(s, "Elevation", None)
-        rows.append(
-            {
-                "id": s.id(),
-                "guid": getattr(s, "GlobalId", ""),
-                "name": getattr(s, "Name", ""),
-                "elevation": elev,
-                "element_count": counts.get(s.id(), 0),
-                "label": f"#{s.id()} • {getattr(s, 'Name', '') or '(no name)'} • Elev={elev if isinstance(elev,(int,float)) else '—'}",
-            }
+
+@app.post("/api/session")
+def create_session(payload: Dict[str, Any] = Body(default=None)):
+    SESSION_STORE.cleanup_stale()
+    incoming = payload.get("session_id") if payload else None
+    if incoming and SESSION_STORE.exists(incoming):
+        SESSION_STORE.touch(incoming)
+        session_id = incoming
+    else:
+        session_id = SESSION_STORE.create()
+    expiry = datetime.datetime.utcnow() + datetime.timedelta(hours=SESSION_STORE.ttl_hours)
+    return {"session_id": session_id, "expires_at": expiry.isoformat() + "Z"}
+
+
+@app.delete("/api/session/{session_id}")
+def end_session(session_id: str):
+    SESSION_STORE.drop(session_id)
+    return {"status": "deleted"}
+
+
+@app.get("/api/session/{session_id}/files")
+def list_files(session_id: str):
+    root = SESSION_STORE.ensure(session_id)
+    files = []
+    for fname in sorted(os.listdir(root)):
+        fpath = os.path.join(root, fname)
+        if os.path.isfile(fpath):
+            stat = os.stat(fpath)
+            files.append({
+                "name": fname,
+                "size": stat.st_size,
+                "modified": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            })
+    return {"files": files}
+
+
+@app.post("/api/session/{session_id}/upload")
+async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
+    root = SESSION_STORE.ensure(session_id)
+    saved = []
+    for f in files:
+        safe = sanitize_filename(os.path.basename(f.filename))
+        dest = os.path.join(root, safe)
+        with open(dest, "wb") as dst:
+            content = await f.read()
+            dst.write(content)
+        saved.append({"name": safe, "size": os.path.getsize(dest)})
+    return {"files": saved}
+
+
+@app.get("/api/session/{session_id}/download")
+def download_file(session_id: str, name: str):
+    root = SESSION_STORE.ensure(session_id)
+    safe = sanitize_filename(os.path.basename(name))
+    path = os.path.join(root, safe)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path, filename=safe)
+
+
+@app.post("/api/session/{session_id}/clean")
+def run_cleaner(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    files = payload.get("files", [])
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    prefix = payload.get("prefix", "InfoDrainage")
+    case_insensitive = bool(payload.get("case_insensitive", True))
+    delete_psets_with_prefix = bool(payload.get("delete_psets_with_prefix", True))
+    delete_properties_in_other_psets = bool(payload.get("delete_properties_in_other_psets", True))
+    drop_empty_psets = bool(payload.get("drop_empty_psets", True))
+    also_remove_loose_props = bool(payload.get("also_remove_loose_props", True))
+
+    reports = []
+    outputs = []
+    ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    for fname in files:
+        in_path = os.path.join(root, sanitize_filename(fname))
+        if not os.path.isfile(in_path):
+            raise HTTPException(status_code=404, detail=f"File not found: {fname}")
+        base, ext = os.path.splitext(os.path.basename(in_path))
+        out_name = f"{base}_cleaned_{ts}{ext or '.ifc'}"
+        out_path = os.path.join(root, out_name)
+        report = clean_ifc_file(
+            in_path=in_path,
+            out_path=out_path,
+            prefix=prefix,
+            case_insensitive=case_insensitive,
+            delete_psets_with_prefix=delete_psets_with_prefix,
+            delete_properties_in_other_psets=delete_properties_in_other_psets,
+            drop_empty_psets=drop_empty_psets,
+            also_remove_loose_props=also_remove_loose_props,
         )
-    rows.sort(key=lambda r: (r["elevation"] if isinstance(r["elevation"], (int, float)) else float("inf"), r["name"]))
-    return rows
+        reports.append(report)
+        outputs.append({"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"})
+    return {"reports": reports, "outputs": outputs}
 
 
-def select_container(model):
-    building = (model.by_type("IfcBuilding") or [None])[0]
-    if building:
-        return building
-    site = (model.by_type("IfcSite") or [None])[0]
-    if site:
-        return site
-    return (model.by_type("IfcProject") or [None])[0]
+@app.post("/api/session/{session_id}/excel/extract")
+def excel_extract(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    source = payload.get("ifc_file")
+    if not source:
+        raise HTTPException(status_code=400, detail="No IFC file provided")
+    in_path = os.path.join(root, sanitize_filename(source))
+    if not os.path.isfile(in_path):
+        raise HTTPException(status_code=404, detail="IFC file not found")
+    base = os.path.splitext(os.path.basename(in_path))[0]
+    out_name = f"{base}_extracted.xlsx"
+    out_path = os.path.join(root, out_name)
+    extract_to_excel(in_path, out_path)
+    return {"excel": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"}}
 
 
-def create_storey_with_placement(model, name: str, elevation_ui: Optional[float], units_code: str) -> object:
-    container = select_container(model)
-    elevation_mu = to_model_units_length(elevation_ui, units_code, model) if elevation_ui not in (None, "") else None
-    base_placement = getattr(container, "ObjectPlacement", None) if container else None
-
-    loc = model.create_entity(
-        "IfcCartesianPoint",
-        Coordinates=(
-            0.0,
-            0.0,
-            float(elevation_mu) if elevation_mu is not None else 0.0,
-        ),
-    )
-    axis = model.create_entity("IfcAxis2Placement3D", Location=loc)
-    lp_kwargs = {"RelativePlacement": axis}
-    if base_placement is not None:
-        lp_kwargs["PlacementRelTo"] = base_placement
-    local_placement = model.create_entity("IfcLocalPlacement", **lp_kwargs)
-
-    storey = model.create_entity(
-        "IfcBuildingStorey",
-        GlobalId=new_guid(),
-        Name=name,
-        Elevation=float(elevation_mu) if elevation_mu is not None else None,
-        ObjectPlacement=local_placement,
-    )
-    if container is not None:
-        ensure_aggregates(container, storey, model)
-    return storey
+@app.post("/api/session/{session_id}/excel/update")
+def excel_apply(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    ifc_name = payload.get("ifc_file")
+    excel_name = payload.get("excel_file")
+    if not ifc_name or not excel_name:
+        raise HTTPException(status_code=400, detail="IFC and Excel files are required")
+    in_path = os.path.join(root, sanitize_filename(ifc_name))
+    xls_path = os.path.join(root, sanitize_filename(excel_name))
+    if not os.path.isfile(in_path) or not os.path.isfile(xls_path):
+        raise HTTPException(status_code=404, detail="Input file(s) not found")
+    base = os.path.splitext(os.path.basename(in_path))[0]
+    out_name = f"{base}_updated.ifc"
+    out_path = os.path.join(root, out_name)
+    update_ifc_from_excel(in_path, xls_path, out_path, update_mode=payload.get("update_mode", "update"), add_new=payload.get("add_new", "no"))
+    return {"ifc": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"}}
 
 
-def reassign_containment(model, source_storey, target_storey) -> int:
-    moved = 0
-    for rel in model.by_type("IfcRelContainedInSpatialStructure"):
-        try:
-            if rel.RelatingStructure == source_storey:
-                rel.RelatingStructure = target_storey
-                moved += len(rel.RelatedElements or [])
-        except Exception:
-            continue
-    return moved
+@app.post("/api/session/{session_id}/storeys/parse")
+def parse_storeys(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    src = payload.get("ifc_file")
+    if not src:
+        raise HTTPException(status_code=400, detail="No IFC file provided")
+    in_path = os.path.join(root, sanitize_filename(src))
+    if not os.path.isfile(in_path):
+        raise HTTPException(status_code=404, detail="IFC file not found")
+    return parse_ifc_storeys(in_path)
 
 
-def delete_storey_and_reassign(model, storey, target_storey) -> None:
-    reassign_containment(model, storey, target_storey)
-
-    # Remove from aggregates
-    for rel in list(model.by_type("IfcRelAggregates") or []):
-        try:
-            if storey in (rel.RelatedObjects or []):
-                new_related = [ro for ro in rel.RelatedObjects if ro != storey]
-                if new_related:
-                    rel.RelatedObjects = new_related
-                else:
-                    model.remove(rel)
-        except Exception:
-            continue
-
+@app.post("/api/session/{session_id}/storeys/apply")
+def apply_storeys(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    src = payload.get("ifc_file")
+    if not src:
+        raise HTTPException(status_code=400, detail="No IFC file provided")
+    in_path = os.path.join(root, sanitize_filename(src))
+    if not os.path.isfile(in_path):
+        raise HTTPException(status_code=404, detail="IFC file not found")
+    storey_id = payload.get("storey_id")
+    if storey_id is None:
+        raise HTTPException(status_code=400, detail="storey_id is required")
+    base = os.path.splitext(os.path.basename(in_path))[0]
+    out_name = f"{base}_gsb_adjusted.ifc"
+    out_path = os.path.join(root, out_name)
     try:
-        model.remove(storey)
-    except Exception:
-        pass
-
-
-class LevelListRequest(BaseModel):
-    file_id: str
-
-
-class LevelAddRequest(BaseModel):
-    ifc_file_id: str
-    name: str
-    elevation: Optional[float] = None
-    units_code: str = "m"
-
-
-class LevelMoveRequest(BaseModel):
-    ifc_file_id: str
-    source_storey_id: int
-    target_storey_id: int
-
-
-class LevelDeleteRequest(BaseModel):
-    ifc_file_id: str
-    delete_storey_id: int
-    target_storey_id: int
-
-
-@app.post("/api/levels/list")
-async def list_levels(request: Request, payload: LevelListRequest):
-    session: SessionData = request.state.session
-    src = locate_files(session, [payload.file_id])[0]
-    return {"levels": list_storeys_with_counts(str(src.path))}
-
-
-@app.post("/api/levels/add")
-async def add_level(request: Request, payload: LevelAddRequest):
-    session: SessionData = request.state.session
-    src = locate_files(session, [payload.ifc_file_id])[0]
-    model = ifcopenshell.open(str(src.path))
-    storey = create_storey_with_placement(model, payload.name, payload.elevation, payload.units_code)
-    base, _ = os.path.splitext(src.name)
-    out_path = session.root / f"{base}_with_level.ifc"
-    model.write(out_path)
-    record = session.add_file(out_path, display_name=out_path.name, kind="ifc")
+        summary, path = apply_storey_changes(
+            ifc_path=in_path,
+            storey_id=storey_id,
+            units_code=payload.get("units", "m"),
+            gross_val=payload.get("gross"),
+            net_val=payload.get("net"),
+            mom_txt=payload.get("mom"),
+            mirror=bool(payload.get("mirror", False)),
+            target_z=payload.get("target_z"),
+            countershift_geometry=bool(payload.get("countershift_geometry", True)),
+            use_crs_mode=bool(payload.get("use_crs_mode", True)),
+            update_all_mcs=bool(payload.get("update_all_mcs", True)),
+            show_diag=bool(payload.get("show_diag", True)),
+            crs_set_storey_elev=bool(payload.get("crs_set_storey_elev", True)),
+            output_path=out_path,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {
-        "file": serialize_file(record),
-        "created_level": {"id": storey.id(), "guid": getattr(storey, 'GlobalId', ''), "name": getattr(storey, 'Name', ''), "elevation": getattr(storey, 'Elevation', None)},
-        "levels": list_storeys_with_counts(str(out_path)),
+        "summary": summary,
+        "ifc": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"},
     }
 
 
-@app.post("/api/levels/move")
-async def move_level_elements(request: Request, payload: LevelMoveRequest):
-    session: SessionData = request.state.session
-    src = locate_files(session, [payload.ifc_file_id])[0]
-    model = ifcopenshell.open(str(src.path))
-    source = model.by_id(payload.source_storey_id)
-    target = model.by_id(payload.target_storey_id)
-    if not source or not target:
-        raise HTTPException(status_code=404, detail="Source or target storey not found")
-    moved = reassign_containment(model, source, target)
-    base, _ = os.path.splitext(src.name)
-    out_path = session.root / f"{base}_moved.ifc"
-    model.write(out_path)
-    record = session.add_file(out_path, display_name=out_path.name, kind="ifc")
-    return {"file": serialize_file(record), "moved_count": moved, "levels": list_storeys_with_counts(str(out_path))}
+@app.post("/api/session/{session_id}/proxy")
+def proxy_mapper(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    src = payload.get("ifc_file")
+    if not src:
+        raise HTTPException(status_code=400, detail="No IFC file provided")
+    in_path = os.path.join(root, sanitize_filename(src))
+    if not os.path.isfile(in_path):
+        raise HTTPException(status_code=404, detail="IFC file not found")
+    base, ext = os.path.splitext(os.path.basename(in_path))
+    out_name = f"{base}_typed{ext or '.ifc'}"
+    out_path = os.path.join(root, out_name)
+    _, summary = rewrite_proxy_types(in_path, out_path)
+    return {
+        "summary": summary,
+        "ifc": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"},
+    }
 
 
-@app.post("/api/levels/delete")
-async def delete_level(request: Request, payload: LevelDeleteRequest):
-    session: SessionData = request.state.session
-    src = locate_files(session, [payload.ifc_file_id])[0]
-    model = ifcopenshell.open(str(src.path))
-    delete_storey = model.by_id(payload.delete_storey_id)
-    target_storey = model.by_id(payload.target_storey_id)
-    if not delete_storey or not target_storey:
-        raise HTTPException(status_code=404, detail="Storey not found")
-    delete_storey_and_reassign(model, delete_storey, target_storey)
-    base, _ = os.path.splitext(src.name)
-    out_path = session.root / f"{base}_level_deleted.ifc"
-    model.write(out_path)
-    record = session.add_file(out_path, display_name=out_path.name, kind="ifc")
-    return {"file": serialize_file(record), "levels": list_storeys_with_counts(str(out_path))}
-
-
-# -----------------------------
-# Run
-# -----------------------------
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app:app", host="0.0.0.0", port=7860, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=7860)
