@@ -82,10 +82,15 @@ async function loadViewerLibs() {
     THREE = threeMod;
   } catch (err) {
     console.error("Viewer dependencies failed to load", err);
-    setStatus(
-      "Viewer dependencies could not load. Allow CDN access to jsdelivr or provide local viewer assets."
-    );
-    throw err;
+    const message = `Could not load viewer dependencies: ${err?.message || err}`;
+    setStatus(message);
+    renderDiagnostics("Viewer dependencies failed", [
+      "Allow CDN access to jsdelivr or provide local viewer assets.",
+      err?.message ? `Error: ${err.message}` : null,
+    ].filter(Boolean));
+    const dependencyError = new Error(message);
+    dependencyError.dependencyFailure = true;
+    throw dependencyError;
   }
 }
 
@@ -122,9 +127,28 @@ async function loadSelectedFile() {
     const file = new File([blob], fileName);
 
     state.viewer?.dispose?.();
-    state.viewer = await createViewer();
+    try {
+      state.viewer = await createViewer();
+    } catch (err) {
+      renderDiagnostics("Viewer initialization failed", [
+        "Could not start the IFC viewer.",
+        err?.message ? `Error: ${err.message}` : null,
+        "If this persists, verify CDN access for viewer assets.",
+      ].filter(Boolean));
+      throw err;
+    }
     if (!state.viewer) throw new Error("Viewer could not start");
-    const model = await state.viewer.IFC.loadIfcFile(file, true);
+    let model;
+    try {
+      model = await state.viewer.IFC.loadIfcFile(file, true);
+    } catch (err) {
+      renderDiagnostics("IFC parsing failed", [
+        `File: ${fileName}`,
+        err?.message ? `Error: ${err.message}` : null,
+        "Ensure the IFC file is valid and supported.",
+      ].filter(Boolean));
+      throw new Error(`IFC parsing failed: ${err?.message || "Unknown error"}`);
+    }
     state.activeModelID = model.modelID;
     togglePanel("layers-panel", el("toggle-layers")?.checked ?? true);
     togglePanel("properties-panel", el("toggle-properties")?.checked ?? true);
@@ -135,7 +159,17 @@ async function loadSelectedFile() {
     wireViewerInteractions();
   } catch (err) {
     console.error(err);
-    setStatus("Could not load IFC. Check the console for details.");
+    const baseMessage = err?.message || "Unknown error";
+    const dependencyHint = err?.dependencyFailure
+      ? " Check CDN/network access for viewer assets."
+      : "";
+    const statusMessage = `Could not load IFC: ${baseMessage}${dependencyHint}`;
+    setStatus(statusMessage);
+    if (!el("properties-list")?.innerHTML) {
+      renderDiagnostics("Viewer error", [
+        err?.message ? `Error: ${err.message}` : "An unexpected error occurred.",
+      ]);
+    }
   }
 }
 
@@ -190,6 +224,26 @@ function renderProperties(props) {
     .filter(([, v]) => v !== null && v !== undefined && v !== "")
     .map(([k, v]) => `<div class="prop-row"><span>${k}</span><strong>${v?.value || v}</strong></div>`);
   wrap.innerHTML = entries.join("") || "No properties available.";
+}
+
+function renderDiagnostics(title, details = []) {
+  const wrap = el("properties-list");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  const heading = document.createElement("div");
+  heading.className = "prop-row";
+  heading.innerHTML = `<strong>${title}</strong>`;
+  wrap.appendChild(heading);
+  if (details.length) {
+    const list = document.createElement("ul");
+    list.className = "diagnostics";
+    details.forEach((text) => {
+      const li = document.createElement("li");
+      li.textContent = text;
+      list.appendChild(li);
+    });
+    wrap.appendChild(list);
+  }
 }
 
 function toggleEdges(enabled) {
