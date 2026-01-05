@@ -1,4 +1,4 @@
-import os
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +13,7 @@ CHECK_SHEET_NAME = "09-IFC-SPF Model Checking Reqs"
 CHECK_ID_RE = re.compile(r"^\d{2}\.\d{2}$")
 DEFAULT_SOURCE_PATH = Path("/mnt/data/Book1.xlsx")
 FALLBACK_SOURCE_PATH = Path("config/sample_model_checks.xlsx")
+STATIC_SOURCE_PATH = Path("config/dfe_model_check_requirements.json")
 
 
 @dataclass
@@ -126,35 +127,83 @@ def _apply_mapping(check: CheckDefinition, mapping_config: Dict[str, Dict], expr
     return check
 
 
-def load_check_definitions(mapping_config: Dict[str, Dict], expressions: Dict[str, str]) -> List[CheckDefinition]:
-    src = _resolve_source_path()
-    if not src:
-        # No spreadsheet available; return empty definitions so the app can still run.
-        return []
-    df = pd.read_excel(src, sheet_name=CHECK_SHEET_NAME)
+def _parse_rows(
+    rows: List[Dict[str, str]], mapping_config: Dict[str, Dict], expressions: Dict[str, str]
+) -> List[CheckDefinition]:
     definitions: List[CheckDefinition] = []
-    for idx, row in df.iterrows():
-        check_id = str(row.get("DfE Ref.", "")).strip()
+    for row in rows:
+        check_id = str(row.get("check_id", "")).strip()
         if not CHECK_ID_RE.match(check_id):
             continue
-        info = str(row.get("Information To Be Checked", "")).strip()
-        ent = str(row.get("IFC Entity", "")).strip()
-        desc = str(row.get("Description", "")).strip()
-        applicable = str(row.get("Applicable Models", "")).strip() or None
-        entities = [e.strip() for e in ent.split("/") if e.strip()] or ["IfcProduct"]
-        milestones = _guess_milestones(df, idx)
+        entities_raw = row.get("entity_scope") or ["IfcProduct"]
+        if isinstance(entities_raw, str):
+            entities = [e.strip() for e in entities_raw.split("/") if e.strip()]
+        else:
+            entities = [str(e).strip() for e in entities_raw if str(e).strip()]
+        if not entities:
+            entities = ["IfcProduct"]
+        milestones = row.get("milestones") or []
         chk = CheckDefinition(
             check_id=check_id,
-            description=desc,
+            description=str(row.get("description", "")).strip(),
             entity_scope=entities,
-            info_to_check=info,
-            applicable_models=applicable,
+            info_to_check=str(row.get("info_to_check", "")).strip(),
+            applicable_models=(str(row.get("applicable_models", "")).strip() or None),
             milestones=milestones,
             section=_section_for_entities(entities),
         )
         chk = _apply_mapping(chk, mapping_config, expressions)
         definitions.append(chk)
     return definitions
+
+
+def _load_static_rows() -> List[Dict[str, str]]:
+    if STATIC_SOURCE_PATH.exists():
+        with open(STATIC_SOURCE_PATH, "r", encoding="utf-8") as f:
+            try:
+                return json.load(f)
+            except Exception:
+                return []
+    return []
+
+
+def _load_excel_rows() -> List[Dict[str, str]]:
+    src = _resolve_source_path()
+    if not src:
+        return []
+    df = pd.read_excel(src, sheet_name=CHECK_SHEET_NAME)
+    # Some spreadsheets use the first row as labels rather than column headers
+    if "DfE Ref." not in df.columns and len(df) > 0:
+        header = df.iloc[0]
+        df = df.iloc[1:].copy()
+        df.columns = header
+    rows: List[Dict[str, str]] = []
+    for idx, row in df.iterrows():
+        check_id = str(row.get("DfE Ref.", "")).strip()
+        if not CHECK_ID_RE.match(check_id):
+            continue
+        entities = [e.strip() for e in str(row.get("IFC Entity", "")).split("/") if e.strip()]
+        rows.append(
+            {
+                "check_id": check_id,
+                "description": str(row.get("Description", "")).strip(),
+                "entity_scope": entities,
+                "info_to_check": str(row.get("Information To Be Checked", "")).strip(),
+                "applicable_models": str(row.get("Applicable Models", "")).strip() or None,
+                "milestones": _guess_milestones(df, idx),
+            }
+        )
+    return rows
+
+
+def load_check_definitions(mapping_config: Dict[str, Dict], expressions: Dict[str, str]) -> List[CheckDefinition]:
+    rows = _load_static_rows()
+    if not rows:
+        rows = _load_excel_rows()
+    # No data available; return empty list so the rest of the app keeps running.
+    if not rows:
+        return []
+    return _parse_rows(rows, mapping_config, expressions)
 
 
 def summarize_sections(definitions: List[CheckDefinition]) -> Dict[str, int]:

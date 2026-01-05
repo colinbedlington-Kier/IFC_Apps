@@ -8,17 +8,22 @@ const state = {
 let IFCViewerAPI = null;
 let THREE = null;
 const VIEWER_SOURCES = {
-  viewer: {
-    local: "/static/vendor/web-ifc-viewer/IFCViewerAPI.js",
-    cdn: "https://cdn.jsdelivr.net/npm/web-ifc-viewer@1.0.172/dist/IFCViewerAPI.js",
-  },
-  three: {
-    local: "/static/vendor/three/three.module.js",
-    cdn: "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
-  },
+  viewer: [
+    { label: "local", url: "/static/vendor/web-ifc-viewer/IFCViewerAPI.js" },
+    { label: "jsdelivr", url: "https://cdn.jsdelivr.net/npm/web-ifc-viewer@1.0.172/dist/IFCViewerAPI.js" },
+    { label: "unpkg", url: "https://unpkg.com/web-ifc-viewer@1.0.172/dist/IFCViewerAPI.js" },
+  ],
+  three: [
+    { label: "local", url: "/static/vendor/three/three.module.js" },
+    { label: "jsdelivr", url: "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js" },
+    { label: "unpkg", url: "https://unpkg.com/three@0.164.1/build/three.module.js" },
+  ],
   wasm: {
     local: "/static/vendor/web-ifc/",
-    cdn: "https://cdn.jsdelivr.net/npm/web-ifc@0.0.50/",
+    cdn: [
+      "https://cdn.jsdelivr.net/npm/web-ifc@0.0.50/",
+      "https://unpkg.com/web-ifc@0.0.50/",
+    ],
   },
 };
 
@@ -80,44 +85,77 @@ function populateFileSelect() {
   });
 }
 
+async function localAssetsPresent() {
+  const required = [
+    "/static/vendor/web-ifc-viewer/IFCViewerAPI.js",
+    "/static/vendor/three/three.module.js",
+    "/static/vendor/web-ifc/web-ifc.wasm",
+  ];
+  const checks = await Promise.all(
+    required.map(async (url) => {
+      try {
+        const resp = await fetch(url, { method: "HEAD" });
+        return { url, ok: resp.ok };
+      } catch (err) {
+        return { url, ok: false, err: err?.message || String(err) };
+      }
+    })
+  );
+  return checks;
+}
+
 function setStatus(text) {
   const status = el("viewer-status");
   if (status) status.textContent = text;
 }
 
+async function importWithFallback(sources, label) {
+  const errors = [];
+  for (const src of sources) {
+    try {
+      const mod = await import(src.url);
+      return { mod, source: src.label };
+    } catch (err) {
+      errors.push(`${src.label}: ${err?.message || err}`);
+    }
+  }
+  const error = new Error(`Could not load ${label} from any source`);
+  error.loadErrors = errors;
+  throw error;
+}
+
 async function loadViewerLibs() {
   if (IFCViewerAPI && THREE) return;
-  let localLoadErr = null;
   try {
-    const [viewerMod, threeMod] = await Promise.all([
-      import(VIEWER_SOURCES.viewer.local),
-      import(VIEWER_SOURCES.three.local),
+    const localCheck = await localAssetsPresent();
+    const missingLocal = localCheck.filter((c) => !c.ok).map((c) => c.url);
+    const [{ mod: viewerMod, source: viewerSource }, { mod: threeMod, source: threeSource }] = await Promise.all([
+      importWithFallback(VIEWER_SOURCES.viewer, "web-ifc-viewer"),
+      importWithFallback(VIEWER_SOURCES.three, "three.js"),
     ]);
     IFCViewerAPI = viewerMod.IFCViewerAPI;
     THREE = threeMod;
-  } catch (err) {
-    localLoadErr = err;
-    console.warn("Local viewer assets failed, trying CDN fallback", err);
-    try {
-      const [viewerMod, threeMod] = await Promise.all([
-        import(VIEWER_SOURCES.viewer.cdn),
-        import(VIEWER_SOURCES.three.cdn),
+    console.info(`Viewer loaded from ${viewerSource}; three.js from ${threeSource}`);
+    if (missingLocal.length) {
+      renderDiagnostics("Local viewer assets missing", [
+        "The viewer is using CDN fallbacks because local assets are absent.",
+        ...missingLocal,
+        "Populate static/vendor/web-ifc-viewer, static/vendor/three, and static/vendor/web-ifc for offline use.",
       ]);
-      IFCViewerAPI = viewerMod.IFCViewerAPI;
-      THREE = threeMod;
-    } catch (cdnErr) {
-      console.error("Viewer dependencies failed to load", cdnErr);
-      const message = `Could not load viewer dependencies: ${cdnErr?.message || cdnErr}`;
-      setStatus(message);
-      renderDiagnostics("Viewer dependencies failed", [
-        "Provide local viewer assets under static/vendor or allow CDN access to jsdelivr.",
-        localLoadErr?.message ? `Local assets: ${localLoadErr.message}` : null,
-        cdnErr?.message ? `CDN fallback: ${cdnErr.message}` : null,
-      ].filter(Boolean));
-      const dependencyError = new Error(message);
-      dependencyError.dependencyFailure = true;
-      throw dependencyError;
     }
+  } catch (err) {
+    console.error("Viewer dependencies failed to load", err);
+    const detailList = Array.isArray(err.loadErrors) ? err.loadErrors : [];
+    const message = `Could not load viewer dependencies: ${err?.message || err}`;
+    setStatus(message);
+    renderDiagnostics("Viewer dependencies failed", [
+      "Provide local viewer assets under static/vendor or allow CDN access to jsdelivr/unpkg.",
+      "Required files: web-ifc-viewer/IFCViewerAPI.js, three/three.module.js, web-ifc/web-ifc.wasm",
+      ...detailList,
+    ].filter(Boolean));
+    const dependencyError = new Error(message);
+    dependencyError.dependencyFailure = true;
+    throw dependencyError;
   }
 }
 
@@ -139,12 +177,24 @@ async function createViewer() {
 }
 
 async function loadIfcWithFallback(file) {
+  const errors = [];
   try {
     return await state.viewer.IFC.loadIfcFile(file, true);
   } catch (err) {
+    errors.push(`local: ${err?.message || err}`);
     console.warn("Local WASM load failed, retrying with CDN", err);
-    state.viewer.IFC.setWasmPath(VIEWER_SOURCES.wasm.cdn);
-    return state.viewer.IFC.loadIfcFile(file, true);
+    for (const src of VIEWER_SOURCES.wasm.cdn) {
+      try {
+        state.viewer.IFC.setWasmPath(src);
+        return await state.viewer.IFC.loadIfcFile(file, true);
+      } catch (cdnErr) {
+        errors.push(`${src}: ${cdnErr?.message || cdnErr}`);
+      }
+    }
+    const finalErr = new Error("All WASM sources failed");
+    finalErr.dependencyFailure = true;
+    finalErr.loadErrors = errors;
+    throw finalErr;
   }
 }
 
@@ -206,6 +256,7 @@ async function loadSelectedFile() {
     if (!el("properties-list")?.innerHTML) {
       renderDiagnostics("Viewer error", [
         err?.message ? `Error: ${err.message}` : "An unexpected error occurred.",
+        ...(Array.isArray(err?.loadErrors) ? err.loadErrors : []),
       ]);
     }
   }

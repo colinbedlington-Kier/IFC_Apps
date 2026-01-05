@@ -1,0 +1,1730 @@
+[
+  {
+    "check_id": "01.01",
+    "description": "Project Should Have GlobalId (COBie ExternalProjectIdentifier) Defined",
+    "entity_scope": [
+      "IfcProject"
+    ],
+    "info_to_check": "GlobalId (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "01.02",
+    "description": "Project Should Have Name Defined",
+    "entity_scope": [
+      "IfcProject"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "01.03",
+    "description": "Project Should Have Name Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcProject"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "01.04",
+    "description": "Project Should Have Description Defined",
+    "entity_scope": [
+      "IfcProject"
+    ],
+    "info_to_check": "Description (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "01.05",
+    "description": "Project Should Have Description Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcProject"
+    ],
+    "info_to_check": "Description (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "01.06",
+    "description": "Project Should Have Phase Defined",
+    "entity_scope": [
+      "IfcProject"
+    ],
+    "info_to_check": "Phase (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "01.07",
+    "description": "Project Should Have Phase Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcProject"
+    ],
+    "info_to_check": "Phase (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "01.08",
+    "description": "Project Should Have Phase Correct For Project Stage",
+    "entity_scope": [
+      "IfcProject"
+    ],
+    "info_to_check": "Phase (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "02.01",
+    "description": "Site Should Have GlobalId (COBie ExternalSiteIdentifier) Defined",
+    "entity_scope": [
+      "IfcSite"
+    ],
+    "info_to_check": "GlobalId (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "02.02",
+    "description": "Site Should Have Name Defined",
+    "entity_scope": [
+      "IfcSite"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "02.03",
+    "description": "Site Should Have Name Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcSite"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "02.04",
+    "description": "Site Should Have Description Defined",
+    "entity_scope": [
+      "IfcSite"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "02.05",
+    "description": "Site Should Have Description Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcSite"
+    ],
+    "info_to_check": "Description (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "03.01",
+    "description": "Building Should Have GlobalId (COBie ExternalFacilityIdentifier) Defined",
+    "entity_scope": [
+      "IfcBuilding"
+    ],
+    "info_to_check": "GlobalId (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "03.02",
+    "description": "Building Should Have Name Defined",
+    "entity_scope": [
+      "IfcBuilding"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "03.03",
+    "description": "Building Should Have Name Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcBuilding"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "03.04",
+    "description": "Building Should Have Description Defined",
+    "entity_scope": [
+      "IfcBuilding"
+    ],
+    "info_to_check": "Description (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "03.05",
+    "description": "Building Should Have Description Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcBuilding"
+    ],
+    "info_to_check": "Description (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "03.06",
+    "description": "Building Should Have Uniclass 2015 En Entities Classification (COBie Category) Defined",
+    "entity_scope": [
+      "IfcBuilding"
+    ],
+    "info_to_check": "Uniclass 2015 En Entities (Classification Reference)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "03.07",
+    "description": "Building Should Have Uniclass 2015 En Entities Classification (COBie Category) Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcBuilding"
+    ],
+    "info_to_check": "Uniclass 2015 En Entities (Classification Reference)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "03.08",
+    "description": "Building Should Have BlockConstructionType Defined",
+    "entity_scope": [
+      "IfcBuilding"
+    ],
+    "info_to_check": "BlockConstructionType (Property)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "03.09",
+    "description": "Building Should Have MaximumBlockHeight Defined",
+    "entity_scope": [
+      "IfcBuilding"
+    ],
+    "info_to_check": "MaximumBlockHeight (Property)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "03.10",
+    "description": "Building Should Have NumberOfStoreys Defined",
+    "entity_scope": [
+      "IfcBuilding"
+    ],
+    "info_to_check": "NumberOfStoreys (Property)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "03.11",
+    "description": "Building Should Have UPRN Defined",
+    "entity_scope": [
+      "IfcBuilding"
+    ],
+    "info_to_check": "UPRN (Property)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "03.12",
+    "description": "Building Should Have UPRN Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcBuilding"
+    ],
+    "info_to_check": "UPRN (Property)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "04.01",
+    "description": "Building Storey Should Have GlobalId (COBie ExtIdentifier) Defined",
+    "entity_scope": [
+      "IfcBuildingStorey"
+    ],
+    "info_to_check": "GlobalId (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "04.02",
+    "description": "Building Storey Should Have Name Defined",
+    "entity_scope": [
+      "IfcBuildingStorey"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "04.03",
+    "description": "Building Storey Should Have Name Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcBuildingStorey"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "04.04",
+    "description": "Building Storey Should Have Unique Name",
+    "entity_scope": [
+      "IfcBuildingStorey"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "04.05",
+    "description": "Building Storey Should Have Description Defined",
+    "entity_scope": [
+      "IfcBuildingStorey"
+    ],
+    "info_to_check": "Description (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "04.06",
+    "description": "Building Storey Should Have Description Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcBuildingStorey"
+    ],
+    "info_to_check": "Description (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "04.07",
+    "description": "Building Storey Should Have Category (COBie Floor Classification) Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcBuildingStorey"
+    ],
+    "info_to_check": "COBie Floors (Classification Reference)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "04.08",
+    "description": "Building Storey Should Have Elevation Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcBuildingStorey"
+    ],
+    "info_to_check": "NominalHeight (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "04.09",
+    "description": "Building Storey Should Have Height Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcBuildingStorey"
+    ],
+    "info_to_check": "Height (IfcQuantityLength.LengthValue)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "05.01",
+    "description": "Space Should Have GlobalId (COBie ExtIdentifier) Defined",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "GlobalId (Attribute)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "05.02",
+    "description": "Space Should Have Name Defined",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "05.03",
+    "description": "Space Should Have Name Matching Format Set Out In The Projects Information Standard",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "05.04",
+    "description": "Space Should Have Name That Is Unique",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "05.05",
+    "description": "Space Should Have Name Related Correctly To Each Floor",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "05.06",
+    "description": "Space Should Have Description Defined",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "Description (Attribute)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "05.07",
+    "description": "Space Should Have RoomTag (Final Room Signage) Of 'n/a'",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "RoomTag (Property)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design"
+    ]
+  },
+  {
+    "check_id": "05.08",
+    "description": "Space Should Have RoomTag (Final Room Signage) Of Final Agreed Signage",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "RoomTag (Property)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "05.09",
+    "description": "Space Should Have Category (DfE ADS Classification) Defined",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "DfE ADS Classification (Classification Reference)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "05.10",
+    "description": "Space Should Have Category (DfE ADS Classification) From Value List",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "DfE ADS Classification (Classification Reference)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "05.11",
+    "description": "Space Should Have Height Defined",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "ClearHeight (IfcQuantityLength)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "05.12",
+    "description": "Space Should Have GrossArea Defined",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "GrossFloorArea (IfcQuantityArea)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "05.13",
+    "description": "Space Should Have NetArea Defined",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "NetFloorArea (IfcQuantityArea)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "05.14",
+    "description": "Space Should Have Uniclass2015Classification From Agreed Value List",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "Uniclass 2015 Classification (Classification Reference)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "05.15",
+    "description": "Space Should Have Uniclass2015Classification That Corresponds Correctly To The Category (DfE ADS Classification)",
+    "entity_scope": [
+      "IfcSpace"
+    ],
+    "info_to_check": "Uniclass 2015 Classification (Classification Reference) and DfE ADS Classification (Classification Reference)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "06.01",
+    "description": "Zone Should Have GlobalId (COBie ExtIdentifier) Defined",
+    "entity_scope": [
+      "IfcZone"
+    ],
+    "info_to_check": "GlobalId (Attribute)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "06.02",
+    "description": "Zone Should Have Name Defined",
+    "entity_scope": [
+      "IfcZone"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "06.03",
+    "description": "Zone Should Have Name Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcZone"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "06.04",
+    "description": "Zone Should Have Description Defined",
+    "entity_scope": [
+      "IfcZone"
+    ],
+    "info_to_check": "Description (Attribute)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "06.05",
+    "description": "Zone Should Have Description Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcZone"
+    ],
+    "info_to_check": "Description (Attribute)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "06.06",
+    "description": "Zone Should Have Category (COBie Zone Classification) Defined",
+    "entity_scope": [
+      "IfcZone"
+    ],
+    "info_to_check": "Description (Attribute)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "06.07",
+    "description": "Zone Should Have Category (COBie Zone Classification) Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcZone"
+    ],
+    "info_to_check": "COBie Zones (Classification Reference)",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "06.08",
+    "description": "Zone Should Have Each Spaces Allocated To A Single Zone",
+    "entity_scope": [
+      "IfcZone"
+    ],
+    "info_to_check": "[General]",
+    "applicable_models": "Architecture",
+    "milestones": [
+      "RIBA Stage 3: Spatial Coordination",
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.01",
+    "description": "Object Type Should Have Entity Correctly Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Entity",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.02",
+    "description": "Object Type Should Have Enumeration (PredefinedType) Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Enumeration (Predefined Type)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.03",
+    "description": "Object Type Should Have Enumeration (PredefinedType) That Is Not NOTDEFINED",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Enumeration (Predefined Type)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.04",
+    "description": "Object Type Should Have Name Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.05",
+    "description": "Object Type Should Have Name Matching The Projects Information Standard",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.06",
+    "description": "Object Type Should Have Name That Is Unique",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.07",
+    "description": "Object Type Should Have Description Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Description (Attribute)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.08",
+    "description": "Object Type Should Have Uniclass 2015 Pr Products Classification (COBie Category) Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Uniclass 2015 Pr Products (Classification Reference)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.09",
+    "description": "Object Type Should Have AssetType Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "AssetType (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.10",
+    "description": "Object Type Should Have AssetType That Is 'Fixed' or 'Movable'",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "AssetType (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.11",
+    "description": "Object Type Should Have Manufacturer That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Manufacturer (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.12",
+    "description": "Object Type Should Have Manufacturer That Is 'n/a' Or An Email Address",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Manufacturer (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.13",
+    "description": "Object Type Should Have Manufacturer That Is An Email Address",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Manufacturer (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.14",
+    "description": "Object Type Should Have WarrantyGuarantorParts That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "WarrantyGuarantorParts (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.15",
+    "description": "Object Type Should Have WarrantyGuarantorParts That Is 'n/a' Or An Email Address",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "WarrantyGuarantorParts (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.16",
+    "description": "Object Type Should Have WarrantyGuarantorParts That Is An Email Address",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "WarrantyGuarantorParts (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.17",
+    "description": "Object Type Should Have WarrantyDurationParts That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "WarrantyDurationParts (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.18",
+    "description": "Object Type Should Have WarrantyDurationParts That Is '0.0' Or Is A Valid Duration",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "WarrantyDurationParts (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.19",
+    "description": "Object Type Should Have WarrantyDurationParts That Is An Email Address",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "WarrantyDurationParts (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.20",
+    "description": "Object Type Should Have WarrantyGuarantorLabor That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "WarrantyGuarantorLabor (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.21",
+    "description": "Object Type Should Have WarrantyGuarantorLabor That Is 'n/a' Or An Email Address",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "WarrantyGuarantorLabor (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.22",
+    "description": "Object Type Should Have WarrantyGuarantorLabor That Is An Email Address",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "WarrantyGuarantorLabor (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.23",
+    "description": "Object Type Should Have WarrantyDurationLabor That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "WarrantyDurationLabor (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.24",
+    "description": "Object Type Should Have WarrantyDurationLabor That Is '0.0' Or Is A Valid Duration",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "WarrantyDurationLabor (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.25",
+    "description": "Object Type Should Have WarrantyDurationLabor That Is Email Address",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "WarrantyDurationLabor (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.26",
+    "description": "Object Type Should Have ReplacementCost That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "ReplacementCost (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.27",
+    "description": "Object Type Should Have ReplacementCost That Is 'n/a' Or Is A Replacement Cost For The Product Type",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "ReplacementCost (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.28",
+    "description": "Object Type Should Have ExpectedLife That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "ServiceLifeDuration (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.29",
+    "description": "Object Type Should Have ExpectedLife That Is 'n/a' Or Is A Valid Expected Life For The Product Type",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "ServiceLifeDuration (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.30",
+    "description": "Object Type Should Have WarrantyDescription That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "WarrantyDescription (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.31",
+    "description": "Object Type Should Have WarrantyDescription That Is 'n/a' Or A Description Of The Warranty For The Product Type",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "WarrantyDescription (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.32",
+    "description": "Object Type Should Have NominalLength That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "NominalLength (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.33",
+    "description": "Object Type Should Have NominalWidth That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "NominalWidth (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.34",
+    "description": "Object Type Should Have NominalHeight That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "NominalHeight (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.35",
+    "description": "Object Type Should Have ModelReference That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "ModelReference (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.36",
+    "description": "Object Type Should Have Shape That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Shape (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.37",
+    "description": "Object Type Should Have Size That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Size (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.38",
+    "description": "Object Type Should Have Color That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Color (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.39",
+    "description": "Object Type Should Have Finish That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Finish (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.40",
+    "description": "Object Type Should Have Grade That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Grade (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.41",
+    "description": "Object Type Should Have Material That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Material (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.42",
+    "description": "Object Type Should Have Constituents That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Constituents (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.43",
+    "description": "Object Type Should Have Features That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "Features (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.44",
+    "description": "Object Type Should Have AccessibilityPerformance That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "AccessibilityPerformance (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.45",
+    "description": "Object Type Should Have CodePerformance That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "CodePerformance (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "07.46",
+    "description": "Object Type Should Have SustainabilityPerformance That Is Defined",
+    "entity_scope": [
+      "Object Type"
+    ],
+    "info_to_check": "SustainabilityPerformance (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "08.01",
+    "description": "Object Occurrence (COBie Component) Should Have Name Defined",
+    "entity_scope": [
+      "Object Occurrence"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "08.02",
+    "description": "Object Occurrence (COBie Component) Should Have Name Matching The Projects Information Standard",
+    "entity_scope": [
+      "Object Occurrence"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "08.03",
+    "description": "Object Occurrence (COBie Component) Should Have Unique Name",
+    "entity_scope": [
+      "Object Occurrence"
+    ],
+    "info_to_check": "Name (Attribute)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "08.04",
+    "description": "Object Occurrence (COBie Component) Should Have Description Defined",
+    "entity_scope": [
+      "Object Occurrence"
+    ],
+    "info_to_check": "Description (Attribute)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "08.05",
+    "description": "Object Occurrence (COBie Component) Should Have SerialNumber That Is 'n/a' Or Valid SerialNumber",
+    "entity_scope": [
+      "Objec tOccurrence"
+    ],
+    "info_to_check": "SerialNumber (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "08.06",
+    "description": "Object Occurrence (COBie Component) Should Have InstallationDate That Is '1900-12-31T23:59:59' Or Actual InstallationDate",
+    "entity_scope": [
+      "Object Occurrence"
+    ],
+    "info_to_check": "InstallationDate (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "08.07",
+    "description": "Object Occurrence (COBie Component) Should Have WarrantyStartDate That Is '1900-12-31T23:59:59' Or Actual WarrantyStartDate",
+    "entity_scope": [
+      "Object Occurrence"
+    ],
+    "info_to_check": "WarrantyStartDate (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "08.08",
+    "description": "Object Occurrence (COBie Component) Should Have TagNumber That Is 'n/a'",
+    "entity_scope": [
+      "Object Occurrence"
+    ],
+    "info_to_check": "TagNumber (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "08.09",
+    "description": "Object Occurrence (COBie Component) Should Have BarCode That Is 'n/a' Or Actual BarCode",
+    "entity_scope": [
+      "Object Occurrence"
+    ],
+    "info_to_check": "BarCode (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "08.10",
+    "description": "Object Occurrence (COBie Component) Should Have AssetIdentifier That Is 'n/a'",
+    "entity_scope": [
+      "Object Occurrence"
+    ],
+    "info_to_check": "AssetIdentifier (Property)",
+    "applicable_models": "All (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "08.11",
+    "description": "Door Should Have FireRating That Is Defined",
+    "entity_scope": [
+      "Object Occurrence"
+    ],
+    "info_to_check": "FireRating (Property)",
+    "applicable_models": "Doors",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "08.12",
+    "description": "Door Should Have FireRating That Is From PickList Provided In The Projects Information Standard",
+    "entity_scope": [
+      "Object Occurrence"
+    ],
+    "info_to_check": "FireRating (Property)",
+    "applicable_models": "Doors",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "08.13",
+    "description": "Object Occurrences Must Not Contain Duplicate Entities",
+    "entity_scope": [
+      "Object Occurrence"
+    ],
+    "info_to_check": "[General]",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "08.14",
+    "description": "Object Occurrence Should Have Layer Correctly Defined",
+    "entity_scope": [
+      "Object Occurrence"
+    ],
+    "info_to_check": "Layer (IfcPresentationLayer)",
+    "applicable_models": "All",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "09.01",
+    "description": "System Should Have Name Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcSystem (or Object Occurrence)"
+    ],
+    "info_to_check": "Name (Attribute) or SystemName (Property)",
+    "applicable_models": "Building Services (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "09.02",
+    "description": "System Should Have Description Matching The Projects Information Standard",
+    "entity_scope": [
+      "IfcSystem (or Object Occurrence)"
+    ],
+    "info_to_check": "Description (Attribute) or SystemDescription (Property)",
+    "applicable_models": "Building Services (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  },
+  {
+    "check_id": "09.03",
+    "description": "System Should Have Category (Uniclass 2015 Ss Systems) Matching The Projects Information Standard",
+    "entity_scope": [
+      "Ifc System (or Object Occurrence)"
+    ],
+    "info_to_check": "Uniclass 2015 Ss Systems (Classification) or SystemCategory (Property)",
+    "applicable_models": "Building Services (COBie Only)",
+    "milestones": [
+      "RIBA Stage 4: Technical Design",
+      "RIBA Stage 5: Manufacturing and Construction",
+      "RIBA Stage 6: Handover"
+    ]
+  }
+]
