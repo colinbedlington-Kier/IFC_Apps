@@ -85,6 +85,25 @@ function populateFileSelect() {
   });
 }
 
+async function localAssetsPresent() {
+  const required = [
+    "/static/vendor/web-ifc-viewer/IFCViewerAPI.js",
+    "/static/vendor/three/three.module.js",
+    "/static/vendor/web-ifc/web-ifc.wasm",
+  ];
+  const checks = await Promise.all(
+    required.map(async (url) => {
+      try {
+        const resp = await fetch(url, { method: "HEAD" });
+        return { url, ok: resp.ok };
+      } catch (err) {
+        return { url, ok: false, err: err?.message || String(err) };
+      }
+    })
+  );
+  return checks;
+}
+
 function setStatus(text) {
   const status = el("viewer-status");
   if (status) status.textContent = text;
@@ -108,6 +127,8 @@ async function importWithFallback(sources, label) {
 async function loadViewerLibs() {
   if (IFCViewerAPI && THREE) return;
   try {
+    const localCheck = await localAssetsPresent();
+    const missingLocal = localCheck.filter((c) => !c.ok).map((c) => c.url);
     const [{ mod: viewerMod, source: viewerSource }, { mod: threeMod, source: threeSource }] = await Promise.all([
       importWithFallback(VIEWER_SOURCES.viewer, "web-ifc-viewer"),
       importWithFallback(VIEWER_SOURCES.three, "three.js"),
@@ -115,6 +136,13 @@ async function loadViewerLibs() {
     IFCViewerAPI = viewerMod.IFCViewerAPI;
     THREE = threeMod;
     console.info(`Viewer loaded from ${viewerSource}; three.js from ${threeSource}`);
+    if (missingLocal.length) {
+      renderDiagnostics("Local viewer assets missing", [
+        "The viewer is using CDN fallbacks because local assets are absent.",
+        ...missingLocal,
+        "Populate static/vendor/web-ifc-viewer, static/vendor/three, and static/vendor/web-ifc for offline use.",
+      ]);
+    }
   } catch (err) {
     console.error("Viewer dependencies failed to load", err);
     const detailList = Array.isArray(err.loadErrors) ? err.loadErrors : [];
@@ -122,6 +150,7 @@ async function loadViewerLibs() {
     setStatus(message);
     renderDiagnostics("Viewer dependencies failed", [
       "Provide local viewer assets under static/vendor or allow CDN access to jsdelivr/unpkg.",
+      "Required files: web-ifc-viewer/IFCViewerAPI.js, three/three.module.js, web-ifc/web-ifc.wasm",
       ...detailList,
     ].filter(Boolean));
     const dependencyError = new Error(message);
