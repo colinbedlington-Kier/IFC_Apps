@@ -7,6 +7,20 @@ const state = {
 
 let IFCViewerAPI = null;
 let THREE = null;
+const VIEWER_SOURCES = {
+  viewer: {
+    local: "/static/vendor/web-ifc-viewer/IFCViewerAPI.js",
+    cdn: "https://cdn.jsdelivr.net/npm/web-ifc-viewer@1.0.172/dist/IFCViewerAPI.js",
+  },
+  three: {
+    local: "/static/vendor/three/three.module.js",
+    cdn: "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
+  },
+  wasm: {
+    local: "/static/vendor/web-ifc/",
+    cdn: "https://cdn.jsdelivr.net/npm/web-ifc@0.0.50/",
+  },
+};
 
 const el = (id) => document.getElementById(id);
 
@@ -73,24 +87,37 @@ function setStatus(text) {
 
 async function loadViewerLibs() {
   if (IFCViewerAPI && THREE) return;
+  let localLoadErr = null;
   try {
     const [viewerMod, threeMod] = await Promise.all([
-      import("https://cdn.jsdelivr.net/npm/web-ifc-viewer@1.0.172/dist/IFCViewerAPI.js"),
-      import("https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js"),
+      import(VIEWER_SOURCES.viewer.local),
+      import(VIEWER_SOURCES.three.local),
     ]);
     IFCViewerAPI = viewerMod.IFCViewerAPI;
     THREE = threeMod;
   } catch (err) {
-    console.error("Viewer dependencies failed to load", err);
-    const message = `Could not load viewer dependencies: ${err?.message || err}`;
-    setStatus(message);
-    renderDiagnostics("Viewer dependencies failed", [
-      "Allow CDN access to jsdelivr or provide local viewer assets.",
-      err?.message ? `Error: ${err.message}` : null,
-    ].filter(Boolean));
-    const dependencyError = new Error(message);
-    dependencyError.dependencyFailure = true;
-    throw dependencyError;
+    localLoadErr = err;
+    console.warn("Local viewer assets failed, trying CDN fallback", err);
+    try {
+      const [viewerMod, threeMod] = await Promise.all([
+        import(VIEWER_SOURCES.viewer.cdn),
+        import(VIEWER_SOURCES.three.cdn),
+      ]);
+      IFCViewerAPI = viewerMod.IFCViewerAPI;
+      THREE = threeMod;
+    } catch (cdnErr) {
+      console.error("Viewer dependencies failed to load", cdnErr);
+      const message = `Could not load viewer dependencies: ${cdnErr?.message || cdnErr}`;
+      setStatus(message);
+      renderDiagnostics("Viewer dependencies failed", [
+        "Provide local viewer assets under static/vendor or allow CDN access to jsdelivr.",
+        localLoadErr?.message ? `Local assets: ${localLoadErr.message}` : null,
+        cdnErr?.message ? `CDN fallback: ${cdnErr.message}` : null,
+      ].filter(Boolean));
+      const dependencyError = new Error(message);
+      dependencyError.dependencyFailure = true;
+      throw dependencyError;
+    }
   }
 }
 
@@ -105,9 +132,20 @@ async function createViewer() {
   });
   viewer.axes.setAxes();
   viewer.grid.setGrid(30, 30);
-  viewer.IFC.setWasmPath("https://cdn.jsdelivr.net/npm/web-ifc@0.0.50/");
+  viewer.IFC.setWasmPath(VIEWER_SOURCES.wasm.local);
+  viewer.wasmSources = VIEWER_SOURCES.wasm;
   state.activeModelID = null;
   return viewer;
+}
+
+async function loadIfcWithFallback(file) {
+  try {
+    return await state.viewer.IFC.loadIfcFile(file, true);
+  } catch (err) {
+    console.warn("Local WASM load failed, retrying with CDN", err);
+    state.viewer.IFC.setWasmPath(VIEWER_SOURCES.wasm.cdn);
+    return state.viewer.IFC.loadIfcFile(file, true);
+  }
 }
 
 async function loadSelectedFile() {
@@ -140,7 +178,7 @@ async function loadSelectedFile() {
     if (!state.viewer) throw new Error("Viewer could not start");
     let model;
     try {
-      model = await state.viewer.IFC.loadIfcFile(file, true);
+      model = await loadIfcWithFallback(file);
     } catch (err) {
       renderDiagnostics("IFC parsing failed", [
         `File: ${fileName}`,
