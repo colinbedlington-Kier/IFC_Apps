@@ -209,9 +209,24 @@ nav {
 
 .grid.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
 .grid.three { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
 
 .switch { display: flex; align-items: center; gap: 8px; color: var(--muted); }
 .switch input { accent-color: var(--accent-2); }
+
+details.collapsible { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: rgba(255,255,255,0.02); }
+details.collapsible[open] { box-shadow: inset 0 0 0 1px rgba(138,230,255,0.1); }
+.collapsible-summary { display: flex; justify-content: space-between; align-items: center; gap: 12px; cursor: pointer; list-style: none; }
+.collapsible-summary::-webkit-details-marker { display: none; }
+.collapsible-body { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+
+.checkbox-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px 12px; }
+.checkbox-columns label { display: flex; align-items: center; gap: 8px; font-size: 14px; background: rgba(255,255,255,0.02); border: 1px solid var(--border); padding: 8px 10px; border-radius: 10px; }
+.checkbox-columns details { background: transparent; border: 1px solid var(--border); padding: 8px 10px; border-radius: 10px; grid-column: 1 / -1; }
+.checkbox-columns summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
+.checkbox-columns summary::-webkit-details-marker { display: none; }
+.checkbox-columns .checkbox-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 6px 10px; margin-top: 8px; }
+.helper { color: var(--muted); font-size: 14px; }
 
 button.primary {
   background: linear-gradient(135deg, var(--accent-2), var(--accent));
@@ -237,6 +252,10 @@ button.ghost {
 
 .split { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
 
+.levels-table table { width: 100%; border-collapse: collapse; }
+.levels-table th, .levels-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.levels-table th { color: var(--muted); font-weight: 600; }
+
 .log {
   background: #0b0e16;
   border-radius: 12px;
@@ -260,7 +279,7 @@ button.ghost {
   text-decoration: none;
 }
 
-.checkbox { flex-direction: row; align-items: center; gap: 8px; }
+.checkbox { display: flex; flex-direction: row; align-items: center; gap: 8px; }
 
 .skeleton { background: linear-gradient(90deg, rgba(255,255,255,0.05) 25%, rgba(255,255,255,0.02) 50%, rgba(255,255,255,0.05) 75%); background-size: 400% 100%; animation: shimmer 1.2s ease-in-out infinite; }
 @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
