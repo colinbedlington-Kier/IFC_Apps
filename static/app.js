@@ -4,16 +4,22 @@ const state = {
   levels: [],
   selectedLevelId: null,
   selectedFiles: new Set(),
+  uploadStatusEl: null,
 };
 
 const el = (id) => document.getElementById(id);
 
 function setSessionBadge(text, ok = true) {
-  const badge = document.querySelector("[data-session-badge]");
-  if (!badge) return;
-  badge.textContent = text;
-  badge.classList.toggle("danger-text", !ok);
-  badge.classList.toggle("success-text", ok);
+  const badges = [
+    document.querySelector("[data-session-badge]"),
+    el("sessionStatus"),
+    el("session-pill"),
+  ].filter(Boolean);
+  badges.forEach((badge) => {
+    badge.textContent = text;
+    badge.classList.toggle("danger-text", !ok);
+    badge.classList.toggle("success-text", ok);
+  });
 }
 
 async function ensureSession() {
@@ -29,8 +35,10 @@ async function ensureSession() {
     localStorage.setItem("ifc_session_id", state.sessionId);
     setSessionBadge(`Session ${state.sessionId.slice(0, 8)}…`, true);
     await refreshFiles();
+    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Session ready.";
   } catch (err) {
     setSessionBadge("Session error", false);
+    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Session error. Reload to retry.";
     console.error(err);
   }
 }
@@ -50,7 +58,12 @@ async function refreshFiles() {
 }
 
 function renderFilesLists() {
-  document.querySelectorAll("[data-files-list]").forEach((ul) => {
+  const renderTargets = [
+    ...document.querySelectorAll("[data-files-list]"),
+    el("filesList"),
+  ].filter(Boolean);
+
+  renderTargets.forEach((ul) => {
     ul.innerHTML = "";
     state.files.forEach((f) => {
       const li = document.createElement("li");
@@ -66,6 +79,26 @@ function renderFilesLists() {
       ul.appendChild(li);
     });
   });
+  const simpleList = el("file-list");
+  if (simpleList) {
+    simpleList.innerHTML = "";
+    if (!state.files.length) {
+      simpleList.innerHTML = '<div class="muted">No files uploaded yet.</div>';
+    } else {
+      state.files.forEach((f) => {
+        const item = document.createElement("div");
+        item.className = "file-pill";
+        item.innerHTML = `<div><div class="file-name">${f.name}</div><div class="muted">${(f.size / 1024).toFixed(1)} KB</div></div>`;
+        const btn = document.createElement("button");
+        btn.className = "ghost";
+        btn.textContent = "Download";
+        btn.addEventListener("click", () => downloadFile(f.name));
+        item.appendChild(btn);
+        simpleList.appendChild(item);
+      });
+    }
+  }
+
   document.querySelectorAll(".file-checkbox").forEach((cb) => {
     cb.addEventListener("change", (e) => {
       const name = e.target.value;
@@ -154,32 +187,28 @@ function uploadWithProgress(url, form) {
 }
 
 async function uploadFiles() {
-  const input = el("fileInput");
+  const input = el("fileInput") || el("file-input");
   if (!input || !input.files.length) {
     alert("Choose file(s) to upload.");
     return;
   }
   if (!state.sessionId) {
-    await ensureSession();
-    if (!state.sessionId) return alert("Session unavailable. Try reloading the page.");
+    alert("Session not ready yet. Please wait a moment and retry.");
+    return;
   }
+  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Uploading…";
   const form = new FormData();
   for (const f of input.files) {
     form.append("files", f);
   }
-  resetUploadProgress();
-  updateUploadProgress({ percent: 0, message: "Preparing upload…" });
-  try {
-    await uploadWithProgress(`/api/session/${state.sessionId}/upload`, form);
-    updateUploadProgress({ percent: 100, message: "Finishing up…", done: true });
-    input.value = "";
-    await refreshFiles();
-    setTimeout(() => resetUploadProgress(), 1200);
-  } catch (err) {
-    console.error(err);
-    updateUploadProgress({ message: err?.message || "Upload failed", error: true });
+  const resp = await fetch(`/api/session/${state.sessionId}/upload`, { method: "POST", body: form });
+  if (!resp.ok) {
+    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload failed. Try again.";
     alert("Upload failed");
   }
+  input.value = "";
+  await refreshFiles();
+  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload complete.";
 }
 
 async function endSession() {
@@ -667,9 +696,19 @@ async function reassignLevelRequest() {
 function wireEvents() {
   const uploadBtn = el("uploadBtn");
   if (uploadBtn) uploadBtn.addEventListener("click", uploadFiles);
+  const uploadForm = el("upload-form");
+  if (uploadForm) {
+    state.uploadStatusEl = el("upload-status");
+    uploadForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      uploadFiles();
+    });
+  }
 
   const refreshBtn = el("refreshFiles");
   if (refreshBtn) refreshBtn.addEventListener("click", refreshFiles);
+  const refreshBtnStatic = el("refresh-files");
+  if (refreshBtnStatic) refreshBtnStatic.addEventListener("click", refreshFiles);
 
   const resetBtn = el("resetSession");
   if (resetBtn) resetBtn.addEventListener("click", endSession);

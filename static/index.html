@@ -44,7 +44,10 @@
           <p><strong>Drag & drop</strong> or choose IFC / Excel files.</p>
           <p class="hint">Accepted: .ifc, .ifczip, .xlsx</p>
         </div>
-        <button type="submit" class="primary">Upload</button>
+        <div style="display:flex; flex-direction:column; gap:10px; align-items:flex-start;">
+          <button type="submit" class="primary">Upload</button>
+          <div id="upload-status" class="hint">Waiting to start…</div>
+        </div>
       </form>
       <div class="card" id="file-inventory">
         <div class="card-head">
