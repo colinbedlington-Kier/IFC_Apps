@@ -1203,6 +1203,25 @@ def list_storey_objects(storey) -> List[Any]:
     return objs
 
 
+def ensure_storey_associations(storey) -> List[Any]:
+    try:
+        assoc = getattr(storey, "HasAssociations", None)
+    except Exception:
+        assoc = None
+    if assoc in (None, (), []):
+        assoc = []
+    else:
+        assoc = list(assoc)
+    try:
+        storey.HasAssociations = assoc
+    except Exception:
+        try:
+            setattr(storey, "HasAssociations", assoc)
+        except Exception:
+            pass
+    return assoc
+
+
 def move_objects_to_storey(model, objects, source_storey, target_storey):
     if target_storey is None:
         return
@@ -1260,7 +1279,7 @@ COBIE_FLOOR_CLASS_NAME = "COBie Floors"
 
 def _get_cobie_floor_classification(storey) -> Tuple[Optional[str], Optional[str]]:
     """Return (item_reference, name) for the COBie Floors classification reference if present."""
-    for rel in storey.HasAssociations or []:
+    for rel in ensure_storey_associations(storey):
         if not rel.is_a("IfcRelAssociatesClassification"):
             continue
         cref = getattr(rel, "RelatingClassification", None)
@@ -1319,7 +1338,8 @@ def update_level(ifc_path: str, storey_id: int, payload: Dict[str, Any], output_
         desired_ref = payload.get("cobie_floor")
         existing_rel = None
         existing_cref = None
-        for rel in list(storey.HasAssociations or []):
+        associations = ensure_storey_associations(storey)
+        for rel in list(associations):
             if rel.is_a("IfcRelAssociatesClassification"):
                 cref = getattr(rel, "RelatingClassification", None)
                 source = getattr(cref, "ReferencedSource", None) if cref else None
@@ -1334,7 +1354,7 @@ def update_level(ifc_path: str, storey_id: int, payload: Dict[str, Any], output_
         if desired_ref in (None, ""):
             if existing_rel:
                 try:
-                    storey.HasAssociations = [r for r in storey.HasAssociations if r != existing_rel]
+                    storey.HasAssociations = [r for r in associations if r != existing_rel]
                     model.remove(existing_rel)
                 except Exception:
                     pass
@@ -1364,7 +1384,8 @@ def update_level(ifc_path: str, storey_id: int, payload: Dict[str, Any], output_
                     RelatedObjects=[storey],
                     RelatingClassification=existing_cref,
                 )
-                storey.HasAssociations = list(storey.HasAssociations or []) + [existing_rel]
+                associations = ensure_storey_associations(storey)
+                storey.HasAssociations = list(associations) + [existing_rel]
             else:
                 existing_cref.ItemReference = str(desired_ref)
                 if getattr(existing_cref, "Name", "") in (None, "", COBIE_FLOOR_CLASS_NAME):
@@ -1479,6 +1500,52 @@ def reassign_objects(
     cleanup_empty_containment(model, source)
     model.write(output_path)
     return output_path
+
+
+def apply_level_actions(ifc_path: str, actions: List[Dict[str, Any]], output_path: str) -> str:
+    if not actions:
+        raise ValueError("No actions supplied")
+    work_path = output_path
+    current_path = ifc_path
+    for idx, action in enumerate(actions):
+        kind = action.get("type")
+        if kind == "update":
+            update_level(
+                current_path,
+                int(action["storey_id"]),
+                action.get("payload", {}),
+                work_path,
+            )
+        elif kind == "delete":
+            delete_level(
+                current_path,
+                int(action["storey_id"]),
+                int(action["target_storey_id"]),
+                action.get("object_ids"),
+                work_path,
+            )
+        elif kind == "add":
+            add_level(
+                current_path,
+                name=action.get("name"),
+                description=action.get("description"),
+                elevation=action.get("elevation"),
+                comp_height=action.get("comp_height"),
+                object_ids=action.get("object_ids"),
+                output_path=work_path,
+            )
+        elif kind == "reassign":
+            reassign_objects(
+                current_path,
+                int(action["source_storey_id"]),
+                int(action["target_storey_id"]),
+                action.get("object_ids"),
+                work_path,
+            )
+        else:
+            raise ValueError(f"Unsupported action type: {kind}")
+        current_path = work_path
+    return work_path
 
 
 # ----------------------------------------------------------------------------
@@ -2497,6 +2564,28 @@ def api_levels_reassign(session_id: str, payload: Dict[str, Any] = Body(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"ifc": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"}}
+
+
+@app.post("/api/session/{session_id}/levels/batch")
+def api_levels_batch(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    src = payload.get("ifc_file")
+    actions = payload.get("actions") or []
+    if not src or not actions:
+        raise HTTPException(status_code=400, detail="ifc_file and actions are required")
+    in_path = os.path.join(root, sanitize_filename(src))
+    if not os.path.isfile(in_path):
+        raise HTTPException(status_code=404, detail="IFC file not found")
+    base = os.path.splitext(os.path.basename(in_path))[0]
+    work_path = os.path.join(root, f"{base}_levels_work.ifc")
+    final_name = f"{base}_levels_batch.ifc"
+    final_path = os.path.join(root, final_name)
+    try:
+        apply_level_actions(in_path, actions, work_path)
+        shutil.copyfile(work_path, final_path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ifc": {"name": final_name, "url": f"/api/session/{session_id}/download?name={final_name}"}, "actions": actions}
 
 
 if __name__ == "__main__":

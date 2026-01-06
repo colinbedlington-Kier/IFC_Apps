@@ -5,6 +5,8 @@ const state = {
   selectedLevelId: null,
   selectedFiles: new Set(),
   uploadStatusEl: null,
+  uploadProgressEl: null,
+  pendingActions: [],
 };
 
 const el = (id) => document.getElementById(id);
@@ -197,6 +199,7 @@ async function uploadFiles() {
     return;
   }
   if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Uploading…";
+  if (state.uploadProgressEl) state.uploadProgressEl.classList.remove("hidden");
   const form = new FormData();
   for (const f of input.files) {
     form.append("files", f);
@@ -205,10 +208,13 @@ async function uploadFiles() {
   if (!resp.ok) {
     if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload failed. Try again.";
     alert("Upload failed");
+    if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
+    return;
   }
   input.value = "";
   await refreshFiles();
   if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload complete.";
+  if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
 }
 
 async function endSession() {
@@ -221,6 +227,8 @@ async function endSession() {
   renderFilesLists();
   populateFileSelects();
   setSessionBadge("Session ended. Reload to start a new one.", false);
+  state.pendingActions = [];
+  renderPendingChanges();
 }
 
 function getSelectedMultiple(selectEl) {
@@ -407,6 +415,120 @@ async function downloadSelected() {
 // ------------------------------
 // Level Manager
 // ------------------------------
+function renderPendingChanges() {
+  const wrap = el("pendingList");
+  const status = el("pendingStatus");
+  if (status) status.textContent = "";
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  if (!state.pendingActions.length) {
+    wrap.innerHTML = '<div class="muted">No pending changes queued.</div>';
+    return;
+  }
+  state.pendingActions.forEach((act, idx) => {
+    const div = document.createElement("div");
+    div.className = "pending-item";
+    const meta = document.createElement("div");
+    meta.innerHTML = `<div><strong>${act.type}</strong> — ${act.label || ""}</div><div class="meta">${act.summary || ""}</div>`;
+    const remove = document.createElement("button");
+    remove.className = "ghost sm";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => {
+      state.pendingActions.splice(idx, 1);
+      renderPendingChanges();
+    });
+    div.appendChild(meta);
+    div.appendChild(remove);
+    wrap.appendChild(div);
+  });
+}
+
+function queueAction(action) {
+  state.pendingActions.push(action);
+  renderPendingChanges();
+}
+
+async function applyPendingChanges() {
+  if (!state.pendingActions.length) {
+    alert("No pending changes to apply.");
+    return;
+  }
+  const file = el("levelsIfc")?.value;
+  if (!file) return alert("Select an IFC file.");
+  const status = el("pendingStatus");
+  if (status) status.textContent = "Writing IFC with queued changes…";
+  const payload = {
+    ifc_file: file,
+    actions: state.pendingActions.map((a) => {
+      const { label, summary, ...rest } = a;
+      return rest;
+    }),
+  };
+  const resp = await fetch(`/api/session/${state.sessionId}/levels/batch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await resp.json();
+  if (resp.ok) {
+    if (status) status.textContent = data.ifc ? `Wrote: ${data.ifc.name}` : "Saved.";
+    state.pendingActions = [];
+    renderPendingChanges();
+    await refreshFiles();
+    if (data.ifc?.name && el("levelsIfc")) {
+      el("levelsIfc").value = data.ifc.name;
+    }
+    await loadLevels(true);
+  } else {
+    if (status) status.textContent = data.detail || "Failed to write IFC.";
+  }
+}
+
+function groupObjectsByType(objects) {
+  const byType = new Map();
+  (objects || []).forEach((o) => {
+    const key = o.type || "Other";
+    if (!byType.has(key)) byType.set(key, []);
+    byType.get(key).push(o);
+  });
+  return byType;
+}
+
+function renderGroupedObjects(containerId, objects, { checked = false, prefix = "obj" } = {}) {
+  const wrap = el(containerId);
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  if (!objects || !objects.length) {
+    wrap.innerHTML = '<div class="muted">No objects found for this level.</div>';
+    return;
+  }
+
+  const byType = groupObjectsByType(objects);
+  Array.from(byType.keys())
+    .sort()
+    .forEach((type) => {
+      const items = byType.get(type).slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+      const details = document.createElement("details");
+      details.open = true;
+      const summary = document.createElement("summary");
+      summary.textContent = `${type} (${items.length})`;
+      details.appendChild(summary);
+
+      const inner = document.createElement("div");
+      inner.className = "checkbox-grid";
+
+      items.forEach((o) => {
+        const id = `${prefix}-${containerId}-${o.id}`;
+        const label = document.createElement("label");
+        label.className = "checkbox";
+        label.innerHTML = `<input type="checkbox" id="${id}" value="${o.id}" ${checked ? "checked" : ""}> ${o.name || o.id} (${o.type})`;
+        inner.appendChild(label);
+      });
+
+      details.appendChild(inner);
+      wrap.appendChild(details);
+    });
+}
 
 function groupObjectsByType(objects) {
   const byType = new Map();
@@ -503,6 +625,7 @@ function fillLevelForms() {
   renderDeleteObjects(lvl);
   renderDeleteTargets();
   renderReassignControls();
+  renderPendingChanges();
 }
 
 function renderDeleteTargets() {
@@ -602,25 +725,22 @@ function collectChecked(containerId) {
 async function updateLevelRequest() {
   const file = el("levelsIfc")?.value;
   if (!file || !state.selectedLevelId) return alert("Choose an IFC file and level.");
-  const payload = {
-    ifc_file: file,
+  const action = {
+    type: "update",
     storey_id: state.selectedLevelId,
-    name: el("levelName")?.value,
-    description: el("levelDescription")?.value,
-    elevation: el("levelElevation")?.value ? Number(el("levelElevation").value) : null,
-    comp_height: el("levelCompHeight")?.value ? Number(el("levelCompHeight").value) : null,
-    global_id: el("levelGlobalId")?.value || null,
-    cobie_floor: el("levelCobie")?.value || null,
+    payload: {
+      name: el("levelName")?.value,
+      description: el("levelDescription")?.value,
+      elevation: el("levelElevation")?.value ? Number(el("levelElevation").value) : null,
+      comp_height: el("levelCompHeight")?.value ? Number(el("levelCompHeight").value) : null,
+      global_id: el("levelGlobalId")?.value || null,
+      cobie_floor: el("levelCobie")?.value || null,
+    },
+    label: `Update ${el("levelName")?.value || state.selectedLevelId}`,
+    summary: `GlobalId: ${el("levelGlobalId")?.value || "unchanged"}, COBie: ${el("levelCobie")?.value || "unchanged"}`,
   };
-  const resp = await fetch(`/api/session/${state.sessionId}/levels/update`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await resp.json();
-  if (el("levelUpdateStatus")) el("levelUpdateStatus").textContent = data.ifc ? `Updated: ${data.ifc.name}` : JSON.stringify(data);
-  await refreshFiles();
-  await loadLevels(true);
+  queueAction(action);
+  if (el("levelUpdateStatus")) el("levelUpdateStatus").textContent = "Queued update.";
 }
 
 async function deleteLevelRequest() {
@@ -629,44 +749,34 @@ async function deleteLevelRequest() {
   const target = el("deleteTarget")?.value;
   if (!target) return alert("Choose a target level.");
   const object_ids = collectChecked("deleteObjects");
-  const payload = {
-    ifc_file: file,
+  const action = {
+    type: "delete",
     storey_id: state.selectedLevelId,
     target_storey_id: Number(target),
     object_ids,
+    label: `Delete level ${state.selectedLevelId}`,
+    summary: `Move ${object_ids.length} object(s) to ${target}`,
   };
-  const resp = await fetch(`/api/session/${state.sessionId}/levels/delete`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await resp.json();
-  if (el("levelDeleteStatus")) el("levelDeleteStatus").textContent = data.ifc ? `Deleted & saved: ${data.ifc.name}` : JSON.stringify(data);
-  await refreshFiles();
-  await loadLevels(true);
+  queueAction(action);
+  if (el("levelDeleteStatus")) el("levelDeleteStatus").textContent = "Queued delete & reassign.";
 }
 
 async function addLevelRequest() {
   const file = el("levelsIfc")?.value;
   if (!file) return alert("Choose an IFC file.");
-  const payload = {
-    ifc_file: file,
+  const action = {
+    type: "add",
     name: el("newLevelName")?.value,
     description: el("newLevelDescription")?.value,
     elevation: el("newLevelElevation")?.value ? Number(el("newLevelElevation").value) : null,
     comp_height: el("newLevelCompHeight")?.value ? Number(el("newLevelCompHeight").value) : null,
     object_ids: collectChecked("addLevelObjects"),
+    label: `Add level ${el("newLevelName")?.value || ""}`,
+    summary: `Move ${collectChecked("addLevelObjects").length} object(s)`,
   };
-  if (!payload.name) return alert("Provide a name for the new level.");
-  const resp = await fetch(`/api/session/${state.sessionId}/levels/add`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await resp.json();
-  if (el("levelAddStatus")) el("levelAddStatus").textContent = data.ifc ? `Added: ${data.ifc.name}` : JSON.stringify(data);
-  await refreshFiles();
-  await loadLevels(true);
+  if (!action.name) return alert("Provide a name for the new level.");
+  queueAction(action);
+  if (el("levelAddStatus")) el("levelAddStatus").textContent = "Queued new level.";
 }
 
 async function reassignLevelRequest() {
@@ -676,21 +786,16 @@ async function reassignLevelRequest() {
   if (!file || !source || !target) return alert("Choose IFC file, source level, and target level.");
   const object_ids = collectChecked("reassignObjects");
   if (!object_ids.length) return alert("Select at least one object to reassign.");
-  const payload = {
-    ifc_file: file,
+  const action = {
+    type: "reassign",
     source_storey_id: Number(source),
     target_storey_id: Number(target),
     object_ids,
+    label: `Reassign ${object_ids.length} object(s)`,
+    summary: `${source} → ${target}`,
   };
-  const resp = await fetch(`/api/session/${state.sessionId}/levels/reassign`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await resp.json();
-  if (el("reassignStatus")) el("reassignStatus").textContent = data.ifc ? `Reassigned & saved: ${data.ifc.name}` : JSON.stringify(data);
-  await refreshFiles();
-  await loadLevels(true);
+  queueAction(action);
+  if (el("reassignStatus")) el("reassignStatus").textContent = "Queued reassignment.";
 }
 
 function wireEvents() {
@@ -699,6 +804,7 @@ function wireEvents() {
   const uploadForm = el("upload-form");
   if (uploadForm) {
     state.uploadStatusEl = el("upload-status");
+    state.uploadProgressEl = el("upload-progress");
     uploadForm.addEventListener("submit", (e) => {
       e.preventDefault();
       uploadFiles();
@@ -750,12 +856,18 @@ function wireEvents() {
     renderReassignControls();
   });
 
+  const applyPendingBtn = el("applyPending");
+  if (applyPendingBtn) applyPendingBtn.addEventListener("click", applyPendingChanges);
+
   document.querySelectorAll("[data-download-selected]").forEach((btn) => {
     btn.addEventListener("click", downloadSelected);
   });
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
+  state.uploadStatusEl = el("upload-status") || state.uploadStatusEl;
+  state.uploadProgressEl = el("upload-progress") || state.uploadProgressEl;
   await ensureSession();
   wireEvents();
+  renderPendingChanges();
 });
