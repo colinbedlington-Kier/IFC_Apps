@@ -128,6 +128,66 @@ function populateFileSelects() {
   });
 }
 
+function resetUploadProgress() {
+  const wrap = document.querySelector("[data-upload-progress-wrap]");
+  const bar = document.querySelector("[data-upload-progress]");
+  const pct = document.querySelector("[data-upload-percent]");
+  const status = document.querySelector("[data-upload-status]");
+  if (wrap) wrap.classList.remove("visible", "done", "error");
+  if (bar) bar.style.width = "0%";
+  if (pct) pct.textContent = "";
+  if (status) status.textContent = "Waiting to start…";
+}
+
+function updateUploadProgress({ percent, message, done = false, error = false }) {
+  const wrap = document.querySelector("[data-upload-progress-wrap]");
+  const bar = document.querySelector("[data-upload-progress]");
+  const pct = document.querySelector("[data-upload-percent]");
+  const status = document.querySelector("[data-upload-status]");
+  if (!wrap || !bar || !status || !pct) return;
+  wrap.classList.add("visible");
+  wrap.classList.toggle("done", done);
+  wrap.classList.toggle("error", error);
+  if (typeof percent === "number" && Number.isFinite(percent)) {
+    const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+    bar.style.width = `${clamped}%`;
+    pct.textContent = `${clamped}%`;
+    bar.setAttribute("aria-valuenow", String(clamped));
+  } else if (!percent) {
+    pct.textContent = "";
+  }
+  status.textContent = message || "";
+}
+
+function uploadWithProgress(url, form) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.upload.onprogress = (evt) => {
+      if (evt.lengthComputable) {
+        const pct = (evt.loaded / evt.total) * 100;
+        updateUploadProgress({ percent: pct, message: "Uploading files…" });
+      } else {
+        updateUploadProgress({ message: "Uploading files…" });
+      }
+    };
+    xhr.onerror = () => reject(new Error("Network error during upload"));
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+          resolve(data);
+        } catch (err) {
+          resolve(null);
+        }
+      } else {
+        reject(new Error(`Upload failed (${xhr.status})`));
+      }
+    };
+    xhr.send(form);
+  });
+}
+
 async function uploadFiles() {
   const input = el("fileInput") || el("file-input");
   if (!input || !input.files.length) {
@@ -422,6 +482,52 @@ async function applyPendingChanges() {
   } else {
     if (status) status.textContent = data.detail || "Failed to write IFC.";
   }
+}
+
+function groupObjectsByType(objects) {
+  const byType = new Map();
+  (objects || []).forEach((o) => {
+    const key = o.type || "Other";
+    if (!byType.has(key)) byType.set(key, []);
+    byType.get(key).push(o);
+  });
+  return byType;
+}
+
+function renderGroupedObjects(containerId, objects, { checked = false, prefix = "obj" } = {}) {
+  const wrap = el(containerId);
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  if (!objects || !objects.length) {
+    wrap.innerHTML = '<div class="muted">No objects found for this level.</div>';
+    return;
+  }
+
+  const byType = groupObjectsByType(objects);
+  Array.from(byType.keys())
+    .sort()
+    .forEach((type) => {
+      const items = byType.get(type).slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+      const details = document.createElement("details");
+      details.open = true;
+      const summary = document.createElement("summary");
+      summary.textContent = `${type} (${items.length})`;
+      details.appendChild(summary);
+
+      const inner = document.createElement("div");
+      inner.className = "checkbox-grid";
+
+      items.forEach((o) => {
+        const id = `${prefix}-${containerId}-${o.id}`;
+        const label = document.createElement("label");
+        label.className = "checkbox";
+        label.innerHTML = `<input type="checkbox" id="${id}" value="${o.id}" ${checked ? "checked" : ""}> ${o.name || o.id} (${o.type})`;
+        inner.appendChild(label);
+      });
+
+      details.appendChild(inner);
+      wrap.appendChild(details);
+    });
 }
 
 function groupObjectsByType(objects) {
