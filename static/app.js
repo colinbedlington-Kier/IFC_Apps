@@ -195,26 +195,26 @@ async function uploadFiles() {
     return;
   }
   if (!state.sessionId) {
-    alert("Session not ready yet. Please wait a moment and retry.");
-    return;
+    await ensureSession();
+    if (!state.sessionId) return alert("Session unavailable. Try reloading the page.");
   }
-  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Uploading…";
-  if (state.uploadProgressEl) state.uploadProgressEl.classList.remove("hidden");
   const form = new FormData();
   for (const f of input.files) {
     form.append("files", f);
   }
-  const resp = await fetch(`/api/session/${state.sessionId}/upload`, { method: "POST", body: form });
-  if (!resp.ok) {
-    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload failed. Try again.";
+  resetUploadProgress();
+  updateUploadProgress({ percent: 0, message: "Preparing upload…" });
+  try {
+    await uploadWithProgress(`/api/session/${state.sessionId}/upload`, form);
+    updateUploadProgress({ percent: 100, message: "Finishing up…", done: true });
+    input.value = "";
+    await refreshFiles();
+    setTimeout(() => resetUploadProgress(), 1200);
+  } catch (err) {
+    console.error(err);
+    updateUploadProgress({ message: err?.message || "Upload failed", error: true });
     alert("Upload failed");
-    if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
-    return;
   }
-  input.value = "";
-  await refreshFiles();
-  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload complete.";
-  if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
 }
 
 async function endSession() {

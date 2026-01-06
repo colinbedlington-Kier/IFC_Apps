@@ -36,22 +36,23 @@ def ensure_classification_reference(model, classification, identification: str, 
     )
 
 
+def _association_rels(element):
+    rels = []
+    try:
+        rels = list(getattr(element, "HasAssociations", []) or [])
+    except Exception:
+        rels = []
+    file = getattr(getattr(element, "wrapped_data", None), "file", None)
+    if file:
+        rels.extend([r for r in file.by_type("IfcRelAssociatesClassification") if element in (r.RelatedObjects or [])])
+    return rels
+
+
 def attach_classification(model, element, system_name: str, identification: str, name: Optional[str] = None):
     classification = ensure_classification(model, system_name)
     ref = ensure_classification_reference(model, classification, identification, name=name)
 
-    def _existing_rels():
-        rels = []
-        try:
-            rels = list(getattr(element, "HasAssociations", []) or [])
-        except Exception:
-            rels = []
-        if not rels and hasattr(element, "wrapped_data") and getattr(element.wrapped_data, "file", None):
-            file = element.wrapped_data.file
-            rels = [r for r in file.by_type("IfcRelAssociatesClassification") if element in (r.RelatedObjects or [])]
-        return rels
-
-    for rel in _existing_rels():
+    for rel in _association_rels(element):
         if rel.is_a("IfcRelAssociatesClassification") and rel.RelatingClassification == ref:
             if element not in rel.RelatedObjects:
                 rel.RelatedObjects = list(rel.RelatedObjects) + [element]
@@ -66,13 +67,7 @@ def attach_classification(model, element, system_name: str, identification: str,
 
 
 def find_classification_value(element, system_name: str) -> Optional[str]:
-    rels = []
-    try:
-        rels = list(getattr(element, "HasAssociations", []) or [])
-    except Exception:
-        rels = []
-    if not rels and hasattr(element, "wrapped_data") and getattr(element.wrapped_data, "file", None):
-        rels = [r for r in element.wrapped_data.file.by_type("IfcRelAssociatesClassification") if element in (r.RelatedObjects or [])]
+    rels = _association_rels(element)
     for rel in rels:
         if rel.is_a("IfcRelAssociatesClassification"):
             ref = getattr(rel, "RelatingClassification", None)
@@ -82,11 +77,5 @@ def find_classification_value(element, system_name: str) -> Optional[str]:
 
 
 def count_classification_relationships(element) -> int:
-    rels = []
-    try:
-        rels = list(getattr(element, "HasAssociations", []) or [])
-    except Exception:
-        rels = []
-    if not rels and hasattr(element, "wrapped_data") and getattr(element.wrapped_data, "file", None):
-        rels = [r for r in element.wrapped_data.file.by_type("IfcRelAssociatesClassification") if element in (r.RelatedObjects or [])]
+    rels = _association_rels(element)
     return sum(1 for rel in rels if rel.is_a("IfcRelAssociatesClassification"))
