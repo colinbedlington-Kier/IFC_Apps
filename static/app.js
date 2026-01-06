@@ -195,26 +195,26 @@ async function uploadFiles() {
     return;
   }
   if (!state.sessionId) {
-    await ensureSession();
-    if (!state.sessionId) return alert("Session unavailable. Try reloading the page.");
+    alert("Session not ready yet. Please wait a moment and retry.");
+    return;
   }
+  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Uploading…";
+  if (state.uploadProgressEl) state.uploadProgressEl.classList.remove("hidden");
   const form = new FormData();
   for (const f of input.files) {
     form.append("files", f);
   }
-  resetUploadProgress();
-  updateUploadProgress({ percent: 0, message: "Preparing upload…" });
-  try {
-    await uploadWithProgress(`/api/session/${state.sessionId}/upload`, form);
-    updateUploadProgress({ percent: 100, message: "Finishing up…", done: true });
-    input.value = "";
-    await refreshFiles();
-    setTimeout(() => resetUploadProgress(), 1200);
-  } catch (err) {
-    console.error(err);
-    updateUploadProgress({ message: err?.message || "Upload failed", error: true });
+  const resp = await fetch(`/api/session/${state.sessionId}/upload`, { method: "POST", body: form });
+  if (!resp.ok) {
+    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload failed. Try again.";
     alert("Upload failed");
+    if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
+    return;
   }
+  input.value = "";
+  await refreshFiles();
+  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload complete.";
+  if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
 }
 
 async function endSession() {
@@ -482,52 +482,6 @@ async function applyPendingChanges() {
   } else {
     if (status) status.textContent = data.detail || "Failed to write IFC.";
   }
-}
-
-function groupObjectsByType(objects) {
-  const byType = new Map();
-  (objects || []).forEach((o) => {
-    const key = o.type || "Other";
-    if (!byType.has(key)) byType.set(key, []);
-    byType.get(key).push(o);
-  });
-  return byType;
-}
-
-function renderGroupedObjects(containerId, objects, { checked = false, prefix = "obj" } = {}) {
-  const wrap = el(containerId);
-  if (!wrap) return;
-  wrap.innerHTML = "";
-  if (!objects || !objects.length) {
-    wrap.innerHTML = '<div class="muted">No objects found for this level.</div>';
-    return;
-  }
-
-  const byType = groupObjectsByType(objects);
-  Array.from(byType.keys())
-    .sort()
-    .forEach((type) => {
-      const items = byType.get(type).slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-      const details = document.createElement("details");
-      details.open = true;
-      const summary = document.createElement("summary");
-      summary.textContent = `${type} (${items.length})`;
-      details.appendChild(summary);
-
-      const inner = document.createElement("div");
-      inner.className = "checkbox-grid";
-
-      items.forEach((o) => {
-        const id = `${prefix}-${containerId}-${o.id}`;
-        const label = document.createElement("label");
-        label.className = "checkbox";
-        label.innerHTML = `<input type="checkbox" id="${id}" value="${o.id}" ${checked ? "checked" : ""}> ${o.name || o.id} (${o.type})`;
-        inner.appendChild(label);
-      });
-
-      details.appendChild(inner);
-      wrap.appendChild(details);
-    });
 }
 
 function groupObjectsByType(objects) {

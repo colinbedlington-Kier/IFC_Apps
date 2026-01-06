@@ -1232,6 +1232,44 @@ def ensure_storey_associations(storey) -> List[Any]:
     return assoc
 
 
+def containment_rels(model, obj) -> List[Any]:
+    rels = []
+    if hasattr(obj, "ContainedInStructure"):
+        try:
+            rels = list(obj.ContainedInStructure or [])
+        except Exception:
+            rels = []
+    if not rels:
+        try:
+            rels = [
+                r
+                for r in model.get_inverse(obj) or []
+                if r.is_a("IfcRelContainedInSpatialStructure") and obj in (r.RelatedElements or [])
+            ]
+        except Exception:
+            rels = []
+    return rels
+
+
+def ensure_storey_associations(storey) -> List[Any]:
+    try:
+        assoc = getattr(storey, "HasAssociations", None)
+    except Exception:
+        assoc = None
+    if assoc in (None, (), []):
+        assoc = []
+    else:
+        assoc = list(assoc)
+    try:
+        storey.HasAssociations = assoc
+    except Exception:
+        try:
+            setattr(storey, "HasAssociations", assoc)
+        except Exception:
+            pass
+    return assoc
+
+
 def move_objects_to_storey(model, objects, source_storey, target_storey):
     if target_storey is None:
         return
@@ -1256,7 +1294,7 @@ def move_objects_to_storey(model, objects, source_storey, target_storey):
 
     for obj in objects:
         # Remove from current containment
-        for rel in obj.ContainedInStructure or []:
+        for rel in containment_rels(model, obj):
             if rel.RelatingStructure == source_storey and rel.is_a("IfcRelContainedInSpatialStructure"):
                 rel.RelatedElements = [e for e in rel.RelatedElements if e != obj]
         # Adjust placement to keep world position
@@ -1459,7 +1497,7 @@ def add_level(
         for obj in objs:
             # find original storey for delta
             origin_storey = None
-            for rel in obj.ContainedInStructure or []:
+            for rel in containment_rels(model, obj):
                 if rel.is_a("IfcRelContainedInSpatialStructure"):
                     origin_storey = rel.RelatingStructure
                     break
@@ -1468,7 +1506,7 @@ def add_level(
                 delta = storey_elevation(origin_storey) - storey_elevation(storey)
             adjust_local_placement_z(getattr(obj, "ObjectPlacement", None), delta)
             # remove from old relations
-            for rel in obj.ContainedInStructure or []:
+            for rel in containment_rels(model, obj):
                 if rel.is_a("IfcRelContainedInSpatialStructure"):
                     rel.RelatedElements = [e for e in rel.RelatedElements if e != obj]
             # add to new relation
