@@ -25,7 +25,6 @@
       <a class="nav-link" data-page="globalz" href="/static/globalz.html">Global Z</a>
       <a class="nav-link" data-page="proxy" href="/static/proxy.html">Type Mapper</a>
       <a class="nav-link" data-page="levels" href="/static/levels.html">Levels</a>
-      <a class="nav-link" data-page="viewer" href="/viewer">Viewer</a>
     </nav>
   </header>
 
@@ -45,7 +44,10 @@
           <p><strong>Drag & drop</strong> or choose IFC / Excel files.</p>
           <p class="hint">Accepted: .ifc, .ifczip, .xlsx</p>
         </div>
-        <button type="submit" class="primary">Upload</button>
+        <div style="display:flex; flex-direction:column; gap:10px; align-items:flex-start;">
+          <button type="submit" class="primary">Upload</button>
+          <div id="upload-status" class="hint">Waiting to start…</div>
+        </div>
       </form>
       <div class="card" id="file-inventory">
         <div class="card-head">
@@ -65,7 +67,6 @@
           <a class="nav-link" href="/static/globalz.html">Global Z</a>
           <a class="nav-link" href="/static/proxy.html">Type Mapper</a>
           <a class="nav-link" href="/static/levels.html">Levels manager</a>
-          <a class="nav-link" href="/viewer">Viewer</a>
         </div>
       </div>
     </section>

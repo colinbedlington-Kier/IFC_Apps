@@ -4,16 +4,22 @@ const state = {
   levels: [],
   selectedLevelId: null,
   selectedFiles: new Set(),
+  uploadStatusEl: null,
 };
 
 const el = (id) => document.getElementById(id);
 
 function setSessionBadge(text, ok = true) {
-  const badge = document.querySelector("[data-session-badge]");
-  if (!badge) return;
-  badge.textContent = text;
-  badge.classList.toggle("danger-text", !ok);
-  badge.classList.toggle("success-text", ok);
+  const badges = [
+    document.querySelector("[data-session-badge]"),
+    el("sessionStatus"),
+    el("session-pill"),
+  ].filter(Boolean);
+  badges.forEach((badge) => {
+    badge.textContent = text;
+    badge.classList.toggle("danger-text", !ok);
+    badge.classList.toggle("success-text", ok);
+  });
 }
 
 async function ensureSession() {
@@ -29,8 +35,10 @@ async function ensureSession() {
     localStorage.setItem("ifc_session_id", state.sessionId);
     setSessionBadge(`Session ${state.sessionId.slice(0, 8)}…`, true);
     await refreshFiles();
+    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Session ready.";
   } catch (err) {
     setSessionBadge("Session error", false);
+    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Session error. Reload to retry.";
     console.error(err);
   }
 }
@@ -50,7 +58,12 @@ async function refreshFiles() {
 }
 
 function renderFilesLists() {
-  document.querySelectorAll("[data-files-list]").forEach((ul) => {
+  const renderTargets = [
+    ...document.querySelectorAll("[data-files-list]"),
+    el("filesList"),
+  ].filter(Boolean);
+
+  renderTargets.forEach((ul) => {
     ul.innerHTML = "";
     state.files.forEach((f) => {
       const li = document.createElement("li");
@@ -66,6 +79,26 @@ function renderFilesLists() {
       ul.appendChild(li);
     });
   });
+  const simpleList = el("file-list");
+  if (simpleList) {
+    simpleList.innerHTML = "";
+    if (!state.files.length) {
+      simpleList.innerHTML = '<div class="muted">No files uploaded yet.</div>';
+    } else {
+      state.files.forEach((f) => {
+        const item = document.createElement("div");
+        item.className = "file-pill";
+        item.innerHTML = `<div><div class="file-name">${f.name}</div><div class="muted">${(f.size / 1024).toFixed(1)} KB</div></div>`;
+        const btn = document.createElement("button");
+        btn.className = "ghost";
+        btn.textContent = "Download";
+        btn.addEventListener("click", () => downloadFile(f.name));
+        item.appendChild(btn);
+        simpleList.appendChild(item);
+      });
+    }
+  }
+
   document.querySelectorAll(".file-checkbox").forEach((cb) => {
     cb.addEventListener("change", (e) => {
       const name = e.target.value;
@@ -94,22 +127,29 @@ function populateFileSelects() {
 }
 
 async function uploadFiles() {
-  const input = el("fileInput");
+  const input = el("fileInput") || el("file-input");
   if (!input || !input.files.length) {
     alert("Choose file(s) to upload.");
     return;
   }
+  if (!state.sessionId) {
+    alert("Session not ready yet. Please wait a moment and retry.");
+    return;
+  }
+  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Uploading…";
   const form = new FormData();
   for (const f of input.files) {
     form.append("files", f);
   }
   const resp = await fetch(`/api/session/${state.sessionId}/upload`, { method: "POST", body: form });
   if (!resp.ok) {
+    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload failed. Try again.";
     alert("Upload failed");
     return;
   }
   input.value = "";
   await refreshFiles();
+  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload complete.";
 }
 
 async function endSession() {
@@ -309,6 +349,52 @@ async function downloadSelected() {
 // Level Manager
 // ------------------------------
 
+function groupObjectsByType(objects) {
+  const byType = new Map();
+  (objects || []).forEach((o) => {
+    const key = o.type || "Other";
+    if (!byType.has(key)) byType.set(key, []);
+    byType.get(key).push(o);
+  });
+  return byType;
+}
+
+function renderGroupedObjects(containerId, objects, { checked = false, prefix = "obj" } = {}) {
+  const wrap = el(containerId);
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  if (!objects || !objects.length) {
+    wrap.innerHTML = '<div class="muted">No objects found for this level.</div>';
+    return;
+  }
+
+  const byType = groupObjectsByType(objects);
+  Array.from(byType.keys())
+    .sort()
+    .forEach((type) => {
+      const items = byType.get(type).slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+      const details = document.createElement("details");
+      details.open = true;
+      const summary = document.createElement("summary");
+      summary.textContent = `${type} (${items.length})`;
+      details.appendChild(summary);
+
+      const inner = document.createElement("div");
+      inner.className = "checkbox-grid";
+
+      items.forEach((o) => {
+        const id = `${prefix}-${containerId}-${o.id}`;
+        const label = document.createElement("label");
+        label.className = "checkbox";
+        label.innerHTML = `<input type="checkbox" id="${id}" value="${o.id}" ${checked ? "checked" : ""}> ${o.name || o.id} (${o.type})`;
+        inner.appendChild(label);
+      });
+
+      details.appendChild(inner);
+      wrap.appendChild(details);
+    });
+}
+
 function renderLevels() {
   const container = el("levelsTable");
   if (!container) return;
@@ -326,13 +412,15 @@ function renderLevels() {
         <td>${lvl.elevation ?? ""}</td>
         <td>${lvl.comp_height ?? ""}</td>
         <td>${lvl.object_count}</td>
+        <td>${lvl.global_id || ""}</td>
+        <td>${lvl.cobie_floor || ""}</td>
       </tr>`
     )
     .join("");
   container.innerHTML = `
     <table>
       <thead>
-        <tr><th></th><th>Name</th><th>Description</th><th>Elevation</th><th>Comp height</th><th>Objects</th></tr>
+        <tr><th></th><th>Name</th><th>Description</th><th>Elevation</th><th>Comp height</th><th>Objects</th><th>GlobalId</th><th>COBie Floors</th></tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>`;
@@ -351,8 +439,11 @@ function fillLevelForms() {
   if (el("levelDescription")) el("levelDescription").value = lvl.description || "";
   if (el("levelElevation")) el("levelElevation").value = lvl.elevation ?? "";
   if (el("levelCompHeight")) el("levelCompHeight").value = lvl.comp_height ?? "";
+  if (el("levelGlobalId")) el("levelGlobalId").value = lvl.global_id || "";
+  if (el("levelCobie")) el("levelCobie").value = lvl.cobie_floor || "";
   renderDeleteObjects(lvl);
   renderDeleteTargets();
+  renderReassignControls();
 }
 
 function renderDeleteTargets() {
@@ -373,12 +464,7 @@ function renderDeleteObjects(level) {
   const wrap = el("deleteObjects");
   if (!wrap) return;
   wrap.innerHTML = "";
-  (level.objects || []).forEach((o) => {
-    const id = `delobj-${o.id}`;
-    const label = document.createElement("label");
-    label.innerHTML = `<input type="checkbox" id="${id}" value="${o.id}" checked> ${o.name || o.type || o.id} (${o.type})`;
-    wrap.appendChild(label);
-  });
+  renderGroupedObjects("deleteObjects", level.objects, { checked: true, prefix: "delete" });
 }
 
 function renderAddObjects() {
@@ -386,17 +472,52 @@ function renderAddObjects() {
   if (!wrap) return;
   wrap.innerHTML = "";
   const allObjs = state.levels.flatMap((l) => l.objects || []);
-  allObjs.forEach((o) => {
-    const id = `addobj-${o.id}`;
-    const label = document.createElement("label");
-    label.innerHTML = `<input type="checkbox" id="${id}" value="${o.id}"> ${o.name || o.type || o.id} (${o.type})`;
-    wrap.appendChild(label);
-  });
+  renderGroupedObjects("addLevelObjects", allObjs, { checked: false, prefix: "add" });
 }
 
-async function loadLevels() {
+function renderReassignControls() {
+  const sourceSel = el("reassignSource");
+  const targetSel = el("reassignTarget");
+  if (!sourceSel || !targetSel) return;
+
+  const currentSource = Number(sourceSel.value) || state.selectedLevelId || state.levels[0]?.id;
+  sourceSel.innerHTML = "";
+  state.levels.forEach((l) => {
+    const opt = document.createElement("option");
+    opt.value = l.id;
+    opt.textContent = l.name || `(ID ${l.id})`;
+    opt.selected = l.id === currentSource;
+    sourceSel.appendChild(opt);
+  });
+
+  const chosenSource = Number(sourceSel.value);
+  targetSel.innerHTML = "";
+  state.levels
+    .filter((l) => l.id !== chosenSource)
+    .forEach((l) => {
+      const opt = document.createElement("option");
+      opt.value = l.id;
+      opt.textContent = l.name || `(ID ${l.id})`;
+      targetSel.appendChild(opt);
+    });
+
+  renderReassignObjects();
+}
+
+function renderReassignObjects() {
+  const sourceSel = el("reassignSource");
+  const sourceId = Number(sourceSel?.value);
+  const level = state.levels.find((l) => l.id === sourceId);
+  renderGroupedObjects("reassignObjects", level?.objects || [], { checked: false, prefix: "reassign" });
+}
+
+async function loadLevels(silent = false) {
   const file = el("levelsIfc")?.value;
-  if (!file) return alert("Select an IFC file.");
+  if (!file) {
+    if (!silent) alert("Select an IFC file.");
+    return;
+  }
+  const prevSelected = state.selectedLevelId;
   const resp = await fetch(`/api/session/${state.sessionId}/levels/list`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -404,11 +525,13 @@ async function loadLevels() {
   });
   const data = await resp.json();
   state.levels = data.levels || [];
-  state.selectedLevelId = state.levels[0]?.id ?? null;
+  const stillExists = state.levels.some((l) => l.id === prevSelected);
+  state.selectedLevelId = stillExists ? prevSelected : state.levels[0]?.id ?? null;
   if (el("levelsMeta")) el("levelsMeta").textContent = `${state.levels.length} level(s) loaded`;
   renderLevels();
   renderAddObjects();
   fillLevelForms();
+  renderReassignControls();
 }
 
 function collectChecked(containerId) {
@@ -427,6 +550,8 @@ async function updateLevelRequest() {
     description: el("levelDescription")?.value,
     elevation: el("levelElevation")?.value ? Number(el("levelElevation").value) : null,
     comp_height: el("levelCompHeight")?.value ? Number(el("levelCompHeight").value) : null,
+    global_id: el("levelGlobalId")?.value || null,
+    cobie_floor: el("levelCobie")?.value || null,
   };
   const resp = await fetch(`/api/session/${state.sessionId}/levels/update`, {
     method: "POST",
@@ -436,6 +561,7 @@ async function updateLevelRequest() {
   const data = await resp.json();
   if (el("levelUpdateStatus")) el("levelUpdateStatus").textContent = data.ifc ? `Updated: ${data.ifc.name}` : JSON.stringify(data);
   await refreshFiles();
+  await loadLevels(true);
 }
 
 async function deleteLevelRequest() {
@@ -458,6 +584,7 @@ async function deleteLevelRequest() {
   const data = await resp.json();
   if (el("levelDeleteStatus")) el("levelDeleteStatus").textContent = data.ifc ? `Deleted & saved: ${data.ifc.name}` : JSON.stringify(data);
   await refreshFiles();
+  await loadLevels(true);
 }
 
 async function addLevelRequest() {
@@ -480,14 +607,49 @@ async function addLevelRequest() {
   const data = await resp.json();
   if (el("levelAddStatus")) el("levelAddStatus").textContent = data.ifc ? `Added: ${data.ifc.name}` : JSON.stringify(data);
   await refreshFiles();
+  await loadLevels(true);
+}
+
+async function reassignLevelRequest() {
+  const file = el("levelsIfc")?.value;
+  const source = el("reassignSource")?.value;
+  const target = el("reassignTarget")?.value;
+  if (!file || !source || !target) return alert("Choose IFC file, source level, and target level.");
+  const object_ids = collectChecked("reassignObjects");
+  if (!object_ids.length) return alert("Select at least one object to reassign.");
+  const payload = {
+    ifc_file: file,
+    source_storey_id: Number(source),
+    target_storey_id: Number(target),
+    object_ids,
+  };
+  const resp = await fetch(`/api/session/${state.sessionId}/levels/reassign`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await resp.json();
+  if (el("reassignStatus")) el("reassignStatus").textContent = data.ifc ? `Reassigned & saved: ${data.ifc.name}` : JSON.stringify(data);
+  await refreshFiles();
+  await loadLevels(true);
 }
 
 function wireEvents() {
   const uploadBtn = el("uploadBtn");
   if (uploadBtn) uploadBtn.addEventListener("click", uploadFiles);
+  const uploadForm = el("upload-form");
+  if (uploadForm) {
+    state.uploadStatusEl = el("upload-status");
+    uploadForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      uploadFiles();
+    });
+  }
 
   const refreshBtn = el("refreshFiles");
   if (refreshBtn) refreshBtn.addEventListener("click", refreshFiles);
+  const refreshBtnStatic = el("refresh-files");
+  if (refreshBtnStatic) refreshBtnStatic.addEventListener("click", refreshFiles);
 
   const resetBtn = el("resetSession");
   if (resetBtn) resetBtn.addEventListener("click", endSession);
@@ -521,6 +683,13 @@ function wireEvents() {
 
   const addLevelBtn = el("addLevel");
   if (addLevelBtn) addLevelBtn.addEventListener("click", addLevelRequest);
+
+  const reassignLevelBtn = el("reassignLevel");
+  if (reassignLevelBtn) reassignLevelBtn.addEventListener("click", reassignLevelRequest);
+
+  el("reassignSource")?.addEventListener("change", () => {
+    renderReassignControls();
+  });
 
   document.querySelectorAll("[data-download-selected]").forEach((btn) => {
     btn.addEventListener("click", downloadSelected);

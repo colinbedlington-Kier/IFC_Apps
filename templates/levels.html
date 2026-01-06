@@ -22,61 +22,124 @@
 
 <div class="grid">
   <div class="card">
-    <div class="section-title">
-      <h3>Edit level</h3>
-    </div>
-    <label>Name</label>
-    <input id="levelName" type="text" />
-    <label>Description</label>
-    <input id="levelDescription" type="text" />
-    <div class="two-col" style="margin-top: 8px">
-      <div>
-        <label>Elevation (Z)</label>
-        <input id="levelElevation" type="number" step="any" />
+    <details class="collapsible" open>
+      <summary class="collapsible-summary">
+        <h3>Edit level</h3>
+        <span class="muted">Rename, update elevation, GlobalId, or COBie Floors</span>
+      </summary>
+      <div class="collapsible-body">
+        <div class="two-col">
+          <div>
+            <label>Name</label>
+            <input id="levelName" type="text" />
+          </div>
+          <div>
+            <label>Description</label>
+            <input id="levelDescription" type="text" />
+          </div>
+        </div>
+        <div class="two-col" style="margin-top: 8px">
+          <div>
+            <label>Elevation (Z)</label>
+            <input id="levelElevation" type="number" step="any" />
+          </div>
+          <div>
+            <label>Computation height</label>
+            <input id="levelCompHeight" type="number" step="any" />
+          </div>
+        </div>
+        <div class="two-col" style="margin-top: 8px">
+          <div>
+            <label>Global id</label>
+            <input id="levelGlobalId" type="text" />
+          </div>
+          <div>
+            <label>COBie Floors (classification)</label>
+            <input id="levelCobie" type="text" placeholder="Enter classification reference" />
+          </div>
+        </div>
+        <button class="btn" id="updateLevel" style="margin-top: 10px">Update level</button>
+        <div class="status" id="levelUpdateStatus"></div>
       </div>
-      <div>
-        <label>Computation height</label>
-        <input id="levelCompHeight" type="number" step="any" />
-      </div>
-    </div>
-    <button class="btn" id="updateLevel" style="margin-top: 10px">Update level</button>
-    <div class="status" id="levelUpdateStatus"></div>
+    </details>
   </div>
 
   <div class="card">
-    <div class="section-title">
-      <h3>Delete level & reassign</h3>
-    </div>
-    <label for="deleteTarget">Move selected objects to</label>
-    <select id="deleteTarget"></select>
-    <div class="muted" style="margin-top: 8px">Objects in selected level:</div>
-    <div class="checkbox-grid" id="deleteObjects"></div>
-    <button class="btn danger" id="deleteLevel" style="margin-top: 10px">Delete level</button>
-    <div class="status" id="levelDeleteStatus"></div>
+    <details class="collapsible" open>
+      <summary class="collapsible-summary">
+        <h3>Delete level & reassign</h3>
+        <span class="muted">Move its objects before deleting</span>
+      </summary>
+      <div class="collapsible-body">
+        <label for="deleteTarget">Move selected objects to</label>
+        <select id="deleteTarget"></select>
+        <div class="muted" style="margin-top: 8px">Objects in selected level:</div>
+        <div class="checkbox-columns" id="deleteObjects"></div>
+        <button class="btn danger" id="deleteLevel" style="margin-top: 10px">Delete level</button>
+        <div class="status" id="levelDeleteStatus"></div>
+      </div>
+    </details>
   </div>
 </div>
 
-<div class="card">
-  <div class="section-title">
-    <h3>Add level</h3>
+<div class="grid">
+  <div class="card">
+    <details class="collapsible" open>
+      <summary class="collapsible-summary">
+        <h3>Add level</h3>
+        <span class="muted">Create a new level and optionally move objects</span>
+      </summary>
+      <div class="collapsible-body">
+        <div class="two-col">
+          <div>
+            <label>Name</label>
+            <input id="newLevelName" type="text" />
+          </div>
+          <div>
+            <label>Elevation (Z)</label>
+            <input id="newLevelElevation" type="number" step="any" />
+          </div>
+        </div>
+        <label>Description</label>
+        <input id="newLevelDescription" type="text" />
+        <div class="two-col" style="margin-top: 8px">
+          <div>
+            <label>Computation height</label>
+            <input id="newLevelCompHeight" type="number" step="any" />
+          </div>
+          <div class="muted helper">Moves retain geometry positions via offset.</div>
+        </div>
+        <div class="muted" style="margin-top: 8px">Move objects to new level (optional):</div>
+        <div class="checkbox-columns" id="addLevelObjects"></div>
+        <button class="btn" id="addLevel" style="margin-top: 10px">Add level</button>
+        <div class="status" id="levelAddStatus"></div>
+      </div>
+    </details>
   </div>
-  <div class="two-col">
-    <div>
-      <label>Name</label>
-      <input id="newLevelName" type="text" />
-    </div>
-    <div>
-      <label>Elevation (Z)</label>
-      <input id="newLevelElevation" type="number" step="any" />
-    </div>
+
+  <div class="card">
+    <details class="collapsible" open>
+      <summary class="collapsible-summary">
+        <h3>Reassign elements</h3>
+        <span class="muted">Move elements between levels without adding or deleting</span>
+      </summary>
+      <div class="collapsible-body">
+        <div class="two-col">
+          <div>
+            <label for="reassignSource">Move from</label>
+            <select id="reassignSource"></select>
+          </div>
+          <div>
+            <label for="reassignTarget">Move to</label>
+            <select id="reassignTarget"></select>
+          </div>
+        </div>
+        <div class="muted" style="margin-top: 8px">Objects in source level:</div>
+        <div class="checkbox-columns" id="reassignObjects"></div>
+        <button class="btn" id="reassignLevel" style="margin-top: 10px">Reassign objects</button>
+        <div class="status" id="reassignStatus"></div>
+      </div>
+    </details>
   </div>
-  <label>Description</label>
-  <input id="newLevelDescription" type="text" />
-  <label>Computation height</label>
-  <input id="newLevelCompHeight" type="number" step="any" />
-  <div class="muted" style="margin-top: 8px">Move objects to new level (optional):</div>
-  <div class="checkbox-grid" id="addLevelObjects"></div>
-  <button class="btn" id="addLevel" style="margin-top: 10px">Add level</button>
-  <div class="status" id="levelAddStatus"></div>
 </div>
 {% endblock %}
