@@ -25,7 +25,6 @@
       <a class="nav-link" data-page="globalz" href="/static/globalz.html">Global Z</a>
       <a class="nav-link" data-page="proxy" href="/static/proxy.html">Type Mapper</a>
       <a class="nav-link" data-page="levels" href="/static/levels.html">Levels</a>
-      <a class="nav-link" data-page="viewer" href="/viewer">Viewer</a>
     </nav>
   </header>
 
@@ -109,6 +108,13 @@
           <button type="submit" class="primary">Delete level</button>
           <div id="level-delete-download" class="download-list"></div>
         </form>
+      </div>
+
+      <div class="card tool-card">
+        <div class="card-head"><h3>Pending changes</h3></div>
+        <div id="pendingList" class="pending-list"></div>
+        <button type="button" class="primary" id="applyPending">Write new IFC</button>
+        <div id="pendingStatus" class="hint"></div>
       </div>
     </section>
   </main>

@@ -1203,6 +1203,25 @@ def list_storey_objects(storey) -> List[Any]:
     return objs
 
 
+def ensure_storey_associations(storey) -> List[Any]:
+    try:
+        assoc = getattr(storey, "HasAssociations", None)
+    except Exception:
+        assoc = None
+    if assoc in (None, (), []):
+        assoc = []
+    else:
+        assoc = list(assoc)
+    try:
+        storey.HasAssociations = assoc
+    except Exception:
+        try:
+            setattr(storey, "HasAssociations", assoc)
+        except Exception:
+            pass
+    return assoc
+
+
 def move_objects_to_storey(model, objects, source_storey, target_storey):
     if target_storey is None:
         return
@@ -1255,11 +1274,29 @@ def remove_storey_from_aggregates(model, storey):
                 model.remove(rel)
 
 
+COBIE_FLOOR_CLASS_NAME = "COBie Floors"
+
+
+def _get_cobie_floor_classification(storey) -> Tuple[Optional[str], Optional[str]]:
+    """Return (item_reference, name) for the COBie Floors classification reference if present."""
+    for rel in ensure_storey_associations(storey):
+        if not rel.is_a("IfcRelAssociatesClassification"):
+            continue
+        cref = getattr(rel, "RelatingClassification", None)
+        if not cref or not cref.is_a("IfcClassificationReference"):
+            continue
+        source = getattr(cref, "ReferencedSource", None)
+        if getattr(source, "Name", "") == COBIE_FLOOR_CLASS_NAME or getattr(cref, "Name", "") == COBIE_FLOOR_CLASS_NAME:
+            return getattr(cref, "ItemReference", None), getattr(cref, "Name", None)
+    return None, None
+
+
 def list_levels(ifc_path: str) -> Dict[str, Any]:
     model = ifcopenshell.open(ifc_path)
     result = []
     for st in model.by_type("IfcBuildingStorey"):
         objs = list_storey_objects(st)
+        cobie_ref, cobie_name = _get_cobie_floor_classification(st)
         result.append(
             {
                 "id": st.id(),
@@ -1267,6 +1304,8 @@ def list_levels(ifc_path: str) -> Dict[str, Any]:
                 "description": getattr(st, "Description", ""),
                 "elevation": storey_elevation(st),
                 "comp_height": storey_comp_height(st),
+                "global_id": getattr(st, "GlobalId", None),
+                "cobie_floor": cobie_ref or cobie_name,
                 "object_count": len(objs),
                 "objects": [
                     {"id": o.id(), "name": getattr(o, "Name", ""), "type": o.is_a()}
@@ -1286,12 +1325,72 @@ def update_level(ifc_path: str, storey_id: int, payload: Dict[str, Any], output_
         storey.Name = payload.get("name")
     if "description" in payload:
         storey.Description = payload.get("description")
+    if "global_id" in payload and payload.get("global_id"):
+        storey.GlobalId = payload.get("global_id")
     if "elevation" in payload and payload.get("elevation") not in (None, ""):
         storey.Elevation = float(payload.get("elevation"))
     if "comp_height" in payload and hasattr(storey, "ElevationOfRefHeight"):
         comp = payload.get("comp_height")
         if comp not in (None, ""):
             storey.ElevationOfRefHeight = float(comp)
+
+    if "cobie_floor" in payload:
+        desired_ref = payload.get("cobie_floor")
+        existing_rel = None
+        existing_cref = None
+        associations = ensure_storey_associations(storey)
+        for rel in list(associations):
+            if rel.is_a("IfcRelAssociatesClassification"):
+                cref = getattr(rel, "RelatingClassification", None)
+                source = getattr(cref, "ReferencedSource", None) if cref else None
+                if cref and cref.is_a("IfcClassificationReference") and (
+                    getattr(source, "Name", "") == COBIE_FLOOR_CLASS_NAME
+                    or getattr(cref, "Name", "") == COBIE_FLOOR_CLASS_NAME
+                ):
+                    existing_rel = rel
+                    existing_cref = cref
+                    break
+
+        if desired_ref in (None, ""):
+            if existing_rel:
+                try:
+                    storey.HasAssociations = [r for r in associations if r != existing_rel]
+                    model.remove(existing_rel)
+                except Exception:
+                    pass
+        else:
+            classification = None
+            for cls in model.by_type("IfcClassification"):
+                if getattr(cls, "Name", "") == COBIE_FLOOR_CLASS_NAME:
+                    classification = cls
+                    break
+            if classification is None:
+                classification = model.create_entity(
+                    "IfcClassification",
+                    Name=COBIE_FLOOR_CLASS_NAME,
+                    Source="COBie",
+                )
+
+            if existing_cref is None:
+                existing_cref = model.create_entity(
+                    "IfcClassificationReference",
+                    ItemReference=str(desired_ref),
+                    Name=COBIE_FLOOR_CLASS_NAME,
+                    ReferencedSource=classification,
+                )
+                existing_rel = model.create_entity(
+                    "IfcRelAssociatesClassification",
+                    GlobalId=new_guid(),
+                    RelatedObjects=[storey],
+                    RelatingClassification=existing_cref,
+                )
+                associations = ensure_storey_associations(storey)
+                storey.HasAssociations = list(associations) + [existing_rel]
+            else:
+                existing_cref.ItemReference = str(desired_ref)
+                if getattr(existing_cref, "Name", "") in (None, "", COBIE_FLOOR_CLASS_NAME):
+                    existing_cref.Name = COBIE_FLOOR_CLASS_NAME
+
     model.write(output_path)
     return output_path
 
@@ -1380,6 +1479,73 @@ def add_level(
 
     model.write(output_path)
     return output_path
+
+
+def reassign_objects(
+    ifc_path: str,
+    source_storey_id: int,
+    target_storey_id: int,
+    object_ids: Optional[List[int]],
+    output_path: str,
+) -> str:
+    model = ifcopenshell.open(ifc_path)
+    source = model.by_id(int(source_storey_id))
+    target = model.by_id(int(target_storey_id))
+    if not source or not target:
+        raise ValueError("Source or target storey not found")
+    objs = list_storey_objects(source)
+    if object_ids:
+        objs = [o for o in objs if o.id() in object_ids]
+    move_objects_to_storey(model, objs, source, target)
+    cleanup_empty_containment(model, source)
+    model.write(output_path)
+    return output_path
+
+
+def apply_level_actions(ifc_path: str, actions: List[Dict[str, Any]], output_path: str) -> str:
+    if not actions:
+        raise ValueError("No actions supplied")
+    work_path = output_path
+    current_path = ifc_path
+    for idx, action in enumerate(actions):
+        kind = action.get("type")
+        if kind == "update":
+            update_level(
+                current_path,
+                int(action["storey_id"]),
+                action.get("payload", {}),
+                work_path,
+            )
+        elif kind == "delete":
+            delete_level(
+                current_path,
+                int(action["storey_id"]),
+                int(action["target_storey_id"]),
+                action.get("object_ids"),
+                work_path,
+            )
+        elif kind == "add":
+            add_level(
+                current_path,
+                name=action.get("name"),
+                description=action.get("description"),
+                elevation=action.get("elevation"),
+                comp_height=action.get("comp_height"),
+                object_ids=action.get("object_ids"),
+                output_path=work_path,
+            )
+        elif kind == "reassign":
+            reassign_objects(
+                current_path,
+                int(action["source_storey_id"]),
+                int(action["target_storey_id"]),
+                action.get("object_ids"),
+                work_path,
+            )
+        else:
+            raise ValueError(f"Unsupported action type: {kind}")
+        current_path = work_path
+    return work_path
 
 
 # ----------------------------------------------------------------------------
@@ -1999,7 +2165,10 @@ def levels_page(request: Request):
 
 @app.get("/viewer", response_class=HTMLResponse)
 def viewer_page(request: Request):
-    return templates.TemplateResponse("viewer.html", {"request": request, "active": "viewer"})
+    return HTMLResponse(
+        "<html><body><h2>IFC Viewer temporarily disabled</h2><p>The viewer is not included in this build.</p></body></html>",
+        status_code=503,
+    )
 
 
 @app.get("/model-checking", response_class=HTMLResponse)
@@ -2373,6 +2542,50 @@ def api_levels_add(session_id: str, payload: Dict[str, Any] = Body(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"ifc": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"}}
+
+
+@app.post("/api/session/{session_id}/levels/reassign")
+def api_levels_reassign(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    src = payload.get("ifc_file")
+    source_id = payload.get("source_storey_id")
+    target_id = payload.get("target_storey_id")
+    object_ids = payload.get("object_ids")
+    if not src or source_id is None or target_id is None:
+        raise HTTPException(status_code=400, detail="ifc_file, source_storey_id, and target_storey_id are required")
+    in_path = os.path.join(root, sanitize_filename(src))
+    if not os.path.isfile(in_path):
+        raise HTTPException(status_code=404, detail="IFC file not found")
+    base = os.path.splitext(os.path.basename(in_path))[0]
+    out_name = f"{base}_levels.ifc"
+    out_path = os.path.join(root, out_name)
+    try:
+        reassign_objects(in_path, int(source_id), int(target_id), object_ids, out_path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ifc": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"}}
+
+
+@app.post("/api/session/{session_id}/levels/batch")
+def api_levels_batch(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    src = payload.get("ifc_file")
+    actions = payload.get("actions") or []
+    if not src or not actions:
+        raise HTTPException(status_code=400, detail="ifc_file and actions are required")
+    in_path = os.path.join(root, sanitize_filename(src))
+    if not os.path.isfile(in_path):
+        raise HTTPException(status_code=404, detail="IFC file not found")
+    base = os.path.splitext(os.path.basename(in_path))[0]
+    work_path = os.path.join(root, f"{base}_levels_work.ifc")
+    final_name = f"{base}_levels_batch.ifc"
+    final_path = os.path.join(root, final_name)
+    try:
+        apply_level_actions(in_path, actions, work_path)
+        shutil.copyfile(work_path, final_path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ifc": {"name": final_name, "url": f"/api/session/{session_id}/download?name={final_name}"}, "actions": actions}
 
 
 if __name__ == "__main__":
