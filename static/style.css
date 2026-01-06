@@ -154,6 +154,47 @@ nav {
   align-items: center;
 }
 
+.upload-progress {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.02);
+  display: none;
+  gap: 8px;
+  flex-direction: column;
+}
+
+.upload-progress.visible { display: flex; }
+.upload-progress.done .progress-bar-fill { background: var(--success); }
+.upload-progress.error .progress-bar-fill { background: #f2798f; }
+
+.upload-progress-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+}
+
+.progress-bar {
+  position: relative;
+  height: 10px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.progress-bar-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0%;
+  background: linear-gradient(135deg, var(--accent-2), var(--accent));
+  transition: width 0.18s ease;
+}
+
 .hint { color: var(--muted); margin: 4px 0 0; font-size: 13px; }
 
 .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
@@ -277,6 +318,7 @@ button.ghost {
   margin-bottom: 8px;
 }
 .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .chip {
   padding: 6px 10px;
   border-radius: 999px;
@@ -284,6 +326,13 @@ button.ghost {
   border: 1px solid var(--border);
   font-size: 13px;
 }
+.chip-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.chip-toggle input { accent-color: var(--accent-2); }
 .mc-table-wrap { border-top: 1px solid rgba(255,255,255,0.08); padding-top: 10px; }
 .mc-row {
   display: grid;

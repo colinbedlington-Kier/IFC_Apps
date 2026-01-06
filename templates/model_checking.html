@@ -21,8 +21,12 @@
       </select>
     </div>
     <div>
-      <label for="mcEntity">Entity filter (optional)</label>
-      <input id="mcEntity" type="text" placeholder="e.g. IfcSpace or IfcDoor" />
+      <label>IFC class groups</label>
+      <div class="chip-row" id="mcEntityGroups"></div>
+      <div class="inline" style="margin-top: 6px; gap: 8px;">
+        <button class="btn secondary sm" id="mcEntitySelectAll" type="button">Select all</button>
+        <span class="hint">Classes from the loaded checks. All selected by default.</span>
+      </div>
     </div>
     <div class="inline">
       <button class="btn" id="mcLoad">Load tables</button>

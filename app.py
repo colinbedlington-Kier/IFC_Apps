@@ -569,7 +569,7 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
     def extract_uniclass(elem, target_name, is_ifc2x3):
         reference = ""
         name = ""
-        for rel in elem.HasAssociations or []:
+        for rel in getattr(elem, "HasAssociations", []) or []:
             if rel.is_a("IfcRelAssociatesClassification"):
                 classification_ref = rel.RelatingClassification
                 if classification_ref and classification_ref.is_a("IfcClassificationReference"):
@@ -775,7 +775,7 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
             if ref is None and nm is None:
                 continue
             existing_ref = None
-            for rel in elem.HasAssociations or []:
+            for rel in getattr(elem, "HasAssociations", []) or []:
                 if rel.is_a("IfcRelAssociatesClassification"):
                     cref = rel.RelatingClassification
                     if cref and cref.is_a("IfcClassificationReference"):
@@ -1200,7 +1200,17 @@ def list_storey_objects(storey) -> List[Any]:
         if rel.is_a("IfcRelContainedInSpatialStructure"):
             for el in rel.RelatedElements or []:
                 objs.append(el)
-    return objs
+    # Include spatial children (e.g., IfcSpace) aggregated beneath the storey
+    for rel in storey.IsDecomposedBy or []:
+        if rel.is_a("IfcRelAggregates"):
+            for child in rel.RelatedObjects or []:
+                if child.is_a("IfcSpace"):
+                    objs.append(child)
+    # Deduplicate by express ID to avoid double-counting if an element appears in multiple relations
+    seen = {}
+    for obj in objs:
+        seen[obj.id()] = obj
+    return list(seen.values())
 
 
 def move_objects_to_storey(model, objects, source_storey, target_storey):
@@ -1811,16 +1821,19 @@ def _filter_defs(defs: List[Any], section: Optional[str], riba_stage: Optional[s
     return filtered
 
 
-def _collect_targets(model, defs: List[Any], entity_filter: Optional[str]) -> List[Any]:
+def _collect_targets(model, defs: List[Any], entity_filter: Optional[str], entity_filters: Optional[List[str]]) -> List[Any]:
     targets = []
     entity_names = set()
+    filters = entity_filters or []
     if entity_filter:
-        entity_names.add(entity_filter)
+        filters.append(entity_filter)
+    if filters:
+        entity_names.update(filters)
     else:
         for d in defs:
             for ent in d.entity_scope:
                 entity_names.add(ent)
-    for ent in entity_names:
+    for ent in sorted(entity_names):
         try:
             for obj in model.by_type(ent):
                 targets.append(obj)
@@ -1834,9 +1847,9 @@ def _row_id(obj) -> str:
     return f"{gid or obj.id()}"
 
 
-def build_table_data(model, section: str, riba_stage: Optional[str], entity_filter: Optional[str]) -> Dict[str, Any]:
+def build_table_data(model, section: str, riba_stage: Optional[str], entity_filter: Optional[str], entity_filters: Optional[List[str]]) -> Dict[str, Any]:
     defs = _filter_defs(_ensure_definitions(), section, riba_stage)
-    targets = _collect_targets(model, defs, entity_filter)
+    targets = _collect_targets(model, defs, entity_filter, entity_filters)
     expr_engine = ExpressionEngine(model)
     columns = [serialize_definition(d) for d in defs]
     rows = []
@@ -2122,7 +2135,8 @@ def api_checks_data(session_id: str, payload: Dict[str, Any] = Body(...)):
     section = payload.get("section", "Spaces")
     riba = payload.get("riba_stage")
     ent_filter = payload.get("entity_filter")
-    table = build_table_data(model, section, riba, ent_filter)
+    ent_filters = payload.get("entity_filters") or None
+    table = build_table_data(model, section, riba, ent_filter, ent_filters)
     table["change_log"] = read_change_log(session_id)
     return table
 

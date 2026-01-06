@@ -6,6 +6,7 @@ const mcState = {
   audit: [],
   lastFile: null,
   downloadName: null,
+  entityScopes: [],
 };
 
 function mcEsc(val) {
@@ -28,6 +29,11 @@ async function loadDefinitions() {
   const data = await resp.json();
   mcState.definitions = data.definitions || [];
   mcState.sections = Object.keys(data.sections || {});
+  mcState.entityScopes = Array.from(
+    new Set(
+      (mcState.definitions || []).flatMap((d) => d.entity_scope || [])
+    )
+  ).sort();
   const stageSel = document.getElementById("mcStage");
   if (stageSel) {
     stageSel.innerHTML = '<option value="">All</option>';
@@ -38,6 +44,7 @@ async function loadDefinitions() {
       stageSel.appendChild(opt);
     });
   }
+  renderEntityGroups();
   renderSectionPlaceholders();
 }
 
@@ -66,6 +73,34 @@ function renderSectionPlaceholders() {
     `;
     container.appendChild(wrap);
   });
+}
+
+function renderEntityGroups() {
+  const wrap = document.getElementById("mcEntityGroups");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  mcState.entityScopes.forEach((ent) => {
+    const id = `mc-ent-${ent}`;
+    const label = document.createElement("label");
+    label.className = "chip chip-toggle";
+    label.innerHTML = `<input type="checkbox" id="${id}" value="${ent}" checked> ${ent}`;
+    wrap.appendChild(label);
+  });
+  const selectAll = document.getElementById("mcEntitySelectAll");
+  if (selectAll) {
+    selectAll.addEventListener("click", () => {
+      wrap.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+        cb.checked = true;
+      });
+    });
+  }
+}
+
+function selectedEntities() {
+  const wrap = document.getElementById("mcEntityGroups");
+  if (!wrap) return [];
+  const checked = Array.from(wrap.querySelectorAll('input[type="checkbox"]:checked')).map((cb) => cb.value);
+  return checked.length ? checked : mcState.entityScopes;
 }
 
 function renderChangeLog() {
@@ -246,7 +281,7 @@ async function loadSectionData(section) {
     ifc_file: file,
     section,
     riba_stage: document.getElementById("mcStage")?.value || null,
-    entity_filter: document.getElementById("mcEntity")?.value || null,
+    entity_filters: selectedEntities(),
   };
   const resp = await fetch(`/api/session/${state.sessionId}/checks/data`, {
     method: "POST",
