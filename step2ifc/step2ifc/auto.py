@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 import hashlib
 import statistics
 
@@ -101,16 +101,27 @@ def build_config_from_rules(unit: str, schema: str, rules: List[Dict[str, object
     return ConversionConfig(schema=schema, units=unit, type_mappings=type_mappings)
 
 
-def auto_convert(input_step: Path, output_ifc: Path, schema: str = "IFC4") -> int:
+def auto_convert(
+    input_step: Path,
+    output_ifc: Path,
+    schema: str = "IFC4",
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+) -> int:
+    def report(percent: int, message: str) -> None:
+        if progress_cb:
+            progress_cb(percent, message)
+
     run_id = hashlib.md5(str(output_ifc).encode("utf-8")).hexdigest()
     log_path = output_ifc.with_suffix(".log.jsonl")
     logger = configure_logging(log_path)
     log_event(logger, "auto_conversion_start", {"run_id": run_id, "input": str(input_step)})
+    report(2, "Starting auto conversion")
 
     step_reader = StepReader()
     geometry = GeometryProcessor()
 
     parts = sorted(step_reader.read(input_step), key=lambda part: part.label_path)
+    report(8, "STEP parsed; collecting geometry metrics")
 
     diagonals: List[float] = []
     part_metrics: Dict[str, Tuple[Tuple[float, float, float, float, float, float], Optional[float]]] = {}
@@ -122,6 +133,7 @@ def auto_convert(input_step: Path, output_ifc: Path, schema: str = "IFC4") -> in
         part_metrics[part.label_path] = (bbox, metrics.volume)
 
     unit_inference = infer_units(extract_unit_hint(input_step), diagonals)
+    report(18, f"Units inferred ({unit_inference.unit})")
     log_inference(
         logger,
         "unit_inferred",
@@ -156,6 +168,7 @@ def auto_convert(input_step: Path, output_ifc: Path, schema: str = "IFC4") -> in
         scores = cluster["scores"]
         scores[inference.ifc_class] = scores.get(inference.ifc_class, 0.0) + inference.confidence
         cluster["count"] = cluster["count"] + 1
+    report(35, "Inference clustering complete")
 
     rules: List[Dict[str, object]] = []
     for cluster_key in sorted(cluster_map.keys()):
@@ -187,9 +200,11 @@ def auto_convert(input_step: Path, output_ifc: Path, schema: str = "IFC4") -> in
             confidence,
             {"cluster": cluster_key, "ifc_class": ifc_class},
         )
+    report(45, "Auto mapping rules generated")
 
     mapping_path = output_ifc.parent / "classmap.autogen.yaml"
     write_autogen_mapping(mapping_path, source_hash, unit_inference, rules, schema)
+    report(52, "Autogen mapping saved")
 
     config = build_config_from_rules(unit_inference.unit, schema, rules)
     config.project = "Project"
@@ -202,7 +217,8 @@ def auto_convert(input_step: Path, output_ifc: Path, schema: str = "IFC4") -> in
     mapping = MappingEngine(config)
     qc_parts: List[PartQcResult] = []
 
-    for part in parts:
+    total_parts = max(len(parts), 1)
+    for idx, part in enumerate(parts, start=1):
         bbox, volume = part_metrics[part.label_path]
         archetype = geometry_archetype(bbox)
         try:
@@ -258,6 +274,7 @@ def auto_convert(input_step: Path, output_ifc: Path, schema: str = "IFC4") -> in
                     candidates=part_candidates.get(part.label_path),
                 )
             )
+            report(55 + int((idx / total_parts) * 30), f"Converted {idx}/{total_parts} parts")
         except Exception as exc:  # pragma: no cover - defensive
             qc_parts.append(
                 PartQcResult(
@@ -272,6 +289,7 @@ def auto_convert(input_step: Path, output_ifc: Path, schema: str = "IFC4") -> in
             continue
 
     writer.write(output_ifc)
+    report(90, "IFC written; generating QC report")
 
     qc_reporter = QcReporter()
     assumptions = [
@@ -295,5 +313,6 @@ def auto_convert(input_step: Path, output_ifc: Path, schema: str = "IFC4") -> in
     )
     report.validation = {"basic": qc_reporter.basic_ifc_checks(output_ifc)}
     qc_reporter.save(report, output_ifc)
+    report(100, "Auto conversion complete")
     log_event(logger, "auto_conversion_complete", {"run_id": run_id, "output": str(output_ifc)})
     return 0

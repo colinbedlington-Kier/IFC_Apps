@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import traceback
 import uuid
@@ -13,7 +14,7 @@ import ifcopenshell
 import ifcopenshell.api
 import ifcopenshell.util.element
 import pandas as pd
-from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -31,6 +32,10 @@ from mapping_store import (
     save_mapping_for_check,
 )
 from validation import validate_value
+
+STEP2IFC_ROOT = Path(__file__).resolve().parent / "step2ifc"
+if STEP2IFC_ROOT.exists():
+    sys.path.append(str(STEP2IFC_ROOT))
 
 
 # ----------------------------------------------------------------------------
@@ -100,6 +105,7 @@ class SessionStore:
 
 
 SESSION_STORE = SessionStore(os.path.join(tempfile.gettempdir(), "ifc_app_sessions"))
+STEP2IFC_JOBS: Dict[str, Dict[str, Any]] = {}
 
 
 # ----------------------------------------------------------------------------
@@ -2115,6 +2121,55 @@ def append_change_log(session_id: str, entries: List[Dict[str, Any]]):
         json.dump(existing, f, indent=2)
 
 
+def update_step2ifc_job(job_id: str, **updates: Any) -> None:
+    job = STEP2IFC_JOBS.get(job_id)
+    if not job:
+        return
+    job.update(updates)
+
+
+def run_step2ifc_auto_job(job_id: str, session_id: str, input_path: Path, output_path: Path) -> None:
+    update_step2ifc_job(job_id, status="running", progress=5, message="Starting auto conversion")
+
+    def progress_cb(percent: int, message: str) -> None:
+        update_step2ifc_job(job_id, progress=percent, message=message)
+
+    try:
+        from step2ifc.auto import auto_convert
+        auto_convert(input_path, output_path, progress_cb=progress_cb)
+    except Exception as exc:  # pragma: no cover - background task guard
+        update_step2ifc_job(
+            job_id,
+            status="error",
+            progress=100,
+            message=str(exc),
+            error=True,
+            done=True,
+        )
+        return
+
+    outputs = []
+    for path in [
+        output_path,
+        output_path.with_suffix(".qc.json"),
+        output_path.with_suffix(".qc.txt"),
+        output_path.with_suffix(".log.jsonl"),
+        output_path.parent / "classmap.autogen.yaml",
+    ]:
+        if path.exists():
+            outputs.append({"name": path.name, "url": f"/api/session/{session_id}/download?name={path.name}"})
+
+    update_step2ifc_job(
+        job_id,
+        status="done",
+        progress=100,
+        message="Auto conversion complete",
+        done=True,
+        error=False,
+        outputs=outputs,
+    )
+
+
 def apply_edits(session_id: str, in_path: str, edits: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
     if not edits:
         raise HTTPException(status_code=400, detail="No edits supplied")
@@ -2270,6 +2325,52 @@ def list_files(session_id: str):
                 "modified": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
             })
     return {"files": files}
+
+
+@app.post("/api/session/{session_id}/step2ifc/auto")
+def run_step2ifc_auto(
+    session_id: str,
+    payload: Dict[str, Any] = Body(...),
+    background_tasks: BackgroundTasks = None,
+):
+    root = SESSION_STORE.ensure(session_id)
+    input_name = payload.get("input_file")
+    if not input_name:
+        raise HTTPException(status_code=400, detail="input_file is required")
+    input_path = Path(root) / sanitize_filename(input_name)
+    if not input_path.exists():
+        raise HTTPException(status_code=404, detail="Input STEP file not found")
+
+    output_name = payload.get("output_name") or f"{input_path.stem}.ifc"
+    output_name = sanitize_filename(output_name)
+    if not output_name.lower().endswith(".ifc"):
+        output_name = f"{output_name}.ifc"
+    output_path = Path(root) / output_name
+
+    job_id = uuid.uuid4().hex
+    STEP2IFC_JOBS[job_id] = {
+        "job_id": job_id,
+        "status": "queued",
+        "progress": 0,
+        "message": "Queued",
+        "done": False,
+        "error": False,
+        "outputs": [],
+    }
+
+    if background_tasks is None:
+        background_tasks = BackgroundTasks()
+    background_tasks.add_task(run_step2ifc_auto_job, job_id, session_id, input_path, output_path)
+    return {"job_id": job_id, "status_url": f"/api/session/{session_id}/step2ifc/auto/{job_id}"}
+
+
+@app.get("/api/session/{session_id}/step2ifc/auto/{job_id}")
+def get_step2ifc_status(session_id: str, job_id: str):
+    SESSION_STORE.ensure(session_id)
+    job = STEP2IFC_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 
 @app.post("/api/session/{session_id}/upload")

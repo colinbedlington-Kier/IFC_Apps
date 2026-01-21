@@ -14,14 +14,31 @@
     <div>
       <h3>Session Files</h3>
       <label for="step2ifcFiles">Available session files</label>
-      <select id="step2ifcFiles" multiple data-files-select></select>
+      <select id="step2ifcFiles" data-files-select></select>
       <p class="small">Use the Session Files page to upload STEP files into this session.</p>
+      <div class="field" style="margin-top: 12px">
+        <label for="step2ifcOutputName">Output IFC name</label>
+        <input id="step2ifcOutputName" type="text" placeholder="my-model.ifc" />
+        <div class="hint">Leave blank to use the input filename.</div>
+      </div>
+      <button class="btn" id="step2ifcRun">Run Auto Conversion</button>
+      <div class="upload-progress" data-step2ifc-progress-wrap>
+        <div class="upload-progress-top">
+          <strong>Conversion progress</strong>
+          <span data-step2ifc-progress-percent></span>
+        </div>
+        <div class="progress-bar">
+          <div class="progress-bar-fill" data-step2ifc-progress></div>
+        </div>
+        <div class="muted" data-step2ifc-progress-status>Waiting to start…</div>
+      </div>
     </div>
     <div>
       <h3>Outputs</h3>
       <p class="small">
         Generated outputs will appear in your session directory (IFC + QC reports + JSONL audit logs).
       </p>
+      <div id="step2ifcOutputs" class="muted">No outputs yet.</div>
     </div>
   </div>
   <div class="two-col">
