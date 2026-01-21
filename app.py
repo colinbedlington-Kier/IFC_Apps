@@ -2204,6 +2204,11 @@ def proxy_page(request: Request):
     return templates.TemplateResponse("proxy.html", {"request": request, "active": "proxy"})
 
 
+@app.get("/step2ifc", response_class=HTMLResponse)
+def step2ifc_page(request: Request):
+    return templates.TemplateResponse("step2ifc.html", {"request": request, "active": "step2ifc"})
+
+
 @app.get("/files", response_class=HTMLResponse)
 def files_page(request: Request):
     return templates.TemplateResponse("files.html", {"request": request, "active": "files"})
