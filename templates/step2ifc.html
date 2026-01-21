@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title">
+    <h2>STEP → IFC Converter</h2>
+    <span class="badge">Headless CLI workflow</span>
+  </div>
+  <p>
+    Convert fabrication-grade STEP files into coordination-ready IFC with deterministic GUIDs, mapped IFC types,
+    classification hooks, and QA/QC reporting. This tool runs as a CLI alongside the server for reproducible exports.
+  </p>
+  <div class="two-col" style="margin-bottom: 16px">
+    <div>
+      <h3>Session Files</h3>
+      <label for="step2ifcFiles">Available session files</label>
+      <select id="step2ifcFiles" data-files-select></select>
+      <p class="small">Use the Session Files page to upload STEP files into this session.</p>
+      <div class="field" style="margin-top: 12px">
+        <label for="step2ifcOutputName">Output IFC name</label>
+        <input id="step2ifcOutputName" type="text" placeholder="my-model.ifc" />
+        <div class="hint">Leave blank to use the input filename.</div>
+      </div>
+      <button class="btn" id="step2ifcRun">Run Auto Conversion</button>
+      <div class="upload-progress" data-step2ifc-progress-wrap>
+        <div class="upload-progress-top">
+          <strong>Conversion progress</strong>
+          <span data-step2ifc-progress-percent></span>
+        </div>
+        <div class="progress-bar">
+          <div class="progress-bar-fill" data-step2ifc-progress></div>
+        </div>
+        <div class="muted" data-step2ifc-progress-status>Waiting to start…</div>
+      </div>
+    </div>
+    <div>
+      <h3>Outputs</h3>
+      <p class="small">
+        Generated outputs will appear in your session directory (IFC + QC reports + JSONL audit logs).
+      </p>
+      <div id="step2ifcOutputs" class="muted">No outputs yet.</div>
+    </div>
+  </div>
+  <div class="two-col">
+    <div>
+      <h3>Recommended Workflow</h3>
+      <ol>
+        <li>Place the input <code>.step</code> file in your session folder.</li>
+        <li>Prepare a mapping file (see <code>classmap.yaml</code> in the repo).</li>
+        <li>Run the conversion command from the CLI.</li>
+        <li>Review the generated IFC + QC report outputs.</li>
+      </ol>
+    </div>
+    <div>
+      <h3>CLI Example</h3>
+      <pre><code>step2ifc convert \
+  --in "input.step" \
+  --out "output.ifc" \
+  --schema IFC4 \
+  --units mm \
+  --project "MyProject" \
+  --site "Site" \
+  --building "Building A" \
+  --storey "Level 00" \
+  --geom brep \
+  --class-map classmap.yaml</code></pre>
+      <p class="small">Outputs: <code>output.ifc</code>, <code>output.qc.json</code>, <code>output.qc.txt</code>, <code>output.log.jsonl</code></p>
+    </div>
+  </div>
+</div>
+{% endblock %}
