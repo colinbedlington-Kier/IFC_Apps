@@ -10,6 +10,20 @@
     Convert fabrication-grade STEP files into coordination-ready IFC with deterministic GUIDs, mapped IFC types,
     classification hooks, and QA/QC reporting. This tool runs as a CLI alongside the server for reproducible exports.
   </p>
+  <div class="two-col" style="margin-bottom: 16px">
+    <div>
+      <h3>Session Files</h3>
+      <label for="step2ifcFiles">Available session files</label>
+      <select id="step2ifcFiles" multiple data-files-select></select>
+      <p class="small">Use the Session Files page to upload STEP files into this session.</p>
+    </div>
+    <div>
+      <h3>Outputs</h3>
+      <p class="small">
+        Generated outputs will appear in your session directory (IFC + QC reports + JSONL audit logs).
+      </p>
+    </div>
+  </div>
   <div class="two-col">
     <div>
       <h3>Recommended Workflow</h3>
