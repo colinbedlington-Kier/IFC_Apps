@@ -1,0 +1,34 @@
+name_normalization:
+  - pattern: "\\s+"
+    replacement: " "
+  - pattern: "^ASM_"
+    replacement: ""
+
+type_mappings:
+  - match_name_regex: ".*VALVE.*"
+    ifc_class: "IfcValve"
+    object_type: "Valve"
+    classification:
+      system: "Uniclass"
+      code: "Pr_65_52_67_96"
+      title: "Valves"
+    properties:
+      - name: "System"
+        value: "${ProjectKey}-${Zone}"
+        data_type: "IfcLabel"
+  - match_assembly_prefix: "Mechanical/Skid"
+    ifc_class: "IfcMechanicalFastener"
+    object_type: "Fastener"
+
+properties:
+  defaults:
+    Zone: "Z01"
+
+default_type: "IfcBuildingElementProxy"
+merge_by_name: false
+split_by_assembly: true
+schema: "IFC4"
+units: "mm"
+geom: "brep"
+mesh_deflection: 0.5
+mesh_angle: 0.5

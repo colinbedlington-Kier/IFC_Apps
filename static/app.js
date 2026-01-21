@@ -6,6 +6,7 @@ const state = {
   selectedFiles: new Set(),
   uploadStatusEl: null,
   uploadProgressEl: null,
+  step2ifcJobId: null,
   pendingActions: [],
 };
 
@@ -118,8 +119,19 @@ function renderFilesLists() {
 
 function populateFileSelects() {
   document.querySelectorAll("[data-files-select]").forEach((sel) => {
+    const filter = sel.dataset.filesFilter;
+    const extensions = filter ? filter.split(",").map((ext) => ext.trim().toLowerCase()) : null;
     sel.innerHTML = "";
+    if (sel.dataset.allowEmpty) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = sel.dataset.emptyLabel || "Select";
+      sel.appendChild(opt);
+    }
     state.files.forEach((f) => {
+      if (extensions && !extensions.some((ext) => f.name.toLowerCase().endsWith(ext))) {
+        return;
+      }
       const opt = document.createElement("option");
       opt.value = f.name;
       opt.textContent = f.name;
@@ -157,6 +169,125 @@ function updateUploadProgress({ percent, message, done = false, error = false })
     pct.textContent = "";
   }
   status.textContent = message || "";
+}
+
+function updateStep2ifcProgress({ percent, message, done = false, error = false }) {
+  const wrap = document.querySelector("[data-step2ifc-progress-wrap]");
+  const bar = document.querySelector("[data-step2ifc-progress]");
+  const pct = document.querySelector("[data-step2ifc-progress-percent]");
+  const status = document.querySelector("[data-step2ifc-progress-status]");
+  if (!wrap || !bar || !status || !pct) return;
+  wrap.classList.add("visible");
+  wrap.classList.toggle("done", done);
+  wrap.classList.toggle("error", error);
+  if (typeof percent === "number" && Number.isFinite(percent)) {
+    const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+    bar.style.width = `${clamped}%`;
+    pct.textContent = `${clamped}%`;
+    bar.setAttribute("aria-valuenow", String(clamped));
+  } else if (!percent) {
+    pct.textContent = "";
+  }
+  status.textContent = message || "";
+}
+
+function renderStep2ifcOutputs(outputs) {
+  const container = el("step2ifcOutputs");
+  if (!container) return;
+  if (!outputs || !outputs.length) {
+    container.textContent = "No outputs yet.";
+    return;
+  }
+  container.innerHTML = "";
+  outputs.forEach((output) => {
+    const row = document.createElement("div");
+    row.className = "file-row";
+    row.innerHTML = `<span class="file-name">${output.name}</span>`;
+    const btn = document.createElement("button");
+    btn.className = "btn secondary sm";
+    btn.textContent = "Download";
+    btn.addEventListener("click", () => downloadFile(output.name));
+    row.appendChild(btn);
+    container.appendChild(row);
+  });
+}
+
+async function pollStep2ifc(jobId) {
+  if (!state.sessionId || !jobId) return;
+  try {
+    const resp = await fetch(`/api/session/${state.sessionId}/step2ifc/auto/${jobId}`);
+    if (!resp.ok) throw new Error("Failed to read conversion status");
+    const data = await resp.json();
+    updateStep2ifcProgress({
+      percent: data.progress,
+      message: data.message,
+      done: data.done,
+      error: data.error,
+    });
+    if (data.outputs) {
+      renderStep2ifcOutputs(data.outputs);
+    }
+    if (data.done) {
+      await refreshFiles();
+      const runBtn = el("step2ifcRun");
+      if (runBtn) runBtn.disabled = false;
+      return;
+    }
+  } catch (err) {
+    updateStep2ifcProgress({ message: "Failed to fetch status", error: true });
+    console.error(err);
+    const runBtn = el("step2ifcRun");
+    if (runBtn) runBtn.disabled = false;
+    return;
+  }
+  setTimeout(() => pollStep2ifc(jobId), 1200);
+}
+
+async function runStep2ifcAuto() {
+  const fileSelect = el("step2ifcFiles");
+  if (!fileSelect || !fileSelect.value) {
+    alert("Choose a STEP file to convert.");
+    return;
+  }
+  if (!state.sessionId) {
+    alert("Session not ready yet. Please wait and retry.");
+    return;
+  }
+  const runBtn = el("step2ifcRun");
+  if (runBtn) runBtn.disabled = true;
+  renderStep2ifcOutputs([]);
+  updateStep2ifcProgress({ percent: 0, message: "Submitting conversion request…" });
+  const outputName = el("step2ifcOutputName")?.value?.trim();
+  const mappingFile = el("step2ifcMapping")?.value?.trim();
+  try {
+    const resp = await fetch(`/api/session/${state.sessionId}/step2ifc/auto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        input_file: fileSelect.value,
+        output_name: outputName || null,
+        mapping_file: mappingFile || null,
+      }),
+    });
+    if (!resp.ok) {
+      let detail = "Unable to start auto conversion";
+      try {
+        const errorData = await resp.json();
+        if (errorData?.detail) detail = errorData.detail;
+      } catch (err) {
+        // ignore parsing errors
+      }
+      throw new Error(detail);
+    }
+    const data = await resp.json();
+    state.step2ifcJobId = data.job_id;
+    updateStep2ifcProgress({ percent: 5, message: "Auto conversion started…" });
+    pollStep2ifc(state.step2ifcJobId);
+  } catch (err) {
+    console.error(err);
+    updateStep2ifcProgress({ message: err.message || "Failed to start conversion", error: true });
+    if (runBtn) runBtn.disabled = false;
+  }
 }
 
 function uploadWithProgress(url, form) {
@@ -805,6 +936,35 @@ function wireEvents() {
 
   const reassignLevelBtn = el("reassignLevel");
   if (reassignLevelBtn) reassignLevelBtn.addEventListener("click", reassignLevelRequest);
+
+  const step2ifcFiles = el("step2ifcFiles");
+  if (step2ifcFiles) {
+    step2ifcFiles.addEventListener("change", (e) => {
+      const outputInput = el("step2ifcOutputName");
+      if (!outputInput || outputInput.value) return;
+      const name = e.target.value || "";
+      if (!name) return;
+      const base = name.replace(/\.[^/.]+$/, "");
+      outputInput.value = `${base}.ifc`;
+    });
+  }
+
+  const step2ifcMapping = el("step2ifcMapping");
+  if (step2ifcMapping) {
+    step2ifcMapping.addEventListener("change", () => {
+      if (step2ifcMapping.value) {
+        updateStep2ifcProgress({ message: "Using selected mapping file." });
+      }
+    });
+  }
+
+  const step2ifcForm = el("step2ifcForm");
+  if (step2ifcForm) {
+    step2ifcForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      runStep2ifcAuto();
+    });
+  }
 
   el("reassignSource")?.addEventListener("change", () => {
     renderReassignControls();
