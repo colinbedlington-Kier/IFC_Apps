@@ -47,7 +47,7 @@ class MappingEngine:
     def map_part(self, context: PartContext) -> PartMappingResult:
         name = self.normalize_name(context.part.name)
         assembly_path = context.assembly_path
-        mapping = self._select_mapping(name, assembly_path)
+        mapping = self._select_mapping(name, assembly_path, context.metadata)
         tag = self._short_hash(context.source_hash, assembly_path, name)
         properties = self._build_properties(mapping, context)
         classification = None
@@ -66,11 +66,21 @@ class MappingEngine:
             classification=classification,
         )
 
-    def _select_mapping(self, name: str, assembly_path: str) -> Optional[TypeMappingRule]:
+    def _select_mapping(
+        self, name: str, assembly_path: str, metadata: Dict[str, str]
+    ) -> Optional[TypeMappingRule]:
         for rule in self.config.type_mappings:
             if rule.match_name_regex and re.search(rule.match_name_regex, name, re.IGNORECASE):
                 return rule
             if rule.match_assembly_prefix and assembly_path.startswith(rule.match_assembly_prefix):
+                return rule
+            if rule.match_path_regex and re.search(rule.match_path_regex, assembly_path, re.IGNORECASE):
+                return rule
+            if rule.match_layer and metadata.get("Layer") == rule.match_layer:
+                return rule
+            if rule.match_color and metadata.get("Color") == rule.match_color:
+                return rule
+            if rule.geometry_archetype and metadata.get("GeometryArchetype") == rule.geometry_archetype:
                 return rule
         return None
 

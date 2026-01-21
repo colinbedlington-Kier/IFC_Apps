@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 import uuid
 
 from step2ifc.config import ConversionConfig
+from step2ifc.auto import auto_convert
 from step2ifc.geometry import GeometryProcessor
 from step2ifc.ifc_writer import IfcWriter
 from step2ifc.io_step import StepReader
@@ -44,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     convert.add_argument("--default-type", default="IfcBuildingElementProxy")
     convert.add_argument("--class-map", dest="class_map")
     convert.add_argument("--log", dest="log_path")
+
+    auto = subparsers.add_parser("auto")
+    auto.add_argument("--in", dest="input_path", required=True)
+    auto.add_argument("--out", dest="output_path", required=True)
+    auto.add_argument("--schema", default="IFC4")
     return parser
 
 
@@ -126,6 +132,7 @@ def run_convert(args: argparse.Namespace) -> int:
                     **config.metadata_defaults,
                     "Layer": part.layer or "",
                     "Color": str(part.color) if part.color else "",
+                    "GeometryArchetype": "unknown",
                 },
             )
             mapping_result = mapping.map_part(context)
@@ -224,6 +231,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "convert":
         return run_convert(args)
+    if args.command == "auto":
+        return auto_convert(Path(args.input_path), Path(args.output_path), schema=args.schema)
     parser.print_help()
     return 1
 

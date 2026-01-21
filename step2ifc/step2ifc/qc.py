@@ -26,6 +26,7 @@ class PartQcResult:
     bbox: Optional[List[float]] = None
     volume: Optional[float] = None
     repaired: bool = False
+    candidates: Optional[List[Dict[str, Any]]] = None
 
 
 @dataclass
@@ -42,6 +43,7 @@ class QcReport:
     parts: List[PartQcResult] = field(default_factory=list)
     validation: Optional[Dict[str, Any]] = None
     mesh_settings: Optional[Dict[str, float]] = None
+    assumptions: List[Dict[str, Any]] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
 
 
@@ -56,6 +58,7 @@ class QcReporter:
         source_hash: str,
         parts: List[PartQcResult],
         mesh_settings: Optional[Dict[str, float]] = None,
+        assumptions: Optional[List[Dict[str, Any]]] = None,
     ) -> QcReport:
         converted = sum(1 for part in parts if part.converted)
         failures = sum(1 for part in parts if not part.converted)
@@ -74,6 +77,7 @@ class QcReporter:
             invalid_solids=invalid_solids,
             parts=parts,
             mesh_settings=mesh_settings,
+            assumptions=assumptions or [],
         )
 
     def run_ifc_validation(self, ifc_path: Path) -> Optional[Dict[str, Any]]:
@@ -117,5 +121,9 @@ class QcReporter:
         if report.volumes:
             top_volumes = sorted(report.volumes, reverse=True)[:10]
             lines.append(f"Top volumes: {top_volumes}")
+        if report.assumptions:
+            lines.append("Assumptions:")
+            for assumption in report.assumptions:
+                lines.append(f"- {assumption.get('assumption')} (confidence: {assumption.get('confidence')})")
         text_path.write_text("\n".join(lines), encoding="utf-8")
         self.logger.info("QC report written", extra={"json": str(json_path), "text": str(text_path)})

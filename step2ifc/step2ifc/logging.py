@@ -63,3 +63,10 @@ def log_event(logger: logging.Logger, message: str, payload: Optional[Dict[str, 
     )
     record.extra = payload or {}
     logger.handle(record)
+
+
+def log_inference(logger: logging.Logger, message: str, confidence: float, payload: Optional[Dict[str, Any]] = None) -> None:
+    data = {"confidence": confidence}
+    if payload:
+        data.update(payload)
+    log_event(logger, message, data)

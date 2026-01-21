@@ -40,6 +40,18 @@ step2ifc convert \
   --class-map classmap.yaml
 ```
 
+## Auto Conversion (Zero Prompts)
+
+```bash
+step2ifc auto \
+  --in "input.step" \
+  --out "output.ifc" \
+  --schema IFC4
+```
+
+Auto mode infers units and class mappings, writes `classmap.autogen.yaml` alongside the IFC, and records the
+assumptions/confidence in the QC report.
+
 ## Sample Workflow
 1. **Ingest**: `StepReader` loads STEP and discovers assemblies/parts using XDE.
 2. **Validate**: `GeometryProcessor` validates and repairs shapes.
