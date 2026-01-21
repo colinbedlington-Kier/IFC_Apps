@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "step2ifc"
+version = "0.1.0"
+description = "STEP to IFC conversion toolkit"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "IFC Apps"}]
+dependencies = [
+  "ifcopenshell>=0.7.0",
+  "pythonocc-core>=7.7.2",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+qc = ["ifcopenshell[validation]>=0.7.0"]
+test = ["pytest>=7.4", "pytest-cov>=4.1"]
+
+[project.scripts]
+step2ifc = "step2ifc.cli:main"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
