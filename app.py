@@ -1,3 +1,4 @@
+import argparse
 import datetime
 import json
 import logging
@@ -40,9 +41,12 @@ if STEP2IFC_ROOT.exists():
 
 STEP2IFC_AVAILABLE = False
 STEP2IFC_IMPORT_ERROR = None
+STEP2IFC_RUN_CONVERT = None
 try:
     from step2ifc.auto import auto_convert
+    from step2ifc.cli import run_convert as step2ifc_run_convert
     STEP2IFC_AVAILABLE = True
+    STEP2IFC_RUN_CONVERT = step2ifc_run_convert
 except Exception as exc:  # pragma: no cover - runtime dependency checks
     STEP2IFC_IMPORT_ERROR = str(exc)
 
@@ -2157,19 +2161,68 @@ def run_step2ifc_auto_job(job_id: str, session_id: str, input_path: Path, output
         APP_LOGGER.error("STEP2IFC auto conversion unavailable: %s", STEP2IFC_IMPORT_ERROR)
         return
 
-    try:
-        auto_convert(input_path, output_path, progress_cb=progress_cb)
-    except Exception as exc:  # pragma: no cover - background task guard
-        APP_LOGGER.exception("STEP2IFC auto conversion failed")
+    if STEP2IFC_RUN_CONVERT is None:
         update_step2ifc_job(
             job_id,
             status="error",
             progress=100,
-            message=str(exc),
+            message="step2ifc converter unavailable",
             error=True,
             done=True,
         )
+        APP_LOGGER.error("STEP2IFC converter unavailable")
         return
+
+    mapping_path = STEP2IFC_JOBS.get(job_id, {}).get("mapping_path")
+    if mapping_path:
+        update_step2ifc_job(job_id, status="running", progress=15, message="Running mapped conversion")
+        try:
+            STEP2IFC_RUN_CONVERT(
+                argparse.Namespace(
+                    input_path=str(input_path),
+                    output_path=str(output_path),
+                    schema="IFC4",
+                    units="mm",
+                    project="Project",
+                    site="Site",
+                    building="Building",
+                    storey="Storey",
+                    geom="brep",
+                    mesh_deflection=0.5,
+                    mesh_angle=0.5,
+                    merge_by_name=False,
+                    split_by_assembly=False,
+                    default_type="IfcBuildingElementProxy",
+                    class_map=mapping_path,
+                    log_path=None,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - background task guard
+            APP_LOGGER.exception("STEP2IFC mapped conversion failed")
+            update_step2ifc_job(
+                job_id,
+                status="error",
+                progress=100,
+                message=str(exc),
+                error=True,
+                done=True,
+            )
+            return
+        update_step2ifc_job(job_id, progress=85, message="Mapped conversion complete; gathering outputs")
+    else:
+        try:
+            auto_convert(input_path, output_path, progress_cb=progress_cb)
+        except Exception as exc:  # pragma: no cover - background task guard
+            APP_LOGGER.exception("STEP2IFC auto conversion failed")
+            update_step2ifc_job(
+                job_id,
+                status="error",
+                progress=100,
+                message=str(exc),
+                error=True,
+                done=True,
+            )
+            return
 
     outputs = []
     for path in [
@@ -2372,6 +2425,14 @@ def run_step2ifc_auto(
         output_name = f"{output_name}.ifc"
     output_path = Path(root) / output_name
 
+    mapping_name = payload.get("mapping_file")
+    mapping_path = None
+    if mapping_name:
+        safe_mapping = sanitize_filename(mapping_name)
+        mapping_path = Path(root) / safe_mapping
+        if not mapping_path.exists():
+            raise HTTPException(status_code=404, detail="Mapping file not found")
+
     job_id = uuid.uuid4().hex
     STEP2IFC_JOBS[job_id] = {
         "job_id": job_id,
@@ -2381,6 +2442,7 @@ def run_step2ifc_auto(
         "done": False,
         "error": False,
         "outputs": [],
+        "mapping_path": str(mapping_path) if mapping_path else None,
     }
     APP_LOGGER.info("STEP2IFC job queued", extra={"job_id": job_id, "input": input_path.name, "output": output_name})
 

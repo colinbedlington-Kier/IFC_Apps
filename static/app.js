@@ -119,8 +119,19 @@ function renderFilesLists() {
 
 function populateFileSelects() {
   document.querySelectorAll("[data-files-select]").forEach((sel) => {
+    const filter = sel.dataset.filesFilter;
+    const extensions = filter ? filter.split(",").map((ext) => ext.trim().toLowerCase()) : null;
     sel.innerHTML = "";
+    if (sel.dataset.allowEmpty) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = sel.dataset.emptyLabel || "Select";
+      sel.appendChild(opt);
+    }
     state.files.forEach((f) => {
+      if (extensions && !extensions.some((ext) => f.name.toLowerCase().endsWith(ext))) {
+        return;
+      }
       const opt = document.createElement("option");
       opt.value = f.name;
       opt.textContent = f.name;
@@ -247,6 +258,7 @@ async function runStep2ifcAuto() {
   renderStep2ifcOutputs([]);
   updateStep2ifcProgress({ percent: 0, message: "Submitting conversion request…" });
   const outputName = el("step2ifcOutputName")?.value?.trim();
+  const mappingFile = el("step2ifcMapping")?.value?.trim();
   try {
     const resp = await fetch(`/api/session/${state.sessionId}/step2ifc/auto`, {
       method: "POST",
@@ -254,6 +266,7 @@ async function runStep2ifcAuto() {
       body: JSON.stringify({
         input_file: fileSelect.value,
         output_name: outputName || null,
+        mapping_file: mappingFile || null,
       }),
     });
     if (!resp.ok) {
@@ -933,6 +946,15 @@ function wireEvents() {
       if (!name) return;
       const base = name.replace(/\.[^/.]+$/, "");
       outputInput.value = `${base}.ifc`;
+    });
+  }
+
+  const step2ifcMapping = el("step2ifcMapping");
+  if (step2ifcMapping) {
+    step2ifcMapping.addEventListener("change", () => {
+      if (step2ifcMapping.value) {
+        updateStep2ifcProgress({ message: "Using selected mapping file." });
+      }
     });
   }
 
