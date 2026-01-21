@@ -13,15 +13,17 @@
   <div class="two-col" style="margin-bottom: 16px">
     <div>
       <h3>Session Files</h3>
-      <label for="step2ifcFiles">Available session files</label>
-      <select id="step2ifcFiles" data-files-select></select>
-      <p class="small">Use the Session Files page to upload STEP files into this session.</p>
-      <div class="field" style="margin-top: 12px">
-        <label for="step2ifcOutputName">Output IFC name</label>
-        <input id="step2ifcOutputName" type="text" placeholder="my-model.ifc" />
-        <div class="hint">Leave blank to use the input filename.</div>
-      </div>
-      <button class="btn" id="step2ifcRun">Run Auto Conversion</button>
+      <form id="step2ifcForm">
+        <label for="step2ifcFiles">Available session files</label>
+        <select id="step2ifcFiles" data-files-select></select>
+        <p class="small">Use the Session Files page to upload STEP files into this session.</p>
+        <div class="field" style="margin-top: 12px">
+          <label for="step2ifcOutputName">Output IFC name</label>
+          <input id="step2ifcOutputName" type="text" placeholder="my-model.ifc" />
+          <div class="hint">Leave blank to use the input filename.</div>
+        </div>
+        <button class="btn" id="step2ifcRun" type="submit">Run Auto Conversion</button>
+      </form>
       <div class="upload-progress" data-step2ifc-progress-wrap>
         <div class="upload-progress-top">
           <strong>Conversion progress</strong>

@@ -1,5 +1,6 @@
 import datetime
 import json
+import logging
 import os
 import re
 import shutil
@@ -36,6 +37,16 @@ from validation import validate_value
 STEP2IFC_ROOT = Path(__file__).resolve().parent / "step2ifc"
 if STEP2IFC_ROOT.exists():
     sys.path.append(str(STEP2IFC_ROOT))
+
+STEP2IFC_AVAILABLE = False
+STEP2IFC_IMPORT_ERROR = None
+try:
+    from step2ifc.auto import auto_convert
+    STEP2IFC_AVAILABLE = True
+except Exception as exc:  # pragma: no cover - runtime dependency checks
+    STEP2IFC_IMPORT_ERROR = str(exc)
+
+APP_LOGGER = logging.getLogger("ifc_app")
 
 
 # ----------------------------------------------------------------------------
@@ -2134,10 +2145,22 @@ def run_step2ifc_auto_job(job_id: str, session_id: str, input_path: Path, output
     def progress_cb(percent: int, message: str) -> None:
         update_step2ifc_job(job_id, progress=percent, message=message)
 
+    if not STEP2IFC_AVAILABLE:
+        update_step2ifc_job(
+            job_id,
+            status="error",
+            progress=100,
+            message=STEP2IFC_IMPORT_ERROR or "step2ifc dependencies unavailable",
+            error=True,
+            done=True,
+        )
+        APP_LOGGER.error("STEP2IFC auto conversion unavailable: %s", STEP2IFC_IMPORT_ERROR)
+        return
+
     try:
-        from step2ifc.auto import auto_convert
         auto_convert(input_path, output_path, progress_cb=progress_cb)
     except Exception as exc:  # pragma: no cover - background task guard
+        APP_LOGGER.exception("STEP2IFC auto conversion failed")
         update_step2ifc_job(
             job_id,
             status="error",
@@ -2334,6 +2357,8 @@ def run_step2ifc_auto(
     background_tasks: BackgroundTasks = None,
 ):
     root = SESSION_STORE.ensure(session_id)
+    if not STEP2IFC_AVAILABLE:
+        raise HTTPException(status_code=503, detail=STEP2IFC_IMPORT_ERROR or "step2ifc dependencies unavailable")
     input_name = payload.get("input_file")
     if not input_name:
         raise HTTPException(status_code=400, detail="input_file is required")
@@ -2357,6 +2382,7 @@ def run_step2ifc_auto(
         "error": False,
         "outputs": [],
     }
+    APP_LOGGER.info("STEP2IFC job queued", extra={"job_id": job_id, "input": input_path.name, "output": output_name})
 
     if background_tasks is None:
         background_tasks = BackgroundTasks()

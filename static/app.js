@@ -244,6 +244,7 @@ async function runStep2ifcAuto() {
   }
   const runBtn = el("step2ifcRun");
   if (runBtn) runBtn.disabled = true;
+  renderStep2ifcOutputs([]);
   updateStep2ifcProgress({ percent: 0, message: "Submitting conversion request…" });
   const outputName = el("step2ifcOutputName")?.value?.trim();
   try {
@@ -256,7 +257,14 @@ async function runStep2ifcAuto() {
       }),
     });
     if (!resp.ok) {
-      throw new Error("Unable to start auto conversion");
+      let detail = "Unable to start auto conversion";
+      try {
+        const errorData = await resp.json();
+        if (errorData?.detail) detail = errorData.detail;
+      } catch (err) {
+        // ignore parsing errors
+      }
+      throw new Error(detail);
     }
     const data = await resp.json();
     state.step2ifcJobId = data.job_id;
@@ -264,7 +272,7 @@ async function runStep2ifcAuto() {
     pollStep2ifc(state.step2ifcJobId);
   } catch (err) {
     console.error(err);
-    updateStep2ifcProgress({ message: "Failed to start conversion", error: true });
+    updateStep2ifcProgress({ message: err.message || "Failed to start conversion", error: true });
     if (runBtn) runBtn.disabled = false;
   }
 }
@@ -916,9 +924,6 @@ function wireEvents() {
   const reassignLevelBtn = el("reassignLevel");
   if (reassignLevelBtn) reassignLevelBtn.addEventListener("click", reassignLevelRequest);
 
-  const step2ifcBtn = el("step2ifcRun");
-  if (step2ifcBtn) step2ifcBtn.addEventListener("click", runStep2ifcAuto);
-
   const step2ifcFiles = el("step2ifcFiles");
   if (step2ifcFiles) {
     step2ifcFiles.addEventListener("change", (e) => {
@@ -928,6 +933,14 @@ function wireEvents() {
       if (!name) return;
       const base = name.replace(/\.[^/.]+$/, "");
       outputInput.value = `${base}.ifc`;
+    });
+  }
+
+  const step2ifcForm = el("step2ifcForm");
+  if (step2ifcForm) {
+    step2ifcForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      runStep2ifcAuto();
     });
   }
 
