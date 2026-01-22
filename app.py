@@ -1977,6 +1977,64 @@ def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
 DEEP_LAYER_RE = re.compile(r"^[A-Z]-Ss\d{6,}--")
 SHALLOW_BASE_RE = re.compile(r"^[A-Z]-Ss\d{4}0--")
 ALLOWED_LAYER_RE = re.compile(r"[A-Z]-Ss\d{4}0--[A-Za-z0-9-]*")
+DEFAULT_ALLOWED_LAYERS = {
+    "I-Ss4015--GeneralFittingsFurnishingsAndEquipment(FF&E)Systems",
+    "L-SL0000--HabitatSupervisedAreas",
+    "L-SL0000--HardInformalAndSocialArea",
+    "L-SL0000--HardOutdoorPE",
+    "L-SL0000--NonNetSiteArea",
+    "L-SL0000--SoftInformalAndSocialArea",
+    "L-SL0000--SoftOutdoorPE",
+    "L-Ss2514--GeneralPatternWireMeshFencingSystems",
+    "L-Ss2514--WoodCloseBoardedFencingSystems",
+    "L-Ss2532--GateSystems",
+    "L-Ss3014--AcrylicAndResinBoundAggregatePavingSystems",
+    "L-Ss3014--AsphaltConcretePavingSystems",
+    "L-Ss3014--ConcreteRoadAndPavingSystems",
+    "L-Ss3014--HogginPavingSystems",
+    "L-Ss3014--PermeableSmallUnitPavingSystems",
+    "L-Ss3014--PorousAsphaltConcreteSportsPavingSystems",
+    "L-Ss4535--AmenityAndOrnamentalPlantingSystems",
+    "L-Ss4535--BiodiversityAndEnvironmentalConservationSystems",
+    "L-Ss4535--GrassSeedingSystems",
+    "L-Ss4535--PitPlantedLargeTreeSystems",
+    "L-Ss4535--PitPlantedSmallTreeAndShrubSystems",
+    "O-Ss2530--RollerShutterDoorsetSystems",
+    "O-Ss4015--CommercialCateringFF&ESystems",
+    "O-Ss4015--JanitorialUnitSystems",
+    "O-Ss4015--Shelving,StorageAndEnclosuresSystems",
+    "O-Ss4015--SinkSystems",
+    "O-Ss4510--InsectControlSystems",
+    "O-Ss5040--WasteCollectionSystems",
+    "O-Ss5515--WaterTreatmentFiltrationSystems",
+    "O-Ss6060--RefrigerationSystems",
+    "O-Ss6540--KitchenExtractVentilationSystems",
+    "S-EF2005--Substructure",
+    "S-EF2510--Walls",
+    "S-EF3020--Floors",
+    "Z-Ss4070--Equipment",
+    "Z-Ss5035--SurfaceAndWastewaterDrainageCollectionSystems",
+    "Z-Ss6050--WaterTanksAndCisterns",
+    "Z-Ss6070--DistributionBoxesAndSwitchboards",
+    "Z-Ss6070--LowVoltageSwitchgear",
+    "Z-Ss6070--PowerSupplyProducts",
+    "Z-Ss6075--CommunicationsSourceProducts",
+    "Z-Ss6552--PipesAndFittings",
+    "Z-Ss6553--PumpProducts",
+    "Z-Ss6554--ValveProducts",
+    "Z-Ss6565--DuctDampers",
+    "Z-Ss6565--DuctworkAndFittings",
+    "Z-Ss6567--Fans",
+    "Z-Ss6567--SoundAttenuators",
+    "Z-Ss6570--CablesConductorsAndFittingsProducts",
+    "Z-Ss6572--ElectricalProtectiveDevices",
+    "Z-Ss7060--HeatEmitters",
+    "Z-Ss7065--AirTerminalsAndDiffusers",
+    "Z-Ss7080--LightingSystems",
+    "Z-Ss7550--MechanicalAndElectricalServicesControlProducts",
+    "Z-Ss8010--CableTransportSystems",
+    "Z-Ss8077--EquipmentEnclosuresCabinetsBoxesAndHousings",
+}
 
 
 def parse_allowed_layers(text_or_file: Optional[str]) -> set:
@@ -3180,7 +3238,8 @@ def presentation_layer_scan(session_id: str, payload: Dict[str, Any] = Body(...)
     if not os.path.isfile(in_path):
         raise HTTPException(status_code=404, detail="IFC file not found")
     allowed_text = payload.get("allowed_text") or ""
-    allowed_set = parse_allowed_layers(allowed_text)
+    allowed_set = set(DEFAULT_ALLOWED_LAYERS)
+    allowed_set.update(parse_allowed_layers(allowed_text))
     explicit_map = payload.get("explicit_map") or {}
     options = payload.get("options") or {}
     stats, rows = scan_layers(in_path, allowed_set, explicit_map, options)

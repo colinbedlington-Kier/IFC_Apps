@@ -56,7 +56,7 @@ The **Presentation Layer Purge** page scans IFC uploads for overly-specific Unic
 
 1. Upload an IFC on the **Upload & Session** page.
 2. Open **Presentation Layer Purge** from the navigation bar.
-3. Paste an Allowed Layers “One Of [ ... ]” list or import a `.txt`/`.csv` file.
+3. Paste an Allowed Layers “One Of [ ... ]” list or import a `.txt`/`.csv` file (the tool also seeds a built-in allowed list specific to IFC Tools validation targets).
 4. Edit explicit overrides, toggle auto-shallowing, and (optionally) enable updating both presentation layers and `Layer` properties.
 5. Scan, filter the results, and apply the approved rows to download the updated IFC plus JSON/CSV change logs.
 
