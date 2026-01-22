@@ -47,3 +47,29 @@ The **Model Checking (Editable)** page adds a spreadsheet-driven validation UI t
 
 - Core helpers live in `check_definitions_loader.py`, `field_access.py`, `classification_writer.py`, `expression_engine.py`, and `validation.py`.
 - Tests cover classification write-back, expression token resolution, and property creation; run `pytest` to validate.
+
+## Presentation Layer Purge
+
+The **Presentation Layer Purge** page scans IFC uploads for overly-specific Uniclass Ss layer tokens, proposes a shallower target, and lets you apply approved mappings to a new IFC copy.
+
+### Usage
+
+1. Upload an IFC on the **Upload & Session** page.
+2. Open **Presentation Layer Purge** from the navigation bar.
+3. Paste an Allowed Layers “One Of [ ... ]” list or import a `.txt`/`.csv` file (the tool also seeds a built-in allowed list specific to IFC Tools validation targets).
+4. Edit explicit overrides, toggle auto-shallowing, and (optionally) enable updating both presentation layers and `Layer` properties.
+5. Scan, filter the results, and apply the approved rows to download the updated IFC plus JSON/CSV change logs.
+
+## Proxy → Types enhancements
+
+The **Proxy → Types** page now includes a **PredefinedType Fixer** panel that can run against any selected IfcClasses:
+
+- Uses the existing type-name matching logic to set `PredefinedType` to `NOTDEFINED` when a match is found or `USERDEFINED` otherwise.
+- Skips entities without a `PredefinedType` attribute (reported as N/A).
+- Supports dry-run mode to review proposed changes before exporting a new IFC plus change logs.
+
+## Running locally
+
+```bash
+uvicorn app:app --reload
+```

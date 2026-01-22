@@ -131,6 +131,23 @@ nav {
   box-shadow: var(--shadow);
 }
 
+.section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.badge {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(124,97,255,0.15);
+  color: var(--accent);
+  border: 1px solid var(--border);
+}
+
 .card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 
 .upload-card { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
@@ -198,6 +215,21 @@ nav {
 .hint { color: var(--muted); margin: 4px 0 0; font-size: 13px; }
 
 .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+
+.inline-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+
+.toggle { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.toggle input { accent-color: var(--accent-2); }
+
+.table-wrap { overflow-x: auto; }
+.data-table { width: 100%; border-collapse: collapse; }
+.data-table th,
+.data-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+.data-table th { color: var(--muted); font-weight: 600; font-size: 13px; }
+.data-table td { font-size: 13px; }
 .field input, .field select, .field textarea {
   padding: 10px 12px;
   border-radius: 10px;

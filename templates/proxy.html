@@ -11,4 +11,61 @@
   <button class="btn" id="runProxy" style="margin-top: 8px">Rewrite proxies</button>
   <div class="status" id="proxyStatus"></div>
 </div>
+
+<div class="card">
+  <div class="section-title">
+    <h2>PredefinedType Fixer</h2>
+    <span class="badge">All IfcClasses</span>
+  </div>
+  <div class="grid-2">
+    <div class="field">
+      <label for="proxyPredefIfc">IFC file</label>
+      <select id="proxyPredefIfc" data-files-select></select>
+    </div>
+    <div class="field">
+      <label for="proxyPredefClasses">IfcClass scope</label>
+      <select id="proxyPredefClasses" multiple size="6"></select>
+      <div class="hint">Defaults to IfcBuildingElementProxy but can be expanded.</div>
+    </div>
+  </div>
+  <div class="grid-2">
+    <label class="toggle">
+      <input type="checkbox" id="proxyPredefToggle" checked />
+      <span>Set PredefinedType using match result</span>
+    </label>
+    <label class="toggle">
+      <input type="checkbox" id="proxyPredefDryRun" checked />
+      <span>Dry run (report only)</span>
+    </label>
+  </div>
+  <div class="inline-actions">
+    <button class="btn" id="proxyPredefScan">Scan PredefinedType</button>
+    <div class="status muted" id="proxyPredefStatus">No scan yet.</div>
+  </div>
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Apply</th>
+          <th>GlobalId</th>
+          <th>IfcClass</th>
+          <th>Type name</th>
+          <th>Match?</th>
+          <th>Proposed PredefinedType</th>
+        </tr>
+      </thead>
+      <tbody id="proxyPredefBody"></tbody>
+    </table>
+  </div>
+  <div class="inline-actions">
+    <button class="btn secondary sm" id="proxyPredefPrev">Prev</button>
+    <span class="muted" id="proxyPredefPageInfo">Page 1</span>
+    <button class="btn secondary sm" id="proxyPredefNext">Next</button>
+  </div>
+  <div class="inline-actions">
+    <button class="btn" id="proxyPredefApply">Apply + Export IFC</button>
+    <div class="status" id="proxyPredefApplyStatus"></div>
+  </div>
+  <div class="file-list" id="proxyPredefDownloads"></div>
+</div>
 {% endblock %}
