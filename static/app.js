@@ -8,7 +8,24 @@ const state = {
   uploadProgressEl: null,
   step2ifcJobId: null,
   pendingActions: [],
+  presentationLayer: {
+    rows: [],
+    page: 1,
+    pageSize: 20,
+  },
+  proxyPredef: {
+    rows: [],
+    page: 1,
+    pageSize: 20,
+  },
 };
+
+const presentationOverrides = [
+  {
+    source: "Z-Ss755028--FireAndSmokeDetectionAndAlarmSystems",
+    target: "Z-Ss7550--MechanicalAndElectricalServicesControlProducts",
+  },
+];
 
 const el = (id) => document.getElementById(id);
 
@@ -516,6 +533,277 @@ async function runProxyMapper() {
   }
 }
 
+// ------------------------------
+// Presentation Layer Purge
+// ------------------------------
+function renderOverridesTable(overrides) {
+  const body = el("plpOverridesBody");
+  if (!body) return;
+  body.innerHTML = "";
+  overrides.forEach((row, idx) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><input type="text" value="${row.source || ""}" data-override-source="${idx}" /></td>
+      <td><input type="text" value="${row.target || ""}" data-override-target="${idx}" /></td>
+      <td><button class="btn secondary sm" data-override-remove="${idx}">Remove</button></td>
+    `;
+    body.appendChild(tr);
+  });
+  body.querySelectorAll("[data-override-remove]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.overrideRemove);
+      overrides.splice(idx, 1);
+      renderOverridesTable(overrides);
+    });
+  });
+}
+
+function getOverridesFromTable() {
+  const overrides = {};
+  document.querySelectorAll("[data-override-source]").forEach((input) => {
+    const idx = Number(input.dataset.overrideSource);
+    const targetInput = document.querySelector(`[data-override-target="${idx}"]`);
+    const source = input.value.trim();
+    const target = targetInput?.value.trim() || "";
+    if (source && target) overrides[source] = target;
+  });
+  return overrides;
+}
+
+function setAllowedSummary(count, samples) {
+  const summary = el("plpAllowedSummary");
+  const sampleEl = el("plpAllowedSample");
+  if (summary) summary.textContent = `Allowed layers parsed: ${count}`;
+  if (sampleEl) sampleEl.textContent = samples?.length ? `Sample: ${samples.join(", ")}` : "";
+}
+
+function filterPresentationRows(rows) {
+  const search = el("plpFilterText")?.value.toLowerCase() || "";
+  const allowed = el("plpFilterAllowed")?.value || "";
+  const reason = el("plpFilterReason")?.value || "";
+  return rows.filter((row) => {
+    const haystack = `${row.ifc_class} ${row.presentation_layer} ${row.property_layer}`.toLowerCase();
+    if (search && !haystack.includes(search)) return false;
+    if (allowed && row.allowed_status !== allowed) return false;
+    if (reason && row.mapping_reason !== reason) return false;
+    return true;
+  });
+}
+
+function renderPresentationRows() {
+  const body = el("plpResultsBody");
+  if (!body) return;
+  const { page, pageSize } = state.presentationLayer;
+  const filtered = filterPresentationRows(state.presentationLayer.rows);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  state.presentationLayer.page = Math.min(page, totalPages);
+  const start = (state.presentationLayer.page - 1) * pageSize;
+  const pageRows = filtered.slice(start, start + pageSize);
+  body.innerHTML = "";
+  pageRows.forEach((row) => {
+    const tr = document.createElement("tr");
+    const checked = row.apply ?? row.apply_default;
+    tr.innerHTML = `
+      <td><input type="checkbox" data-plp-apply="${row.row_id}" ${checked ? "checked" : ""} /></td>
+      <td>${row.globalid}</td>
+      <td>${row.ifc_class}</td>
+      <td>${row.presentation_layer || "-"}</td>
+      <td>${row.property_layer || "-"}</td>
+      <td>${row.target_layer || "-"}</td>
+      <td>${row.mapping_reason}</td>
+      <td>${row.allowed_status}</td>
+    `;
+    body.appendChild(tr);
+  });
+  body.querySelectorAll("[data-plp-apply]").forEach((input) => {
+    input.addEventListener("change", (e) => {
+      const rowId = e.target.dataset.plpApply;
+      const row = state.presentationLayer.rows.find((r) => r.row_id === rowId);
+      if (row) row.apply = e.target.checked;
+    });
+  });
+  if (el("plpPageInfo")) el("plpPageInfo").textContent = `Page ${state.presentationLayer.page} of ${totalPages}`;
+  if (el("plpResultsStatus")) {
+    el("plpResultsStatus").textContent = filtered.length
+      ? `${filtered.length} rows (showing ${pageRows.length})`
+      : "No matching rows.";
+  }
+}
+
+async function scanPresentationLayers() {
+  const file = el("plpIfc")?.value;
+  if (!file) return alert("Select IFC file.");
+  const allowedText = el("plpAllowedText")?.value || "";
+  const overrides = getOverridesFromTable();
+  const options = {
+    auto_shallow: el("plpAutoShallow")?.checked ?? true,
+  };
+  if (el("plpStats")) el("plpStats").textContent = "Scanning layers…";
+  const resp = await fetch(`/api/session/${state.sessionId}/presentation-layer/scan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ifc_file: file, allowed_text: allowedText, explicit_map: overrides, options }),
+  });
+  const data = await resp.json();
+  state.presentationLayer.rows = (data.rows || []).map((row) => ({ ...row, apply: row.apply_default }));
+  state.presentationLayer.page = 1;
+  if (data.stats && el("plpStats")) {
+    el("plpStats").textContent = `Schema: ${data.stats.schema} · Elements: ${data.stats.elements} · Rows: ${data.stats.rows}`;
+  }
+  setAllowedSummary(data.allowed_count || 0, data.allowed_samples || []);
+  renderPresentationRows();
+}
+
+async function applyPresentationLayers() {
+  const file = el("plpIfc")?.value;
+  if (!file) return alert("Select IFC file.");
+  const rows = state.presentationLayer.rows.filter((row) => row.apply);
+  if (!rows.length) return alert("No rows selected.");
+  const options = { update_both: el("plpUpdateBoth")?.checked ?? false };
+  if (el("plpApplyStatus")) el("plpApplyStatus").textContent = "Applying updates…";
+  const resp = await fetch(`/api/session/${state.sessionId}/presentation-layer/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ifc_file: file, rows, options }),
+  });
+  const data = await resp.json();
+  if (el("plpApplyStatus")) el("plpApplyStatus").textContent = "Export ready.";
+  await refreshFiles();
+  const downloads = el("plpDownloads");
+  if (!downloads) return;
+  downloads.innerHTML = "";
+  [data.ifc, data.log_json, data.log_csv].forEach((output) => {
+    if (!output) return;
+    const row = document.createElement("div");
+    row.className = "file-row";
+    row.innerHTML = `<span class="file-name">${output.name}</span>`;
+    const btn = document.createElement("button");
+    btn.className = "btn secondary sm";
+    btn.textContent = "Download";
+    btn.addEventListener("click", () => downloadFile(output.name));
+    row.appendChild(btn);
+    downloads.appendChild(row);
+  });
+}
+
+// ------------------------------
+// Proxy → PredefinedType fixer
+// ------------------------------
+function renderProxyPredefRows() {
+  const body = el("proxyPredefBody");
+  if (!body) return;
+  const { page, pageSize } = state.proxyPredef;
+  const rows = state.proxyPredef.rows;
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  state.proxyPredef.page = Math.min(page, totalPages);
+  const start = (state.proxyPredef.page - 1) * pageSize;
+  const pageRows = rows.slice(start, start + pageSize);
+  body.innerHTML = "";
+  pageRows.forEach((row) => {
+    const canApply = row.proposed_predefined_type !== "N/A";
+    const checked = row.apply ?? row.apply_default;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><input type="checkbox" data-proxy-predef-apply="${row.row_id}" ${checked ? "checked" : ""} ${canApply ? "" : "disabled"} /></td>
+      <td>${row.globalid}</td>
+      <td>${row.ifc_class}</td>
+      <td>${row.type_name || "-"}</td>
+      <td>${row.match_found ? "Yes" : "No"}</td>
+      <td>${row.proposed_predefined_type}</td>
+    `;
+    body.appendChild(tr);
+  });
+  body.querySelectorAll("[data-proxy-predef-apply]").forEach((input) => {
+    input.addEventListener("change", (e) => {
+      const rowId = e.target.dataset.proxyPredefApply;
+      const row = state.proxyPredef.rows.find((r) => r.row_id === rowId);
+      if (row) row.apply = e.target.checked;
+    });
+  });
+  if (el("proxyPredefPageInfo")) {
+    el("proxyPredefPageInfo").textContent = `Page ${state.proxyPredef.page} of ${totalPages}`;
+  }
+}
+
+async function loadProxyPredefClasses() {
+  const file = el("proxyPredefIfc")?.value;
+  const select = el("proxyPredefClasses");
+  if (!file || !select) return;
+  const resp = await fetch(`/api/session/${state.sessionId}/proxy/predefined/classes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ifc_file: file }),
+  });
+  const data = await resp.json();
+  select.innerHTML = "";
+  (data.classes || []).forEach((cls) => {
+    const opt = document.createElement("option");
+    opt.value = cls;
+    opt.textContent = cls;
+    if (cls === "IfcBuildingElementProxy") opt.selected = true;
+    select.appendChild(opt);
+  });
+}
+
+async function scanProxyPredefined() {
+  const file = el("proxyPredefIfc")?.value;
+  if (!file) return alert("Select IFC file.");
+  const select = el("proxyPredefClasses");
+  const classes = Array.from(select?.selectedOptions || []).map((o) => o.value);
+  if (el("proxyPredefStatus")) el("proxyPredefStatus").textContent = "Scanning…";
+  const resp = await fetch(`/api/session/${state.sessionId}/proxy/predefined/scan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ifc_file: file, classes }),
+  });
+  const data = await resp.json();
+  state.proxyPredef.rows = (data.rows || []).map((row) => ({ ...row, apply: row.apply_default }));
+  state.proxyPredef.page = 1;
+  if (el("proxyPredefStatus")) {
+    el("proxyPredefStatus").textContent = `Rows: ${state.proxyPredef.rows.length}`;
+  }
+  renderProxyPredefRows();
+}
+
+async function applyProxyPredefined() {
+  if (el("proxyPredefDryRun")?.checked) {
+    if (el("proxyPredefApplyStatus")) el("proxyPredefApplyStatus").textContent = "Dry run enabled. No changes applied.";
+    return;
+  }
+  if (!el("proxyPredefToggle")?.checked) {
+    if (el("proxyPredefApplyStatus")) el("proxyPredefApplyStatus").textContent = "Toggle is off; no changes applied.";
+    return;
+  }
+  const file = el("proxyPredefIfc")?.value;
+  if (!file) return alert("Select IFC file.");
+  const rows = state.proxyPredef.rows.filter((row) => row.apply);
+  if (!rows.length) return alert("No rows selected.");
+  if (el("proxyPredefApplyStatus")) el("proxyPredefApplyStatus").textContent = "Applying updates…";
+  const resp = await fetch(`/api/session/${state.sessionId}/proxy/predefined/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ifc_file: file, rows }),
+  });
+  const data = await resp.json();
+  if (el("proxyPredefApplyStatus")) el("proxyPredefApplyStatus").textContent = "Export ready.";
+  await refreshFiles();
+  const downloads = el("proxyPredefDownloads");
+  if (!downloads) return;
+  downloads.innerHTML = "";
+  [data.ifc, data.log_json, data.log_csv].forEach((output) => {
+    if (!output) return;
+    const row = document.createElement("div");
+    row.className = "file-row";
+    row.innerHTML = `<span class="file-name">${output.name}</span>`;
+    const btn = document.createElement("button");
+    btn.className = "btn secondary sm";
+    btn.textContent = "Download";
+    btn.addEventListener("click", () => downloadFile(output.name));
+    row.appendChild(btn);
+    downloads.appendChild(row);
+  });
+}
+
 async function downloadFile(name) {
   if (!name) return;
   const url = `/api/session/${state.sessionId}/download?name=${encodeURIComponent(name)}`;
@@ -921,6 +1209,75 @@ function wireEvents() {
 
   const proxyBtn = el("runProxy");
   if (proxyBtn) proxyBtn.addEventListener("click", runProxyMapper);
+
+  const plpAddOverride = el("plpAddOverride");
+  if (plpAddOverride) {
+    renderOverridesTable(presentationOverrides);
+    plpAddOverride.addEventListener("click", () => {
+      presentationOverrides.push({ source: "", target: "" });
+      renderOverridesTable(presentationOverrides);
+    });
+  }
+  const plpScan = el("plpScan");
+  if (plpScan) plpScan.addEventListener("click", scanPresentationLayers);
+  const plpApply = el("plpApply");
+  if (plpApply) plpApply.addEventListener("click", applyPresentationLayers);
+  const plpFilterText = el("plpFilterText");
+  if (plpFilterText) plpFilterText.addEventListener("input", renderPresentationRows);
+  const plpFilterAllowed = el("plpFilterAllowed");
+  if (plpFilterAllowed) plpFilterAllowed.addEventListener("change", renderPresentationRows);
+  const plpFilterReason = el("plpFilterReason");
+  if (plpFilterReason) plpFilterReason.addEventListener("change", renderPresentationRows);
+  const plpPrev = el("plpPrev");
+  if (plpPrev) {
+    plpPrev.addEventListener("click", () => {
+      state.presentationLayer.page = Math.max(1, state.presentationLayer.page - 1);
+      renderPresentationRows();
+    });
+  }
+  const plpNext = el("plpNext");
+  if (plpNext) {
+    plpNext.addEventListener("click", () => {
+      state.presentationLayer.page += 1;
+      renderPresentationRows();
+    });
+  }
+  const allowedFileInput = el("plpAllowedFile");
+  if (allowedFileInput) {
+    allowedFileInput.addEventListener("change", (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (el("plpAllowedText")) el("plpAllowedText").value = String(reader.result || "");
+      };
+      reader.readAsText(file);
+    });
+  }
+
+  const proxyPredefIfc = el("proxyPredefIfc");
+  if (proxyPredefIfc) {
+    proxyPredefIfc.addEventListener("change", loadProxyPredefClasses);
+    if (proxyPredefIfc.value) loadProxyPredefClasses();
+  }
+  const proxyPredefScan = el("proxyPredefScan");
+  if (proxyPredefScan) proxyPredefScan.addEventListener("click", scanProxyPredefined);
+  const proxyPredefApply = el("proxyPredefApply");
+  if (proxyPredefApply) proxyPredefApply.addEventListener("click", applyProxyPredefined);
+  const proxyPredefPrev = el("proxyPredefPrev");
+  if (proxyPredefPrev) {
+    proxyPredefPrev.addEventListener("click", () => {
+      state.proxyPredef.page = Math.max(1, state.proxyPredef.page - 1);
+      renderProxyPredefRows();
+    });
+  }
+  const proxyPredefNext = el("proxyPredefNext");
+  if (proxyPredefNext) {
+    proxyPredefNext.addEventListener("click", () => {
+      state.proxyPredef.page += 1;
+      renderProxyPredefRows();
+    });
+  }
 
   const loadLevelsBtn = el("loadLevels");
   if (loadLevelsBtn) loadLevelsBtn.addEventListener("click", loadLevels);

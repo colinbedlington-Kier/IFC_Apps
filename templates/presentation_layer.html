@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title">
+    <h2>Presentation Layer Purge</h2>
+    <span class="badge">Layer normalization</span>
+  </div>
+  <div class="field">
+    <label for="plpIfc">IFC file</label>
+    <select id="plpIfc" data-files-select></select>
+  </div>
+  <div class="inline-actions">
+    <button class="btn" id="plpScan">Scan layers</button>
+    <div class="status muted" id="plpStats">Select a file to begin.</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-title">
+    <h3>Allowed Layers</h3>
+  </div>
+  <div class="grid-2">
+    <div class="field">
+      <label for="plpAllowedText">Paste “One Of [ ... ]” list or raw layer values</label>
+      <textarea id="plpAllowedText" rows="6" placeholder="Paste allowed layer list here"></textarea>
+    </div>
+    <div class="field">
+      <label for="plpAllowedFile">Import allowed layers file (.txt/.csv)</label>
+      <input type="file" id="plpAllowedFile" accept=".txt,.csv" />
+      <div class="hint">File contents are read locally and used for parsing.</div>
+    </div>
+  </div>
+  <div class="status muted" id="plpAllowedSummary">Allowed layers not parsed yet.</div>
+  <div class="hint" id="plpAllowedSample"></div>
+</div>
+
+<div class="card">
+  <div class="section-title">
+    <h3>Mapping rules</h3>
+  </div>
+  <div class="field">
+    <label>Explicit overrides (deep → approved)</label>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Deep layer</th>
+          <th>Target layer</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="plpOverridesBody"></tbody>
+    </table>
+    <button class="btn secondary sm" id="plpAddOverride">Add override</button>
+  </div>
+  <div class="grid-2">
+    <label class="toggle">
+      <input type="checkbox" id="plpAutoShallow" checked />
+      <span>Auto-shallow deep layers when no override exists</span>
+    </label>
+    <label class="toggle">
+      <input type="checkbox" id="plpUpdateBoth" />
+      <span>Update both PresentationLayer and Pset “Layer” property where found</span>
+    </label>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-title">
+    <h3>Scan results</h3>
+  </div>
+  <div class="grid-3">
+    <div class="field">
+      <label for="plpFilterText">Search (type or layer contains)</label>
+      <input type="text" id="plpFilterText" placeholder="Search rows..." />
+    </div>
+    <div class="field">
+      <label for="plpFilterAllowed">Allowed filter</label>
+      <select id="plpFilterAllowed">
+        <option value="">All</option>
+        <option value="yes">Allowed = Yes</option>
+        <option value="no">Allowed = No</option>
+        <option value="unknown">Allowed = Unknown</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="plpFilterReason">Reason filter</label>
+      <select id="plpFilterReason">
+        <option value="">All</option>
+        <option value="Explicit">Explicit</option>
+        <option value="Shallow">Shallow</option>
+        <option value="Manual">Manual</option>
+      </select>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Apply</th>
+          <th>GlobalId</th>
+          <th>IfcClass</th>
+          <th>Presentation Layer</th>
+          <th>Property Layer</th>
+          <th>Proposed Target</th>
+          <th>Reason</th>
+          <th>Allowed?</th>
+        </tr>
+      </thead>
+      <tbody id="plpResultsBody"></tbody>
+    </table>
+  </div>
+  <div class="inline-actions">
+    <button class="btn secondary sm" id="plpPrev">Prev</button>
+    <span class="muted" id="plpPageInfo">Page 1</span>
+    <button class="btn secondary sm" id="plpNext">Next</button>
+  </div>
+  <div class="status muted" id="plpResultsStatus">No scan results yet.</div>
+</div>
+
+<div class="card">
+  <div class="section-title">
+    <h3>Apply + Export</h3>
+  </div>
+  <button class="btn" id="plpApply">Apply and Export IFC</button>
+  <div class="status" id="plpApplyStatus"></div>
+  <div class="file-list" id="plpDownloads"></div>
+</div>
+{% endblock %}
