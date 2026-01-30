@@ -9,25 +9,76 @@
   <body>
     <div class="wrap">
       <nav>
-        <div class="logo">IFC Toolkit</div>
-        <div class="tagline">
-          Local-first workflows for IFC cleaning, Excel round-tripping, storey adjustments, and proxy remapping.
+        <div class="nav-header">
+          <div class="logo">IFC Toolkit</div>
+          <div class="tagline">
+            Local-first workflows for IFC cleaning, Excel round-tripping, storey adjustments, and proxy remapping.
+          </div>
         </div>
-        <div class="nav-group">
-          <a class="nav-link {% if active=='upload' %}active{% endif %}" href="/">📂 Upload & Session</a>
-          <a class="nav-link {% if active=='cleaner' %}active{% endif %}" href="/cleaner">🧹 Cleaner</a>
-          <a class="nav-link {% if active=='excel' %}active{% endif %}" href="/excel">📑 Excel Extract/Update</a>
-          <a class="nav-link {% if active=='storeys' %}active{% endif %}" href="/storeys">🏢 Storey & Z Control</a>
-          <a class="nav-link {% if active=='levels' %}active{% endif %}" href="/levels">🗂️ Level Manager</a>
-          <a class="nav-link {% if active=='proxy' %}active{% endif %}" href="/proxy">🧭 Proxy → Types</a>
-          <a class="nav-link {% if active=='presentation-layer' %}active{% endif %}" href="/presentation-layer">🎨 Presentation Layer Purge</a>
-          <a class="nav-link {% if active=='step2ifc' %}active{% endif %}" href="/step2ifc">🧱 STEP → IFC</a>
-          <a class="nav-link {% if active=='files' %}active{% endif %}" href="/files">📁 Session Files</a>
-          <a class="nav-link {% if active=='model-checking' %}active{% endif %}" href="/model-checking">🧮 Model Checking (Editable)</a>
-          <a class="nav-link {% if active=='mappings' %}active{% endif %}" href="/admin/mappings">🛠️ Admin / Mapping</a>
+        <div class="nav-tree" aria-label="Tool navigation">
+          <div class="nav-branch">
+            <div class="nav-root">
+              <a class="nav-link nav-tree-link nav-root-link {% if active=='upload' %}active{% endif %}" href="/">
+                Upload & Session
+              </a>
+            </div>
+            <div class="nav-children">
+              <a class="nav-link nav-tree-link nav-child {% if active=='files' %}active{% endif %}" href="/files">
+                Session Files Download
+              </a>
+            </div>
+          </div>
+          <div class="nav-branch">
+            <div class="nav-root">
+              <span class="nav-link nav-tree-link nav-root-link nav-label">Tools</span>
+            </div>
+            <div class="nav-children">
+              <a class="nav-link nav-tree-link nav-child {% if active=='excel' %}active{% endif %}" href="/excel">
+                IFC to Excel (Extract and Update)
+              </a>
+              <a class="nav-link nav-tree-link nav-child {% if active=='cleaner' %}active{% endif %}" href="/cleaner">
+                Pset Purge (Cleaner)
+              </a>
+              <a class="nav-link nav-tree-link nav-child {% if active=='storeys' %}active{% endif %}" href="/storeys">
+                Storey & Global Z Control
+              </a>
+              <a class="nav-link nav-tree-link nav-child {% if active=='levels' %}active{% endif %}" href="/levels">
+                Level Manager
+              </a>
+              <a class="nav-link nav-tree-link nav-child {% if active=='proxy' %}active{% endif %}" href="/proxy">
+                Proxy to IFCClass
+              </a>
+            </div>
+          </div>
+          <div class="nav-branch">
+            <div class="nav-root">
+              <span class="nav-link nav-tree-link nav-root-link nav-label">WIP</span>
+            </div>
+            <div class="nav-children">
+              <a class="nav-link nav-tree-link nav-child {% if active=='presentation-layer' %}active{% endif %}" href="/presentation-layer">
+                Presentation Layer Purge
+              </a>
+              <a class="nav-link nav-tree-link nav-child {% if active=='step2ifc' %}active{% endif %}" href="/step2ifc">
+                STEP to IFC
+              </a>
+              <a class="nav-link nav-tree-link nav-child {% if active=='model-checking' %}active{% endif %}" href="/model-checking">
+                Model Checking
+              </a>
+              <a class="nav-link nav-tree-link nav-child {% if active=='mappings' %}active{% endif %}" href="/admin/mappings">
+                Admin / Mapping
+              </a>
+            </div>
+          </div>
         </div>
         <div class="session-badge" data-session-badge>Session establishing…</div>
       </nav>
+
+      <div class="processing-bar" data-processing-bar aria-live="polite">
+        <div class="processing-label" data-processing-label>Processing files…</div>
+        <div class="processing-track" role="progressbar" aria-valuetext="Processing">
+          <div class="processing-fill"></div>
+        </div>
+      </div>
 
       <main>
         {% block content %}{% endblock %}

@@ -18,6 +18,7 @@ const state = {
     page: 1,
     pageSize: 20,
   },
+  processingCount: 0,
 };
 
 const presentationOverrides = [
@@ -41,6 +42,37 @@ function setSessionBadge(text, ok = true) {
     badge.classList.toggle("success-text", ok);
   });
 }
+
+function updateProcessingBar(active, message) {
+  const wrap = document.querySelector("[data-processing-bar]");
+  const label = document.querySelector("[data-processing-label]");
+  if (!wrap || !label) return;
+  wrap.classList.toggle("active", active);
+  if (message) label.textContent = message;
+}
+
+function startProcessing(message) {
+  state.processingCount += 1;
+  updateProcessingBar(true, message || "Processing files…");
+}
+
+function stopProcessing() {
+  state.processingCount = Math.max(0, state.processingCount - 1);
+  if (state.processingCount === 0) {
+    updateProcessingBar(false, "Processing files…");
+  }
+}
+
+async function withProcessing(message, fn) {
+  startProcessing(message);
+  try {
+    return await fn();
+  } finally {
+    stopProcessing();
+  }
+}
+
+window.withProcessing = withProcessing;
 
 async function ensureSession() {
   try {
@@ -397,39 +429,43 @@ async function runCleaner() {
     drop_empty_psets: el("dropEmpty")?.checked ?? true,
     also_remove_loose_props: el("looseProps")?.checked ?? true,
   };
-  const resp = await fetch(`/api/session/${state.sessionId}/clean`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+  return withProcessing("Cleaning IFC files…", async () => {
+    const resp = await fetch(`/api/session/${state.sessionId}/clean`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (data.reports) {
+      const text = data.reports
+        .map((r) => `=== ${r.input} → ${r.output}\nstatus: ${r.status}\nremoved: ${JSON.stringify(r.removed, null, 2)}`)
+        .join("\n\n");
+      el("cleanerStatus").textContent = text;
+      await refreshFiles();
+    } else {
+      el("cleanerStatus").textContent = JSON.stringify(data);
+    }
   });
-  const data = await resp.json();
-  if (data.reports) {
-    const text = data.reports
-      .map((r) => `=== ${r.input} → ${r.output}\nstatus: ${r.status}\nremoved: ${JSON.stringify(r.removed, null, 2)}`)
-      .join("\n\n");
-    el("cleanerStatus").textContent = text;
-    await refreshFiles();
-  } else {
-    el("cleanerStatus").textContent = JSON.stringify(data);
-  }
 }
 
 async function extractExcel() {
   const file = el("excelIfc")?.value;
   if (!file) return alert("Select an IFC file.");
   const payload = { ifc_file: file };
-  const resp = await fetch(`/api/session/${state.sessionId}/excel/extract`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+  return withProcessing("Extracting Excel workbook…", async () => {
+    const resp = await fetch(`/api/session/${state.sessionId}/excel/extract`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (data.excel) {
+      el("excelStatus").textContent = `Excel ready: ${data.excel.name}`;
+      await refreshFiles();
+    } else {
+      el("excelStatus").textContent = JSON.stringify(data);
+    }
   });
-  const data = await resp.json();
-  if (data.excel) {
-    el("excelStatus").textContent = `Excel ready: ${data.excel.name}`;
-    await refreshFiles();
-  } else {
-    el("excelStatus").textContent = JSON.stringify(data);
-  }
 }
 
 async function applyExcel() {
@@ -442,43 +478,47 @@ async function applyExcel() {
     update_mode: document.querySelector('input[name="updateMode"]:checked')?.value || "update",
     add_new: document.querySelector('input[name="addNew"]:checked')?.value || "no",
   };
-  const resp = await fetch(`/api/session/${state.sessionId}/excel/update`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+  return withProcessing("Applying Excel updates…", async () => {
+    const resp = await fetch(`/api/session/${state.sessionId}/excel/update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (data.ifc) {
+      el("excelStatus").textContent = `Updated IFC: ${data.ifc.name}`;
+      await refreshFiles();
+    } else {
+      el("excelStatus").textContent = JSON.stringify(data);
+    }
   });
-  const data = await resp.json();
-  if (data.ifc) {
-    el("excelStatus").textContent = `Updated IFC: ${data.ifc.name}`;
-    await refreshFiles();
-  } else {
-    el("excelStatus").textContent = JSON.stringify(data);
-  }
 }
 
 async function parseStoreyInfo() {
   const file = el("storeyIfc")?.value;
   if (!file) return alert("Select an IFC file.");
   const payload = { ifc_file: file };
-  const resp = await fetch(`/api/session/${state.sessionId}/storeys/parse`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await resp.json();
-  if (el("storeyMeta")) {
-    el("storeyMeta").textContent = `${data.summary || ""} (MapConversions: ${data.map_conversions || 0})`;
-  }
-  const select = el("storeySelect");
-  if (select) {
-    select.innerHTML = "";
-    (data.storeys || []).forEach((s) => {
-      const opt = document.createElement("option");
-      opt.value = s.id;
-      opt.textContent = s.label;
-      select.appendChild(opt);
+  return withProcessing("Analyzing storey data…", async () => {
+    const resp = await fetch(`/api/session/${state.sessionId}/storeys/parse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
-  }
+    const data = await resp.json();
+    if (el("storeyMeta")) {
+      el("storeyMeta").textContent = `${data.summary || ""} (MapConversions: ${data.map_conversions || 0})`;
+    }
+    const select = el("storeySelect");
+    if (select) {
+      select.innerHTML = "";
+      (data.storeys || []).forEach((s) => {
+        const opt = document.createElement("option");
+        opt.value = s.id;
+        opt.textContent = s.label;
+        select.appendChild(opt);
+      });
+    }
+  });
 }
 
 async function applyStoreyChanges() {
@@ -501,36 +541,40 @@ async function applyStoreyChanges() {
     show_diag: el("diag")?.checked ?? true,
     crs_set_storey_elev: el("crsElev")?.checked ?? true,
   };
-  const resp = await fetch(`/api/session/${state.sessionId}/storeys/apply`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+  return withProcessing("Applying storey changes…", async () => {
+    const resp = await fetch(`/api/session/${state.sessionId}/storeys/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (data.summary && el("storeyStatus")) {
+      el("storeyStatus").textContent = data.summary;
+      await refreshFiles();
+    } else if (el("storeyStatus")) {
+      el("storeyStatus").textContent = JSON.stringify(data);
+    }
   });
-  const data = await resp.json();
-  if (data.summary && el("storeyStatus")) {
-    el("storeyStatus").textContent = data.summary;
-    await refreshFiles();
-  } else if (el("storeyStatus")) {
-    el("storeyStatus").textContent = JSON.stringify(data);
-  }
 }
 
 async function runProxyMapper() {
   const file = el("proxyIfc")?.value;
   if (!file) return alert("Select IFC file.");
   const payload = { ifc_file: file };
-  const resp = await fetch(`/api/session/${state.sessionId}/proxy`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+  return withProcessing("Mapping proxies to IFC classes…", async () => {
+    const resp = await fetch(`/api/session/${state.sessionId}/proxy`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (data.summary && el("proxyStatus")) {
+      el("proxyStatus").textContent = data.summary;
+      await refreshFiles();
+    } else if (el("proxyStatus")) {
+      el("proxyStatus").textContent = JSON.stringify(data);
+    }
   });
-  const data = await resp.json();
-  if (data.summary && el("proxyStatus")) {
-    el("proxyStatus").textContent = data.summary;
-    await refreshFiles();
-  } else if (el("proxyStatus")) {
-    el("proxyStatus").textContent = JSON.stringify(data);
-  }
 }
 
 // ------------------------------
@@ -639,19 +683,21 @@ async function scanPresentationLayers() {
     auto_shallow: el("plpAutoShallow")?.checked ?? true,
   };
   if (el("plpStats")) el("plpStats").textContent = "Scanning layers…";
-  const resp = await fetch(`/api/session/${state.sessionId}/presentation-layer/scan`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ifc_file: file, allowed_text: allowedText, explicit_map: overrides, options }),
+  return withProcessing("Scanning presentation layers…", async () => {
+    const resp = await fetch(`/api/session/${state.sessionId}/presentation-layer/scan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ifc_file: file, allowed_text: allowedText, explicit_map: overrides, options }),
+    });
+    const data = await resp.json();
+    state.presentationLayer.rows = (data.rows || []).map((row) => ({ ...row, apply: row.apply_default }));
+    state.presentationLayer.page = 1;
+    if (data.stats && el("plpStats")) {
+      el("plpStats").textContent = `Schema: ${data.stats.schema} · Elements: ${data.stats.elements} · Rows: ${data.stats.rows}`;
+    }
+    setAllowedSummary(data.allowed_count || 0, data.allowed_samples || []);
+    renderPresentationRows();
   });
-  const data = await resp.json();
-  state.presentationLayer.rows = (data.rows || []).map((row) => ({ ...row, apply: row.apply_default }));
-  state.presentationLayer.page = 1;
-  if (data.stats && el("plpStats")) {
-    el("plpStats").textContent = `Schema: ${data.stats.schema} · Elements: ${data.stats.elements} · Rows: ${data.stats.rows}`;
-  }
-  setAllowedSummary(data.allowed_count || 0, data.allowed_samples || []);
-  renderPresentationRows();
 }
 
 async function applyPresentationLayers() {
@@ -661,28 +707,30 @@ async function applyPresentationLayers() {
   if (!rows.length) return alert("No rows selected.");
   const options = { update_both: el("plpUpdateBoth")?.checked ?? false };
   if (el("plpApplyStatus")) el("plpApplyStatus").textContent = "Applying updates…";
-  const resp = await fetch(`/api/session/${state.sessionId}/presentation-layer/apply`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ifc_file: file, rows, options }),
-  });
-  const data = await resp.json();
-  if (el("plpApplyStatus")) el("plpApplyStatus").textContent = "Export ready.";
-  await refreshFiles();
-  const downloads = el("plpDownloads");
-  if (!downloads) return;
-  downloads.innerHTML = "";
-  [data.ifc, data.log_json, data.log_csv].forEach((output) => {
-    if (!output) return;
-    const row = document.createElement("div");
-    row.className = "file-row";
-    row.innerHTML = `<span class="file-name">${output.name}</span>`;
-    const btn = document.createElement("button");
-    btn.className = "btn secondary sm";
-    btn.textContent = "Download";
-    btn.addEventListener("click", () => downloadFile(output.name));
-    row.appendChild(btn);
-    downloads.appendChild(row);
+  return withProcessing("Applying presentation layer updates…", async () => {
+    const resp = await fetch(`/api/session/${state.sessionId}/presentation-layer/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ifc_file: file, rows, options }),
+    });
+    const data = await resp.json();
+    if (el("plpApplyStatus")) el("plpApplyStatus").textContent = "Export ready.";
+    await refreshFiles();
+    const downloads = el("plpDownloads");
+    if (!downloads) return;
+    downloads.innerHTML = "";
+    [data.ifc, data.log_json, data.log_csv].forEach((output) => {
+      if (!output) return;
+      const row = document.createElement("div");
+      row.className = "file-row";
+      row.innerHTML = `<span class="file-name">${output.name}</span>`;
+      const btn = document.createElement("button");
+      btn.className = "btn secondary sm";
+      btn.textContent = "Download";
+      btn.addEventListener("click", () => downloadFile(output.name));
+      row.appendChild(btn);
+      downloads.appendChild(row);
+    });
   });
 }
 
@@ -751,18 +799,20 @@ async function scanProxyPredefined() {
   const select = el("proxyPredefClasses");
   const classes = Array.from(select?.selectedOptions || []).map((o) => o.value);
   if (el("proxyPredefStatus")) el("proxyPredefStatus").textContent = "Scanning…";
-  const resp = await fetch(`/api/session/${state.sessionId}/proxy/predefined/scan`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ifc_file: file, classes }),
+  return withProcessing("Scanning proxy predefined types…", async () => {
+    const resp = await fetch(`/api/session/${state.sessionId}/proxy/predefined/scan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ifc_file: file, classes }),
+    });
+    const data = await resp.json();
+    state.proxyPredef.rows = (data.rows || []).map((row) => ({ ...row, apply: row.apply_default }));
+    state.proxyPredef.page = 1;
+    if (el("proxyPredefStatus")) {
+      el("proxyPredefStatus").textContent = `Rows: ${state.proxyPredef.rows.length}`;
+    }
+    renderProxyPredefRows();
   });
-  const data = await resp.json();
-  state.proxyPredef.rows = (data.rows || []).map((row) => ({ ...row, apply: row.apply_default }));
-  state.proxyPredef.page = 1;
-  if (el("proxyPredefStatus")) {
-    el("proxyPredefStatus").textContent = `Rows: ${state.proxyPredef.rows.length}`;
-  }
-  renderProxyPredefRows();
 }
 
 async function applyProxyPredefined() {
@@ -779,48 +829,43 @@ async function applyProxyPredefined() {
   const rows = state.proxyPredef.rows.filter((row) => row.apply);
   if (!rows.length) return alert("No rows selected.");
   if (el("proxyPredefApplyStatus")) el("proxyPredefApplyStatus").textContent = "Applying updates…";
-  const resp = await fetch(`/api/session/${state.sessionId}/proxy/predefined/apply`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ifc_file: file, rows }),
-  });
-  const data = await resp.json();
-  if (el("proxyPredefApplyStatus")) el("proxyPredefApplyStatus").textContent = "Export ready.";
-  await refreshFiles();
-  const downloads = el("proxyPredefDownloads");
-  if (!downloads) return;
-  downloads.innerHTML = "";
-  [data.ifc, data.log_json, data.log_csv].forEach((output) => {
-    if (!output) return;
-    const row = document.createElement("div");
-    row.className = "file-row";
-    row.innerHTML = `<span class="file-name">${output.name}</span>`;
-    const btn = document.createElement("button");
-    btn.className = "btn secondary sm";
-    btn.textContent = "Download";
-    btn.addEventListener("click", () => downloadFile(output.name));
-    row.appendChild(btn);
-    downloads.appendChild(row);
+  return withProcessing("Applying proxy predefined updates…", async () => {
+    const resp = await fetch(`/api/session/${state.sessionId}/proxy/predefined/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ifc_file: file, rows }),
+    });
+    const data = await resp.json();
+    if (el("proxyPredefApplyStatus")) el("proxyPredefApplyStatus").textContent = "Export ready.";
+    await refreshFiles();
+    const downloads = el("proxyPredefDownloads");
+    if (!downloads) return;
+    downloads.innerHTML = "";
+    [data.ifc, data.log_json, data.log_csv].forEach((output) => {
+      if (!output) return;
+      const row = document.createElement("div");
+      row.className = "file-row";
+      row.innerHTML = `<span class="file-name">${output.name}</span>`;
+      const btn = document.createElement("button");
+      btn.className = "btn secondary sm";
+      btn.textContent = "Download";
+      btn.addEventListener("click", () => downloadFile(output.name));
+      row.appendChild(btn);
+      downloads.appendChild(row);
+    });
   });
 }
 
 async function downloadFile(name) {
   if (!name) return;
   const url = `/api/session/${state.sessionId}/download?name=${encodeURIComponent(name)}`;
-  try {
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error("Download failed");
-    const blob = await resp.blob();
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = name;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(link.href);
-  } catch (e) {
-    alert(`Could not download ${name}`);
-  }
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
 
 async function downloadSelected() {
@@ -883,24 +928,26 @@ async function applyPendingChanges() {
       return rest;
     }),
   };
-  const resp = await fetch(`/api/session/${state.sessionId}/levels/batch`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await resp.json();
-  if (resp.ok) {
-    if (status) status.textContent = data.ifc ? `Wrote: ${data.ifc.name}` : "Saved.";
-    state.pendingActions = [];
-    renderPendingChanges();
-    await refreshFiles();
-    if (data.ifc?.name && el("levelsIfc")) {
-      el("levelsIfc").value = data.ifc.name;
+  return withProcessing("Saving level changes…", async () => {
+    const resp = await fetch(`/api/session/${state.sessionId}/levels/batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      if (status) status.textContent = data.ifc ? `Wrote: ${data.ifc.name}` : "Saved.";
+      state.pendingActions = [];
+      renderPendingChanges();
+      await refreshFiles();
+      if (data.ifc?.name && el("levelsIfc")) {
+        el("levelsIfc").value = data.ifc.name;
+      }
+      await loadLevels(true);
+    } else {
+      if (status) status.textContent = data.detail || "Failed to write IFC.";
     }
-    await loadLevels(true);
-  } else {
-    if (status) status.textContent = data.detail || "Failed to write IFC.";
-  }
+  });
 }
 
 function groupObjectsByType(objects) {
