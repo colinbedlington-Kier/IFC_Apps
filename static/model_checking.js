@@ -9,6 +9,8 @@ const mcState = {
   entityScopes: [],
 };
 
+const withProcessing = window.withProcessing || (async (_message, fn) => fn());
+
 function mcEsc(val) {
   if (val === null || val === undefined) return "";
   return String(val).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -302,10 +304,12 @@ async function loadSectionData(section) {
 async function loadAllSections() {
   mcState.pending = [];
   renderChangeLog();
-  for (const sec of mcState.sections) {
-    // eslint-disable-next-line no-await-in-loop
-    await loadSectionData(sec);
-  }
+  return withProcessing("Loading model checking data…", async () => {
+    for (const sec of mcState.sections) {
+      // eslint-disable-next-line no-await-in-loop
+      await loadSectionData(sec);
+    }
+  });
 }
 
 async function applyModelChanges() {
@@ -323,24 +327,26 @@ async function applyModelChanges() {
       mode: p.mode,
     })),
   };
-  const resp = await fetch(`/api/session/${state.sessionId}/checks/apply`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+  return withProcessing("Applying model checking edits…", async () => {
+    const resp = await fetch(`/api/session/${state.sessionId}/checks/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    mcState.pending = [];
+    renderChangeLog();
+    mcState.audit = data.audit || [];
+    renderAuditLog();
+    const dlBtn = document.getElementById("mcDownload");
+    if (dlBtn && data.ifc?.name) {
+      dlBtn.disabled = false;
+      dlBtn.dataset.file = data.ifc.name;
+    }
+    const summary = document.getElementById("mcSummary");
+    if (summary) summary.textContent = `Applied edits and saved ${data.ifc?.name || ""}`;
+    await refreshFiles();
   });
-  const data = await resp.json();
-  mcState.pending = [];
-  renderChangeLog();
-  mcState.audit = data.audit || [];
-  renderAuditLog();
-  const dlBtn = document.getElementById("mcDownload");
-  if (dlBtn && data.ifc?.name) {
-    dlBtn.disabled = false;
-    dlBtn.dataset.file = data.ifc.name;
-  }
-  const summary = document.getElementById("mcSummary");
-  if (summary) summary.textContent = `Applied edits and saved ${data.ifc?.name || ""}`;
-  await refreshFiles();
 }
 
 async function downloadLatestChecked() {
