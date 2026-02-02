@@ -16,59 +16,62 @@
           </div>
         </div>
         <div class="nav-tree" aria-label="Tool navigation">
-          <div class="nav-branch">
-            <div class="nav-root">
-              <a class="nav-link nav-tree-link nav-root-link {% if active=='upload' %}active{% endif %}" href="/">
+          <details class="nav-dropdown" open>
+            <summary class="nav-dropdown-summary">
+              <span class="nav-hamburger" aria-hidden="true">☰</span>
+              <a class="nav-link nav-root-link {% if active=='upload' %}active{% endif %}" href="/">
                 Upload & Session
               </a>
-            </div>
-            <div class="nav-children">
-              <a class="nav-link nav-tree-link nav-child {% if active=='files' %}active{% endif %}" href="/files">
+            </summary>
+            <div class="nav-dropdown-menu">
+              <a class="nav-link nav-child {% if active=='files' %}active{% endif %}" href="/files">
                 Session Files Download
               </a>
             </div>
-          </div>
-          <div class="nav-branch">
-            <div class="nav-root">
-              <span class="nav-link nav-tree-link nav-root-link nav-label">Tools</span>
-            </div>
-            <div class="nav-children">
-              <a class="nav-link nav-tree-link nav-child {% if active=='excel' %}active{% endif %}" href="/excel">
+          </details>
+          <details class="nav-dropdown">
+            <summary class="nav-dropdown-summary">
+              <span class="nav-hamburger" aria-hidden="true">☰</span>
+              <span class="nav-link nav-root-link nav-label">Tools</span>
+            </summary>
+            <div class="nav-dropdown-menu">
+              <a class="nav-link nav-child {% if active=='excel' %}active{% endif %}" href="/excel">
                 IFC to Excel (Extract and Update)
               </a>
-              <a class="nav-link nav-tree-link nav-child {% if active=='cleaner' %}active{% endif %}" href="/cleaner">
+              <a class="nav-link nav-child {% if active=='cleaner' %}active{% endif %}" href="/cleaner">
                 Pset Purge (Cleaner)
               </a>
-              <a class="nav-link nav-tree-link nav-child {% if active=='storeys' %}active{% endif %}" href="/storeys">
+              <a class="nav-link nav-child {% if active=='storeys' %}active{% endif %}" href="/storeys">
                 Storey & Global Z Control
               </a>
-              <a class="nav-link nav-tree-link nav-child {% if active=='levels' %}active{% endif %}" href="/levels">
+              <a class="nav-link nav-child {% if active=='levels' %}active{% endif %}" href="/levels">
                 Level Manager
               </a>
-              <a class="nav-link nav-tree-link nav-child {% if active=='proxy' %}active{% endif %}" href="/proxy">
+              <a class="nav-link nav-child {% if active=='proxy' %}active{% endif %}" href="/proxy">
                 Proxy to IFCClass
               </a>
             </div>
-          </div>
-          <div class="nav-branch">
-            <div class="nav-root">
-              <span class="nav-link nav-tree-link nav-root-link nav-label">WIP</span>
-            </div>
-            <div class="nav-children">
-              <a class="nav-link nav-tree-link nav-child {% if active=='presentation-layer' %}active{% endif %}" href="/presentation-layer">
+          </details>
+          <details class="nav-dropdown">
+            <summary class="nav-dropdown-summary">
+              <span class="nav-hamburger" aria-hidden="true">☰</span>
+              <span class="nav-link nav-root-link nav-label">WIP</span>
+            </summary>
+            <div class="nav-dropdown-menu">
+              <a class="nav-link nav-child {% if active=='presentation-layer' %}active{% endif %}" href="/presentation-layer">
                 Presentation Layer Purge
               </a>
-              <a class="nav-link nav-tree-link nav-child {% if active=='step2ifc' %}active{% endif %}" href="/step2ifc">
+              <a class="nav-link nav-child {% if active=='step2ifc' %}active{% endif %}" href="/step2ifc">
                 STEP to IFC
               </a>
-              <a class="nav-link nav-tree-link nav-child {% if active=='model-checking' %}active{% endif %}" href="/model-checking">
+              <a class="nav-link nav-child {% if active=='model-checking' %}active{% endif %}" href="/model-checking">
                 Model Checking
               </a>
-              <a class="nav-link nav-tree-link nav-child {% if active=='mappings' %}active{% endif %}" href="/admin/mappings">
+              <a class="nav-link nav-child {% if active=='mappings' %}active{% endif %}" href="/admin/mappings">
                 Admin / Mapping
               </a>
             </div>
-          </div>
+          </details>
         </div>
         <div class="session-badge" data-session-badge>Session establishing…</div>
       </nav>

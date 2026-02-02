@@ -30,6 +30,17 @@ const presentationOverrides = [
 
 const el = (id) => document.getElementById(id);
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { ...options, signal: controller.signal });
+    return resp;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 function setSessionBadge(text, ok = true) {
   const badges = [
     document.querySelector("[data-session-badge]"),
@@ -77,11 +88,14 @@ window.withProcessing = withProcessing;
 async function ensureSession() {
   try {
     const existing = localStorage.getItem("ifc_session_id");
-    const resp = await fetch("/api/session", {
+    const resp = await fetchWithTimeout("/api/session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session_id: existing }),
     });
+    if (!resp.ok) {
+      throw new Error(`Session request failed (${resp.status})`);
+    }
     const data = await resp.json();
     state.sessionId = data.session_id;
     localStorage.setItem("ifc_session_id", state.sessionId);
@@ -98,7 +112,7 @@ async function ensureSession() {
 async function refreshFiles() {
   if (!state.sessionId) return;
   try {
-    const resp = await fetch(`/api/session/${state.sessionId}/files`);
+    const resp = await fetchWithTimeout(`/api/session/${state.sessionId}/files`, {}, 8000);
     if (!resp.ok) throw new Error("Could not list files");
     const data = await resp.json();
     state.files = data.files || [];
@@ -1385,7 +1399,7 @@ function wireEvents() {
 document.addEventListener("DOMContentLoaded", async () => {
   state.uploadStatusEl = el("upload-status") || state.uploadStatusEl;
   state.uploadProgressEl = el("upload-progress") || state.uploadProgressEl;
-  await ensureSession();
   wireEvents();
   renderPendingChanges();
+  ensureSession();
 });
