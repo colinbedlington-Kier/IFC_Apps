@@ -426,6 +426,22 @@ def ensure_aggregates(parent, child, ifc):
             rel.RelatedObjects = list(rel.RelatedObjects) + [child]
 
 
+def reassign_aggregate(parent, child, ifc):
+    for rel in list(child.Decomposes or []):
+        if not rel.is_a("IfcRelAggregates"):
+            continue
+        if rel.RelatingObject == parent:
+            continue
+        related = list(rel.RelatedObjects)
+        if child in related:
+            related.remove(child)
+            if related:
+                rel.RelatedObjects = related
+            else:
+                ifc.remove(rel)
+    ensure_aggregates(parent, child, ifc)
+
+
 def parse_required_pairs(raw):
     if not raw or not isinstance(raw, str):
         return []
@@ -668,7 +684,7 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
                     site.Description = desc
                 ensure_aggregates(project, site, ifc)
                 if building is not None:
-                    ensure_aggregates(site, building, ifc)
+                    reassign_aggregate(site, building, ifc)
         elif dt == "Building":
             if building is None and add_new == "yes":
                 building = ifc.create_entity(
@@ -682,7 +698,7 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
                 if pd.notna(row.get("Description")):
                     building.Description = clean_value(row["Description"]) or building.Description
                 if site is not None:
-                    ensure_aggregates(site, building, ifc)
+                    reassign_aggregate(site, building, ifc)
                 else:
                     ensure_aggregates(project, building, ifc)
 
