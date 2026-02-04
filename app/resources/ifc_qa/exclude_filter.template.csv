@@ -1,0 +1,17 @@
+﻿" Filter Template - Enter text into rows in Column A to apply a 'contains' filter onto IFC Names, this will exclude objects from the csv outputs"
+Corner brick B3:B3
+Half brick B2:B2
+Full brick B1:B1
+Corner brick B4:B4
+Brick B5:B5
+Brick B6:B6
+IGNORE_
+Duct Insulation:
+Pipe Insulation:
+Slab Edge:
+CDL_Column Encasement Perimeter (Corner Encasement):Default - Create Types for Specific Member Size
+CDL_Column Encasement Perimeter (Updated D shape):Default - Create Types for Specific Member Size
+CDL_Column Encasement-Circular:1025mm Deep
+CDL_Column Encasement-Circular:550mm Deep
+CDL_Column Encasement-Circular:CDL_Column Encasement-Circular
+IGNORE

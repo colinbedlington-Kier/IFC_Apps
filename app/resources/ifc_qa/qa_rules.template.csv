@@ -1,0 +1,10 @@
+rule_id,category,page,table_name,scope_ifc_entity,scope_property_set,scope_property_name,scope_system_name,scope_classification_system,field,check_type,expected,fail_message,severity,enabled
+PRJ_NAME_REGEX,Project Naming,project_naming,IFC PROJECT,IfcProject|IfcSite|IfcBuilding|IfcBuildingStorey,,,,,IFC_Name,regex,${regex_ifc_name},Does not have a valid name,FAIL,True
+PRJ_DESC_REQUIRED,Project Naming,project_naming,IFC PROJECT,IfcProject|IfcSite|IfcBuilding|IfcBuildingStorey,,,,,IFC_Description,required,,Does not have a valid description,FAIL,True
+OBJ_NAME_REGEX,Occurrence Naming,occurrence_naming,IFC OBJECT TYPE,*,,,,,IFC_Name,regex,${regex_ifc_name},Does not have a valid name,FAIL,True
+OBJ_DUPLICATE_NAME,Occurrence Naming,occurrence_naming,IFC OBJECT TYPE,*,,,,,IFC_Name_Duplicate,equals,True,Name duplicated in model file,FAIL,True
+TYPE_NAME_REGEX,Type Naming,type_naming,IFC OBJECT TYPE,*,,,,,IFC_Type_Name,regex,${regex_ifc_type},Type name incorrectly formatted,FAIL,True
+TYPE_PREDEFINED_REQUIRED,Type Naming,type_naming,IFC OBJECT TYPE,*,,,,,IFC_Predefined_Type,required,,Does not have a predefined type,FAIL,True
+SYSTEM_NAME_REGEX,System,system,IFC SYSTEM,*,,,,,System_Name,regex,${regex_ifc_system},System name incorrectly formatted,FAIL,True
+CLASS_SYSTEM_REQUIRED,Classification Values,classification_values,IFC CLASSIFICATION,*,,,,,Classification_System,required,,Classification system missing,FAIL,True
+CLASS_CODE_REQUIRED,Classification Values,classification_values,IFC CLASSIFICATION,*,,,,,Classification_Code,required,,Classification code missing,FAIL,True
