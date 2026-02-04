@@ -50,6 +50,26 @@
               <a class="nav-link nav-child {% if active=='proxy' %}active{% endif %}" href="/proxy">
                 Proxy to IFCClass
               </a>
+              <a class="nav-link nav-child {% if active=='data-extractor' %}active{% endif %}" href="/data-extractor">
+                IFC_DataExtractor (CSV Data Model)
+              </a>
+            </div>
+          </details>
+          <details class="nav-dropdown">
+            <summary class="nav-dropdown-summary">
+              <span class="nav-hamburger" aria-hidden="true">☰</span>
+              <span class="nav-link nav-root-link nav-label">IFC Data QA</span>
+            </summary>
+            <div class="nav-dropdown-menu">
+              <a class="nav-link nav-child {% if active=='ifc-qa' and qa_page=='extractor' %}active{% endif %}" href="/ifc-qa/extractor">
+                Extractor
+              </a>
+              <a class="nav-link nav-child {% if active=='ifc-qa' and qa_page=='dashboard' %}active{% endif %}" href="/ifc-qa/dashboard">
+                Dashboard
+              </a>
+              <a class="nav-link nav-child {% if active=='ifc-qa' and qa_page=='config' %}active{% endif %}" href="/ifc-qa/config">
+                Config
+              </a>
             </div>
           </details>
           <details class="nav-dropdown">
@@ -89,5 +109,6 @@
     </div>
 
     <script src="/static/app.js"></script>
+    {% block scripts %}{% endblock %}
   </body>
 </html>
