@@ -177,6 +177,69 @@ nav {
 .nav-label {
   cursor: default;
 }
+.checkbox-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin-top: 6px;
+}
+.regex-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin-top: 6px;
+}
+.regex-grid input {
+  width: 100%;
+}
+.progress-track {
+  background: rgba(255,255,255,0.06);
+  border-radius: 999px;
+  height: 12px;
+  overflow: hidden;
+  margin: 10px 0 6px;
+}
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.2s ease;
+}
+.log-box {
+  width: 100%;
+  margin-top: 12px;
+  background: rgba(10, 12, 20, 0.7);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text);
+  padding: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+.download-link {
+  margin-top: 10px;
+}
+.download-link a {
+  color: var(--accent);
+  font-weight: 600;
+}
+.table-scroll {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.data-table th,
+.data-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
 .session-badge {
   align-self: flex-end;
   font-size: 13px;

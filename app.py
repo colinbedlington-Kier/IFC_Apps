@@ -1,4 +1,5 @@
 import argparse
+import configparser
 import csv
 import datetime
 import json
@@ -10,12 +11,14 @@ import sys
 import tempfile
 import traceback
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import ifcopenshell
 import ifcopenshell.api
 import ifcopenshell.util.element
+import ifcopenshell.util.placement
 import pandas as pd
 from fastapi import BackgroundTasks, Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
@@ -52,6 +55,7 @@ except Exception as exc:  # pragma: no cover - runtime dependency checks
     STEP2IFC_IMPORT_ERROR = str(exc)
 
 APP_LOGGER = logging.getLogger("ifc_app")
+RESOURCE_DIR = Path(__file__).resolve().parent / "resources"
 
 
 # ----------------------------------------------------------------------------
@@ -122,6 +126,152 @@ class SessionStore:
 
 SESSION_STORE = SessionStore(os.path.join(tempfile.gettempdir(), "ifc_app_sessions"))
 STEP2IFC_JOBS: Dict[str, Dict[str, Any]] = {}
+DATA_EXTRACT_JOBS: Dict[str, Dict[str, Any]] = {}
+
+
+# ----------------------------------------------------------------------------
+# Data extractor helpers
+# ----------------------------------------------------------------------------
+
+def load_default_config() -> Dict[str, str]:
+    config_path = RESOURCE_DIR / "configfile.ini"
+    parser = configparser.RawConfigParser()
+    if not config_path.exists():
+        return {
+            "regex_ifc_name": "",
+            "regex_ifc_type": "",
+            "regex_ifc_system": "",
+            "regex_ifc_layer": "",
+            "regex_ifc_name_code": "",
+            "regex_ifc_type_code": "",
+            "regex_ifc_system_code": "",
+        }
+    parser.read(config_path)
+    section = "RegularExpressions"
+    return {
+        "regex_ifc_name": parser.get(section, "regex_ifc_name", fallback=""),
+        "regex_ifc_type": parser.get(section, "regex_ifc_type", fallback=""),
+        "regex_ifc_system": parser.get(section, "regex_ifc_system", fallback=""),
+        "regex_ifc_layer": parser.get(section, "regex_ifc_layer", fallback=""),
+        "regex_ifc_name_code": parser.get(section, "regex_ifc_name_code", fallback=""),
+        "regex_ifc_type_code": parser.get(section, "regex_ifc_type_code", fallback=""),
+        "regex_ifc_system_code": parser.get(section, "regex_ifc_system_code", fallback=""),
+    }
+
+
+def _clean_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return ", ".join(_clean_value(v) for v in value if v is not None)
+    return str(value)
+
+
+def _line_ref(entity: Any) -> str:
+    if entity is None:
+        return ""
+    return f"#{entity.id()}="
+
+
+def _regex_check(pattern: str, value: str) -> str:
+    if not pattern:
+        return ""
+    try:
+        return "True" if re.search(pattern, value or "") else "False"
+    except re.error:
+        return "False"
+
+
+def _regex_extract(pattern: str, value: str) -> str:
+    if not pattern:
+        return ""
+    try:
+        match = re.search(pattern, value or "")
+    except re.error:
+        return ""
+    if not match:
+        return ""
+    if match.groups():
+        return match.group(1)
+    return match.group(0)
+
+
+def _get_layers_name(entity: Any) -> str:
+    try:
+        layers = ifcopenshell.util.element.get_layers(entity) or []
+    except Exception:
+        return ""
+    for layer in layers:
+        name = getattr(layer, "Name", "") or ""
+        if name:
+            return name
+    return ""
+
+
+def _get_object_xyz(entity: Any) -> str:
+    placement = getattr(entity, "ObjectPlacement", None)
+    if not placement:
+        return ""
+    try:
+        matrix = ifcopenshell.util.placement.get_local_placement(placement)
+    except Exception:
+        return ""
+    if matrix is None or len(matrix) < 3:
+        return ""
+    try:
+        x = float(matrix[0][3])
+        y = float(matrix[1][3])
+        z = float(matrix[2][3])
+    except Exception:
+        return ""
+    return f"{x:.3f},{y:.3f},{z:.3f}"
+
+
+def _read_csv_first_column(path: Path) -> List[str]:
+    values: List[str] = []
+    if not path.exists():
+        return values
+    with open(path, newline="", encoding="utf-8") as handle:
+        reader = csv.reader(handle)
+        for row in reader:
+            if not row:
+                continue
+            value = row[0].strip()
+            if not value:
+                continue
+            if value.lower().startswith("exclude"):
+                continue
+            values.append(value)
+    return values
+
+
+def _load_pset_template(path: Path) -> Dict[str, List[str]]:
+    mapping: Dict[str, List[str]] = {}
+    if not path.exists():
+        return mapping
+    with open(path, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            entity_type = (row.get("IFC_Entity_Occurrence_Type") or "").strip()
+            psets_raw = (row.get("Pset_Dictionaries") or "").strip()
+            if not entity_type:
+                continue
+            psets: List[str] = []
+            if psets_raw:
+                sep = ";" if ";" in psets_raw else ","
+                psets = [p.strip() for p in psets_raw.split(sep) if p.strip()]
+            mapping[entity_type] = psets
+    return mapping
+
+
+def _iter_object_elements(model: ifcopenshell.file) -> List[Any]:
+    objects: List[Any] = []
+    spatial_types = {"IfcProject", "IfcSite", "IfcBuilding", "IfcBuildingStorey", "IfcSpace"}
+    for obj in model.by_type("IfcProduct"):
+        if obj.is_a() in spatial_types:
+            continue
+        objects.append(obj)
+    return objects
 
 
 # ----------------------------------------------------------------------------
@@ -2729,6 +2879,472 @@ def run_step2ifc_auto_job(job_id: str, session_id: str, input_path: Path, output
     )
 
 
+def update_data_extract_job(job_id: str, **updates: Any) -> None:
+    job = DATA_EXTRACT_JOBS.get(job_id)
+    if not job:
+        return
+    job.update(updates)
+
+
+def _write_csv_rows(path: Path, header: List[str], rows: List[List[Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        for row in rows:
+            writer.writerow([_clean_value(v) for v in row])
+
+
+def _write_model_table(model: ifcopenshell.file, path: Path, source_file: str) -> None:
+    header = ["Source_File", "IFC_Schema", "IFC_Description", "Entity_Count"]
+    rows = [
+        [
+            source_file,
+            getattr(model, "schema", ""),
+            _clean_value(getattr(model, "description", "")),
+            len(model),
+        ]
+    ]
+    _write_csv_rows(path, header, rows)
+
+
+def _format_child_entities(entity: Any) -> str:
+    try:
+        children = ifcopenshell.util.element.get_decomposition(entity) or []
+    except Exception:
+        children = []
+    parts = []
+    for child in children:
+        name = getattr(child, "Name", "") or getattr(child, "LongName", "") or ""
+        parts.append(f"{_line_ref(child)}{child.is_a()}({name})")
+    return "; ".join(parts)
+
+
+def _write_project_table(model: ifcopenshell.file, path: Path, source_file: str) -> None:
+    header = [
+        "IFC_Line_Ref",
+        "Source_File",
+        "IFC_Name",
+        "IFC_GlobalId",
+        "IFC_Entity",
+        "IFC_Description",
+        "IFC_LongName",
+        "Child_Entities",
+    ]
+    rows: List[List[Any]] = []
+    for ifc_type in ["IfcProject", "IfcSite", "IfcBuilding", "IfcBuildingStorey"]:
+        for entity in model.by_type(ifc_type):
+            rows.append(
+                [
+                    _line_ref(entity),
+                    source_file,
+                    getattr(entity, "Name", "") or "",
+                    getattr(entity, "GlobalId", "") or "",
+                    entity.is_a(),
+                    getattr(entity, "Description", "") or "",
+                    getattr(entity, "LongName", "") or "",
+                    _format_child_entities(entity),
+                ]
+            )
+    _write_csv_rows(path, header, rows)
+
+
+def _write_object_table(
+    objects: List[Any],
+    path: Path,
+    source_file: str,
+    regexes: Dict[str, str],
+) -> Dict[str, Any]:
+    header = [
+        "IFC_Line_Ref",
+        "Source_File",
+        "IFC_Name",
+        "IFC_GlobalId",
+        "IFC_Entity",
+        "IFC_Description",
+        "IFC_ObjectType",
+        "IFC_Type",
+        "IFC_Type_Name",
+        "IFC_Predefined_Type",
+        "IFC_Layer",
+        "IFC_Tag",
+        "IFC_Name_Syntax_Check",
+        "IFC_Name_Short_Code",
+        "IFC_Type_Syntax_Check",
+        "IFC_Name_Type_Code",
+        "IFC_Layer_Syntax_Check",
+        "IFC_Name_Duplicate",
+        "IFC_LongName",
+        "IFC_Type_Line_Ref",
+        "IFC_Type_Description",
+        "IFC_TypeId",
+        "Coordinates_xyz",
+    ]
+    name_counts: Dict[str, int] = {}
+    for obj in objects:
+        name = getattr(obj, "Name", "") or ""
+        if name:
+            name_counts[name] = name_counts.get(name, 0) + 1
+    rows: List[List[Any]] = []
+    for obj in objects:
+        name = getattr(obj, "Name", "") or ""
+        type_obj = ifcopenshell.util.element.get_type(obj)
+        type_name = getattr(type_obj, "Name", "") if type_obj else ""
+        layer_name = _get_layers_name(obj)
+        rows.append(
+            [
+                _line_ref(obj),
+                source_file,
+                name,
+                getattr(obj, "GlobalId", "") or "",
+                obj.is_a(),
+                getattr(obj, "Description", "") or "",
+                getattr(obj, "ObjectType", "") or "",
+                type_obj.is_a() if type_obj else "",
+                type_name or "",
+                getattr(obj, "PredefinedType", "") or "",
+                layer_name,
+                getattr(obj, "Tag", "") or "",
+                _regex_check(regexes.get("regex_ifc_name", ""), name),
+                _regex_extract(regexes.get("regex_ifc_name_code", ""), name),
+                _regex_check(regexes.get("regex_ifc_type", ""), type_name),
+                _regex_extract(regexes.get("regex_ifc_type_code", ""), type_name),
+                _regex_check(regexes.get("regex_ifc_layer", ""), layer_name),
+                "True" if name and name_counts.get(name, 0) > 1 else "False",
+                getattr(obj, "LongName", "") or "",
+                _line_ref(type_obj),
+                getattr(type_obj, "Description", "") if type_obj else "",
+                getattr(type_obj, "GlobalId", "") if type_obj else "",
+                _get_object_xyz(obj),
+            ]
+        )
+    _write_csv_rows(path, header, rows)
+    return {"objects": objects, "name_counts": name_counts}
+
+
+def _write_classification_table(
+    model: ifcopenshell.file,
+    path: Path,
+    source_file: str,
+    include_ids: Optional[set] = None,
+) -> None:
+    header = [
+        "Source_File",
+        "IFC_GlobalId",
+        "IFC_Entity",
+        "Classification_System",
+        "Classification_Name",
+        "Classification_Code",
+        "Classification_Description",
+    ]
+    rows: List[List[Any]] = []
+    for rel in model.by_type("IfcRelAssociatesClassification"):
+        related = getattr(rel, "RelatedObjects", []) or []
+        classification = getattr(rel, "RelatingClassification", None)
+        if not classification:
+            continue
+        sys_name = getattr(classification, "Name", "") or ""
+        code = getattr(classification, "Identification", "") or ""
+        desc = getattr(classification, "Description", "") or ""
+        if classification.is_a("IfcClassificationReference"):
+            sys_name = getattr(classification, "ReferencedSource", None) and getattr(
+                classification.ReferencedSource, "Name", ""
+            )
+            sys_name = sys_name or getattr(classification, "Name", "") or ""
+            code = getattr(classification, "Identification", "") or getattr(classification, "ItemReference", "") or ""
+            desc = getattr(classification, "Description", "") or ""
+        for obj in related:
+            if include_ids is not None and obj.id() not in include_ids:
+                continue
+            rows.append(
+                [
+                    source_file,
+                    getattr(obj, "GlobalId", "") or "",
+                    obj.is_a(),
+                    sys_name or "",
+                    getattr(classification, "Name", "") or "",
+                    code or "",
+                    desc or "",
+                ]
+            )
+    _write_csv_rows(path, header, rows)
+
+
+def _write_system_table(
+    model: ifcopenshell.file,
+    path: Path,
+    source_file: str,
+    include_ids: Optional[set] = None,
+) -> None:
+    header = [
+        "Source_File",
+        "IFC_GlobalId",
+        "IFC_Entity",
+        "System_Name",
+        "System_GlobalId",
+        "System_Description",
+    ]
+    rows: List[List[Any]] = []
+    for rel in model.by_type("IfcRelAssignsToGroup"):
+        group = getattr(rel, "RelatingGroup", None)
+        if not group or not group.is_a("IfcSystem"):
+            continue
+        for obj in getattr(rel, "RelatedObjects", []) or []:
+            if include_ids is not None and obj.id() not in include_ids:
+                continue
+            rows.append(
+                [
+                    source_file,
+                    getattr(obj, "GlobalId", "") or "",
+                    obj.is_a(),
+                    getattr(group, "Name", "") or "",
+                    getattr(group, "GlobalId", "") or "",
+                    getattr(group, "Description", "") or "",
+                ]
+            )
+    _write_csv_rows(path, header, rows)
+
+
+def _write_spatial_table(
+    model: ifcopenshell.file,
+    path: Path,
+    source_file: str,
+    objects: List[Any],
+) -> None:
+    header = [
+        "Source_File",
+        "IFC_GlobalId",
+        "IFC_Entity",
+        "Container_Space",
+        "Container_Storey",
+        "Container_Building",
+        "Container_Site",
+        "Container_Project",
+    ]
+    rows: List[List[Any]] = []
+    for obj in objects:
+        container = ifcopenshell.util.element.get_container(obj)
+        space = storey = building = site = project = None
+        current = container
+        while current:
+            if current.is_a("IfcSpace"):
+                space = current
+            elif current.is_a("IfcBuildingStorey"):
+                storey = current
+            elif current.is_a("IfcBuilding"):
+                building = current
+            elif current.is_a("IfcSite"):
+                site = current
+            elif current.is_a("IfcProject"):
+                project = current
+            current = ifcopenshell.util.element.get_container(current)
+        rows.append(
+            [
+                source_file,
+                getattr(obj, "GlobalId", "") or "",
+                obj.is_a(),
+                _line_ref(space),
+                _line_ref(storey),
+                _line_ref(building),
+                _line_ref(site),
+                _line_ref(project),
+            ]
+        )
+    _write_csv_rows(path, header, rows)
+
+
+def _write_pset_template_table(
+    path: Path,
+    source_file: str,
+    template_map: Dict[str, List[str]],
+    object_type_counts: Dict[str, int],
+) -> None:
+    header = ["Source_File", "IFC_Entity_Occurrence_Type", "Pset_Name", "Applied_Count"]
+    rows: List[List[Any]] = []
+    for entity_type, psets in template_map.items():
+        if not psets:
+            rows.append([source_file, entity_type, "", object_type_counts.get(entity_type, 0)])
+        for pset in psets:
+            rows.append([source_file, entity_type, pset, object_type_counts.get(entity_type, 0)])
+    _write_csv_rows(path, header, rows)
+
+
+def _write_property_table(
+    model: ifcopenshell.file,
+    path: Path,
+    source_file: str,
+    objects: List[Any],
+    template_map: Dict[str, List[str]],
+) -> None:
+    header = [
+        "Source_File",
+        "IFC_GlobalId",
+        "IFC_Entity",
+        "Pset_Name",
+        "Property_Name",
+        "Property_Value",
+        "Property_Value_Type",
+        "Unit",
+        "IFC_TypeId",
+    ]
+    rows: List[List[Any]] = []
+    for obj in objects:
+        type_obj = ifcopenshell.util.element.get_type(obj)
+        obj_type = obj.is_a()
+        type_name = type_obj.is_a() if type_obj else ""
+        allowed = None
+        if obj_type in template_map:
+            allowed = template_map[obj_type]
+        elif type_name in template_map:
+            allowed = template_map[type_name]
+        psets = ifcopenshell.util.element.get_psets(obj, psets_only=True, include_inherited=True) or {}
+        if allowed is None:
+            continue
+        if not allowed:
+            allowed = list(psets.keys())
+        for pset_name in allowed:
+            props = psets.get(pset_name) or {}
+            for prop_name, value in props.items():
+                rows.append(
+                    [
+                        source_file,
+                        getattr(obj, "GlobalId", "") or "",
+                        obj.is_a(),
+                        pset_name,
+                        prop_name,
+                        _clean_value(value),
+                        type(value).__name__,
+                        "",
+                        getattr(type_obj, "GlobalId", "") if type_obj else "",
+                    ]
+                )
+    _write_csv_rows(path, header, rows)
+
+
+def run_data_extractor_job(
+    job_id: str,
+    session_id: str,
+    ifc_files: List[str],
+    exclude_filter: Optional[str],
+    pset_template: Optional[str],
+    tables: List[str],
+    regexes: Dict[str, str],
+) -> None:
+    session_root = Path(SESSION_STORE.ensure(session_id))
+    work_dir = Path(tempfile.mkdtemp(prefix="data_extractor_", dir=session_root))
+    log_lines: List[str] = []
+
+    def log(message: str) -> None:
+        log_lines.append(message)
+        update_data_extract_job(job_id, logs=log_lines)
+
+    total_tables = max(len(tables), 1)
+    update_data_extract_job(job_id, status="running", progress=2, message="Starting extraction", logs=log_lines)
+
+    exclude_path = Path(exclude_filter) if exclude_filter else RESOURCE_DIR / "Exclude_Filter_Template.csv"
+    pset_path = Path(pset_template) if pset_template else RESOURCE_DIR / "GPA_Pset_Template.csv"
+    exclude_terms = _read_csv_first_column(exclude_path)
+    template_map = _load_pset_template(pset_path)
+
+    outputs: List[Dict[str, Any]] = []
+    preview_payload: Optional[Dict[str, Any]] = None
+
+    for file_index, file_name in enumerate(ifc_files, start=1):
+        safe_name = sanitize_filename(file_name)
+        input_path = session_root / safe_name
+        if not input_path.exists():
+            log(f"[{safe_name}] Missing IFC file.")
+            continue
+        base_name = os.path.splitext(safe_name)[0]
+        file_dir = work_dir / base_name
+        file_dir.mkdir(parents=True, exist_ok=True)
+        log(f"[{safe_name}] Opening IFC...")
+        try:
+            model = ifcopenshell.open(str(input_path))
+        except Exception as exc:
+            log(f"[{safe_name}] ERROR opening IFC: {exc}")
+            continue
+
+        progress_base = int((file_index - 1) / max(len(ifc_files), 1) * 100)
+        per_file_step = int(100 / max(len(ifc_files), 1))
+
+        all_objects = _iter_object_elements(model)
+        objects = [o for o in all_objects if not any(t in (getattr(o, "Name", "") or "") for t in exclude_terms)]
+        include_ids = {obj.id() for obj in objects}
+        object_type_counts: Dict[str, int] = {}
+        for obj in objects:
+            object_type_counts[obj.is_a()] = object_type_counts.get(obj.is_a(), 0) + 1
+
+        for table_index, table_name in enumerate(tables, start=1):
+            update_data_extract_job(
+                job_id,
+                progress=min(progress_base + int((table_index / total_tables) * per_file_step), 99),
+                message=f"{safe_name}: {table_name}",
+            )
+            try:
+                if table_name == "Model Data Table":
+                    out_path = file_dir / f"IFC MODEL - {base_name}.csv"
+                    _write_model_table(model, out_path, safe_name)
+                elif table_name == "Project Data Table":
+                    out_path = file_dir / f"IFC PROJECT - {base_name}.csv"
+                    _write_project_table(model, out_path, safe_name)
+                elif table_name == "Object Data Table":
+                    out_path = file_dir / f"IFC OBJECT TYPE - {base_name}.csv"
+                    _write_object_table(objects, out_path, safe_name, regexes)
+                elif table_name == "Property Data Table":
+                    out_path = file_dir / f"IFC PROPERTY - {base_name}.csv"
+                    _write_property_table(model, out_path, safe_name, objects, template_map)
+                elif table_name == "Classification Data Table":
+                    out_path = file_dir / f"IFC CLASSIFICATION - {base_name}.csv"
+                    _write_classification_table(model, out_path, safe_name, include_ids if include_ids else None)
+                elif table_name == "Spatial Structure Data Table":
+                    out_path = file_dir / f"IFC SPATIAL STRUCTURE - {base_name}.csv"
+                    _write_spatial_table(model, out_path, safe_name, objects)
+                elif table_name == "System Data Table":
+                    out_path = file_dir / f"IFC SYSTEM - {base_name}.csv"
+                    _write_system_table(model, out_path, safe_name, include_ids if include_ids else None)
+                elif table_name == "Pset Template Data Table":
+                    out_path = file_dir / f"IFC PSET TEMPLATE - {base_name}.csv"
+                    _write_pset_template_table(out_path, safe_name, template_map, object_type_counts)
+                else:
+                    continue
+            except Exception as exc:
+                log(f"[{safe_name}] ERROR writing {table_name}: {exc}")
+
+        log(f"[{safe_name}] Extraction complete.")
+
+        if preview_payload is None:
+            preview_candidates = [
+                file_dir / f"IFC OBJECT TYPE - {base_name}.csv",
+                file_dir / f"IFC PROJECT - {base_name}.csv",
+                file_dir / f"IFC MODEL - {base_name}.csv",
+            ]
+            for candidate in preview_candidates:
+                if candidate.exists():
+                    df = pd.read_csv(candidate, nrows=200)
+                    preview_payload = {"columns": list(df.columns), "rows": df.fillna("").values.tolist()}
+                    break
+
+    zip_name = f"ifc_data_extract_{uuid.uuid4().hex}.zip"
+    zip_path = session_root / zip_name
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zipf:
+        for file_path in work_dir.rglob("*.csv"):
+            arcname = file_path.relative_to(work_dir)
+            zipf.write(file_path, arcname.as_posix())
+    outputs.append({"name": zip_name, "url": f"/api/session/{session_id}/download?name={zip_name}"})
+
+    update_data_extract_job(
+        job_id,
+        status="done",
+        progress=100,
+        message="Extraction complete",
+        done=True,
+        error=False,
+        outputs=outputs,
+        preview=preview_payload,
+    )
+
+
 def apply_edits(session_id: str, in_path: str, edits: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
     if not edits:
         raise HTTPException(status_code=400, detail="No edits supplied")
@@ -2806,6 +3422,14 @@ def cleaner_page(request: Request):
 @app.get("/excel", response_class=HTMLResponse)
 def excel_page(request: Request):
     return templates.TemplateResponse("excel.html", {"request": request, "active": "excel"})
+
+
+@app.get("/data-extractor", response_class=HTMLResponse)
+def data_extractor_page(request: Request):
+    return templates.TemplateResponse(
+        "data_extractor.html",
+        {"request": request, "active": "data-extractor", "regex_defaults": load_default_config()},
+    )
 
 
 @app.get("/storeys", response_class=HTMLResponse)
@@ -2964,6 +3588,77 @@ async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
             dst.write(content)
         saved.append({"name": safe, "size": os.path.getsize(dest)})
     return {"files": saved}
+
+
+@app.post("/api/session/{session_id}/data-extractor/start")
+def start_data_extractor(session_id: str, payload: Dict[str, Any] = Body(...), background_tasks: BackgroundTasks = None):
+    root = Path(SESSION_STORE.ensure(session_id))
+    ifc_files = payload.get("ifc_files") or []
+    tables = payload.get("tables") or []
+    if not ifc_files:
+        raise HTTPException(status_code=400, detail="IFC files are required")
+    if not tables:
+        raise HTTPException(status_code=400, detail="Select at least one table")
+    exclude_filter_name = payload.get("exclude_filter")
+    pset_template_name = payload.get("pset_template")
+    pset_template_default = payload.get("pset_template_default") or "GPA_Pset_Template.csv"
+    regex_overrides = payload.get("regex_overrides") or {}
+
+    defaults = load_default_config()
+    defaults.update({k: v for k, v in regex_overrides.items() if v is not None})
+
+    exclude_path = None
+    if exclude_filter_name:
+        safe = sanitize_filename(exclude_filter_name)
+        exclude_candidate = root / safe
+        if exclude_candidate.exists():
+            exclude_path = str(exclude_candidate)
+
+    pset_path = None
+    if pset_template_name:
+        safe = sanitize_filename(pset_template_name)
+        pset_candidate = root / safe
+        if pset_candidate.exists():
+            pset_path = str(pset_candidate)
+    if not pset_path and pset_template_default:
+        default_candidate = RESOURCE_DIR / sanitize_filename(pset_template_default)
+        if default_candidate.exists():
+            pset_path = str(default_candidate)
+
+    job_id = uuid.uuid4().hex
+    DATA_EXTRACT_JOBS[job_id] = {
+        "job_id": job_id,
+        "status": "queued",
+        "progress": 0,
+        "message": "Queued",
+        "done": False,
+        "error": False,
+        "outputs": [],
+        "logs": [],
+        "preview": None,
+    }
+    if background_tasks is None:
+        background_tasks = BackgroundTasks()
+    background_tasks.add_task(
+        run_data_extractor_job,
+        job_id,
+        session_id,
+        ifc_files,
+        exclude_path,
+        pset_path,
+        tables,
+        defaults,
+    )
+    return {"job_id": job_id, "status_url": f"/api/session/{session_id}/data-extractor/{job_id}"}
+
+
+@app.get("/api/session/{session_id}/data-extractor/{job_id}")
+def get_data_extractor_status(session_id: str, job_id: str):
+    SESSION_STORE.ensure(session_id)
+    job = DATA_EXTRACT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 
 @app.get("/api/session/{session_id}/download")

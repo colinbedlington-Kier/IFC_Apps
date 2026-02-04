@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title">
+    <h2>IFC_DataExtractor (CSV Data Model)</h2>
+    <span class="badge">Server-side IFC extraction</span>
+  </div>
+
+  <div class="two-col">
+    <div>
+      <label for="dataIfcFiles">IFC files (multiple)</label>
+      <input id="dataIfcFiles" type="file" multiple accept=".ifc" />
+
+      <label for="dataExcludeFilter" style="margin-top: 10px">Exclude filter CSV (optional)</label>
+      <input id="dataExcludeFilter" type="file" accept=".csv" />
+      <div class="muted">Default: resources/Exclude_Filter_Template.csv</div>
+
+      <label for="dataPsetTemplate" style="margin-top: 10px">Pset template CSV (optional)</label>
+      <input id="dataPsetTemplate" type="file" accept=".csv" />
+      <label for="dataPsetDefault" style="margin-top: 8px">Default template (when no upload)</label>
+      <select id="dataPsetDefault">
+        <option value="GPA_Pset_Template.csv" selected>GPA_Pset_Template.csv</option>
+        <option value="Pset_Template.csv">Pset_Template.csv</option>
+      </select>
+      <div class="muted">Defaults load from resources/</div>
+
+      <label style="margin-top: 12px">Tables to output</label>
+      <div class="checkbox-grid" id="dataTables">
+        <label><input type="checkbox" value="Model Data Table" checked /> Model Data Table</label>
+        <label><input type="checkbox" value="Project Data Table" checked /> Project Data Table</label>
+        <label><input type="checkbox" value="Object Data Table" checked /> Object Data Table</label>
+        <label><input type="checkbox" value="Property Data Table" checked /> Property Data Table</label>
+        <label><input type="checkbox" value="Classification Data Table" checked /> Classification Data Table</label>
+        <label><input type="checkbox" value="Spatial Structure Data Table" checked /> Spatial Structure Data Table</label>
+        <label><input type="checkbox" value="System Data Table" checked /> System Data Table</label>
+        <label><input type="checkbox" value="Pset Template Data Table" checked /> Pset Template Data Table</label>
+      </div>
+    </div>
+
+    <div>
+      <label>Regular Expressions (session overrides)</label>
+      <div class="regex-grid">
+        <label>IFC Name
+          <input id="regex_ifc_name" type="text" value="{{ regex_defaults.regex_ifc_name }}" />
+        </label>
+        <label>IFC Type
+          <input id="regex_ifc_type" type="text" value="{{ regex_defaults.regex_ifc_type }}" />
+        </label>
+        <label>IFC System
+          <input id="regex_ifc_system" type="text" value="{{ regex_defaults.regex_ifc_system }}" />
+        </label>
+        <label>IFC Layer
+          <input id="regex_ifc_layer" type="text" value="{{ regex_defaults.regex_ifc_layer }}" />
+        </label>
+        <label>IFC Name Code
+          <input id="regex_ifc_name_code" type="text" value="{{ regex_defaults.regex_ifc_name_code }}" />
+        </label>
+        <label>IFC Type Code
+          <input id="regex_ifc_type_code" type="text" value="{{ regex_defaults.regex_ifc_type_code }}" />
+        </label>
+        <label>IFC System Code
+          <input id="regex_ifc_system_code" type="text" value="{{ regex_defaults.regex_ifc_system_code }}" />
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <button class="btn" id="dataExtractorStart" style="margin-top: 16px">Start Extraction</button>
+</div>
+
+<div class="card" style="margin-top: 16px">
+  <div class="section-title">
+    <h3>Extraction progress</h3>
+  </div>
+  <div class="progress-track" aria-live="polite">
+    <div class="progress-fill" id="dataExtractorProgress"></div>
+  </div>
+  <div class="muted" id="dataExtractorStatus">Waiting for extraction…</div>
+  <textarea id="dataExtractorLog" class="log-box" rows="10" readonly></textarea>
+  <div id="dataExtractorDownload" class="download-link"></div>
+</div>
+
+<div class="card" style="margin-top: 16px">
+  <div class="section-title">
+    <h3>Preview</h3>
+  </div>
+  <div class="table-scroll">
+    <table class="data-table" id="dataExtractorPreview"></table>
+  </div>
+</div>
+{% endblock %}
