@@ -20,7 +20,7 @@ import ifcopenshell.api
 import ifcopenshell.util.element
 import ifcopenshell.util.placement
 import pandas as pd
-from fastapi import BackgroundTasks, Body, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -56,6 +56,7 @@ except Exception as exc:  # pragma: no cover - runtime dependency checks
 
 APP_LOGGER = logging.getLogger("ifc_app")
 RESOURCE_DIR = Path(__file__).resolve().parent / "resources"
+QA_RESOURCE_DIR = Path(__file__).resolve().parent / "app" / "resources" / "ifc_qa"
 
 
 # ----------------------------------------------------------------------------
@@ -127,6 +128,7 @@ class SessionStore:
 SESSION_STORE = SessionStore(os.path.join(tempfile.gettempdir(), "ifc_app_sessions"))
 STEP2IFC_JOBS: Dict[str, Dict[str, Any]] = {}
 DATA_EXTRACT_JOBS: Dict[str, Dict[str, Any]] = {}
+IFC_QA_JOBS: Dict[str, Dict[str, Any]] = {}
 
 
 # ----------------------------------------------------------------------------
@@ -272,6 +274,59 @@ def _iter_object_elements(model: ifcopenshell.file) -> List[Any]:
             continue
         objects.append(obj)
     return objects
+
+
+def _safe_get_psets(entity: Any) -> Dict[str, Dict[str, Any]]:
+    try:
+        return ifcopenshell.util.element.get_psets(entity, psets_only=True, include_inherited=True) or {}
+    except TypeError:
+        return ifcopenshell.util.element.get_psets(entity, psets_only=True) or {}
+
+
+def _qa_override_dir(session_id: str) -> Path:
+    root = Path(SESSION_STORE.ensure(session_id))
+    override_dir = root / "ifc_qa_overrides"
+    override_dir.mkdir(parents=True, exist_ok=True)
+    return override_dir
+
+
+def _qa_default_paths() -> Dict[str, Path]:
+    return {
+        "qa_rules": QA_RESOURCE_DIR / "qa_rules.template.csv",
+        "qa_property_requirements": QA_RESOURCE_DIR / "qa_property_requirements.template.csv",
+        "qa_unacceptable_values": QA_RESOURCE_DIR / "qa_unacceptable_values.template.csv",
+        "regex_patterns": QA_RESOURCE_DIR / "regex_patterns.template.csv",
+        "exclude_filter": QA_RESOURCE_DIR / "exclude_filter.template.csv",
+        "pset_template": QA_RESOURCE_DIR / "pset_template.template.csv",
+    }
+
+
+def _qa_config_path(session_id: Optional[str], key: str, override_path: Optional[Path] = None) -> Path:
+    defaults = _qa_default_paths()
+    if override_path and override_path.exists():
+        return override_path
+    if session_id:
+        candidate = _qa_override_dir(session_id) / f"{key}.csv"
+        if candidate.exists():
+            return candidate
+    return defaults[key]
+
+
+def _load_regex_patterns(path: Path) -> Dict[str, Dict[str, str]]:
+    patterns: Dict[str, Dict[str, str]] = {}
+    if not path.exists():
+        return patterns
+    with open(path, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            key = (row.get("key") or "").strip()
+            if not key:
+                continue
+            patterns[key] = {
+                "pattern": row.get("pattern", ""),
+                "enabled": (row.get("enabled", "true") or "true").strip().lower(),
+            }
+    return patterns
 
 
 # ----------------------------------------------------------------------------
@@ -3197,7 +3252,7 @@ def _write_property_table(
             allowed = template_map[obj_type]
         elif type_name in template_map:
             allowed = template_map[type_name]
-        psets = ifcopenshell.util.element.get_psets(obj, psets_only=True, include_inherited=True) or {}
+        psets = _safe_get_psets(obj)
         if allowed is None:
             continue
         if not allowed:
@@ -3345,6 +3400,351 @@ def run_data_extractor_job(
     )
 
 
+def update_ifc_qa_job(job_id: str, **updates: Any) -> None:
+    job = IFC_QA_JOBS.get(job_id)
+    if not job:
+        return
+    job.update(updates)
+
+
+def _read_csv_rows(path: Path) -> List[Dict[str, str]]:
+    if not path.exists():
+        return []
+    with open(path, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        return [dict(row) for row in reader]
+
+
+def _evaluate_qa_rules(
+    tables: Dict[str, List[Dict[str, str]]],
+    rules: List[Dict[str, str]],
+    property_requirements: List[Dict[str, str]],
+    unacceptable_values: List[Dict[str, str]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, int]], int]:
+    failures: List[Dict[str, Any]] = []
+    totals_by_page: Dict[str, Dict[str, int]] = {}
+    total_checks = 0
+
+    def bump(page: str, checks: int = 0, fails: int = 0) -> None:
+        totals_by_page.setdefault(page, {"checks": 0, "fails": 0})
+        totals_by_page[page]["checks"] += checks
+        totals_by_page[page]["fails"] += fails
+
+    for rule in rules:
+        page = (rule.get("page") or "qa_summary").strip()
+        table_name = (rule.get("table") or "").strip()
+        field = (rule.get("field") or "").strip()
+        check_type = (rule.get("check_type") or "required").strip().lower()
+        pattern = rule.get("pattern") or ""
+        severity = rule.get("severity") or "medium"
+        message = rule.get("message") or "Rule failed"
+        rows = tables.get(table_name, [])
+        for row in rows:
+            total_checks += 1
+            value = row.get(field, "")
+            passed = True
+            if check_type == "required":
+                passed = bool(value)
+            elif check_type == "regex":
+                try:
+                    passed = bool(re.search(pattern, value or ""))
+                except re.error:
+                    passed = False
+            elif check_type == "equals":
+                passed = value == pattern
+            elif check_type == "not_equals":
+                passed = value != pattern
+            elif check_type == "contains":
+                passed = pattern in (value or "")
+            if not passed:
+                failures.append(
+                    {
+                        "page": page,
+                        "rule_id": rule.get("rule_id") or "",
+                        "severity": severity,
+                        "source_file": row.get("Source_File", ""),
+                        "ifc_globalid": row.get("IFC_GlobalId", ""),
+                        "table_name": table_name,
+                        "field": field,
+                        "actual_value": value,
+                        "message": message,
+                    }
+                )
+                bump(page, checks=1, fails=1)
+            else:
+                bump(page, checks=1, fails=0)
+
+    prop_rows = tables.get("IFC PROPERTY", [])
+    prop_index = {}
+    for row in prop_rows:
+        key = (
+            row.get("IFC_GlobalId", ""),
+            row.get("IFC_Entity", ""),
+            row.get("Pset_Name", ""),
+            row.get("Property_Name", ""),
+        )
+        prop_index.setdefault(key, []).append(row)
+    for req in property_requirements:
+        if not (req.get("required") or "").strip().lower() == "true":
+            continue
+        total_checks += 1
+        target_entity = req.get("ifc_entity", "")
+        pset_name = req.get("pset_name", "")
+        prop_name = req.get("property_name", "")
+        severity = req.get("severity", "medium")
+        message = req.get("message", "Required property missing")
+        page = "property_values"
+        matched = any(
+            key[1] == target_entity and key[2] == pset_name and key[3] == prop_name for key in prop_index.keys()
+        )
+        if not matched:
+            failures.append(
+                {
+                    "page": page,
+                    "rule_id": req.get("rule_id", ""),
+                    "severity": severity,
+                    "source_file": "",
+                    "ifc_globalid": "",
+                    "table_name": "IFC PROPERTY",
+                    "field": prop_name,
+                    "actual_value": "",
+                    "message": message,
+                }
+            )
+            bump(page, checks=1, fails=1)
+        else:
+            bump(page, checks=1, fails=0)
+
+    for bad in unacceptable_values:
+        field = (bad.get("field") or "").strip()
+        bad_value = bad.get("unacceptable_value", "")
+        severity = bad.get("severity", "medium")
+        message = bad.get("message", "Unacceptable value")
+        for table_name, rows in tables.items():
+            for row in rows:
+                if field not in row:
+                    continue
+                total_checks += 1
+                value = row.get(field, "")
+                if value == bad_value:
+                    page = "property_values" if table_name == "IFC PROPERTY" else "occurrence_naming"
+                    failures.append(
+                        {
+                            "page": page,
+                            "rule_id": bad.get("rule_id", ""),
+                            "severity": severity,
+                            "source_file": row.get("Source_File", ""),
+                            "ifc_globalid": row.get("IFC_GlobalId", ""),
+                            "table_name": table_name,
+                            "field": field,
+                            "actual_value": value,
+                            "message": message,
+                        }
+                    )
+                    bump(page, checks=1, fails=1)
+                else:
+                    bump("qa_summary", checks=1, fails=0)
+
+    return failures, totals_by_page, total_checks
+
+
+def run_ifc_qa_job(
+    job_id: str,
+    ifc_paths: List[Path],
+    override_paths: Dict[str, Optional[Path]],
+    session_id: Optional[str],
+) -> None:
+    job_dir = Path(tempfile.mkdtemp(prefix="ifc_qa_"))
+    output_dir = job_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logs: List[str] = []
+
+    def log(msg: str) -> None:
+        logs.append(msg)
+        update_ifc_qa_job(job_id, logs=logs)
+
+    try:
+        update_ifc_qa_job(job_id, status="running", percent=2, currentStep="Initializing", logs=logs)
+
+        regex_path = _qa_config_path(session_id, "regex_patterns", override_paths.get("regex_patterns"))
+        exclude_path = _qa_config_path(session_id, "exclude_filter", override_paths.get("exclude_filter"))
+        pset_path = _qa_config_path(session_id, "pset_template", override_paths.get("pset_template"))
+        rules_path = _qa_config_path(session_id, "qa_rules", override_paths.get("qa_rules"))
+        props_path = _qa_config_path(
+            session_id, "qa_property_requirements", override_paths.get("qa_property_requirements")
+        )
+        bads_path = _qa_config_path(session_id, "qa_unacceptable_values", override_paths.get("qa_unacceptable_values"))
+
+        regex_patterns = _load_regex_patterns(regex_path)
+        regexes = {
+            "regex_ifc_name": regex_patterns.get("regex_ifc_name", {}).get("pattern", ""),
+            "regex_ifc_type": regex_patterns.get("regex_ifc_type", {}).get("pattern", ""),
+            "regex_ifc_system": regex_patterns.get("regex_ifc_system", {}).get("pattern", ""),
+            "regex_ifc_layer": regex_patterns.get("regex_ifc_layer", {}).get("pattern", ""),
+            "regex_ifc_name_code": regex_patterns.get("regex_ifc_name_code", {}).get("pattern", ""),
+            "regex_ifc_type_code": regex_patterns.get("regex_ifc_type_code", {}).get("pattern", ""),
+            "regex_ifc_system_code": regex_patterns.get("regex_ifc_system_code", {}).get("pattern", ""),
+        }
+        for key, meta in regex_patterns.items():
+            if meta.get("enabled") == "false":
+                regexes[key] = ""
+
+        exclude_terms = _read_csv_first_column(exclude_path)
+        pset_template = _load_pset_template(pset_path)
+
+        qa_rules = _read_csv_rows(rules_path)
+        qa_property_requirements = _read_csv_rows(props_path)
+        qa_unacceptable = _read_csv_rows(bads_path)
+
+        for index, ifc_path in enumerate(ifc_paths, start=1):
+            safe_name = sanitize_filename(ifc_path.name)
+            base_name = ifc_path.stem
+            file_out_dir = output_dir / base_name
+            file_out_dir.mkdir(parents=True, exist_ok=True)
+            update_ifc_qa_job(
+                job_id,
+                currentFile=safe_name,
+                currentStep="Opening IFC",
+                percent=min(int(index / max(len(ifc_paths), 1) * 100), 95),
+            )
+            log(f"[{safe_name}] Opening IFC...")
+            try:
+                model = ifcopenshell.open(str(ifc_path))
+            except Exception as exc:
+                log(f"[{safe_name}] ERROR opening IFC: {exc}")
+                continue
+
+            all_objects = _iter_object_elements(model)
+            objects = [
+                o for o in all_objects if not any(t in (getattr(o, "Name", "") or "") for t in exclude_terms)
+            ]
+            include_ids = {obj.id() for obj in objects}
+            object_type_counts: Dict[str, int] = {}
+            for obj in objects:
+                object_type_counts[obj.is_a()] = object_type_counts.get(obj.is_a(), 0) + 1
+
+            update_ifc_qa_job(job_id, currentStep="Extracting IFC PROJECT")
+            _write_project_table(model, file_out_dir / f"IFC PROJECT - {base_name}.csv", safe_name)
+
+            update_ifc_qa_job(job_id, currentStep="Extracting IFC OBJECT TYPE")
+            _write_object_table(objects, file_out_dir / f"IFC OBJECT TYPE - {base_name}.csv", safe_name, regexes)
+
+            update_ifc_qa_job(job_id, currentStep="Extracting IFC CLASSIFICATION")
+            _write_classification_table(
+                model,
+                file_out_dir / f"IFC CLASSIFICATION - {base_name}.csv",
+                safe_name,
+                include_ids if include_ids else None,
+            )
+
+            update_ifc_qa_job(job_id, currentStep="Extracting IFC SPATIAL STRUCTURE")
+            _write_spatial_table(
+                model,
+                file_out_dir / f"IFC SPATIAL STRUCTURE - {base_name}.csv",
+                safe_name,
+                objects,
+            )
+
+            update_ifc_qa_job(job_id, currentStep="Extracting IFC SYSTEM")
+            _write_system_table(
+                model,
+                file_out_dir / f"IFC SYSTEM - {base_name}.csv",
+                safe_name,
+                include_ids if include_ids else None,
+            )
+
+            update_ifc_qa_job(job_id, currentStep="Extracting IFC PSET TEMPLATE")
+            _write_pset_template_table(
+                file_out_dir / f"IFC PSET TEMPLATE - {base_name}.csv",
+                safe_name,
+                pset_template,
+                object_type_counts,
+            )
+
+            update_ifc_qa_job(job_id, currentStep="Extracting IFC PROPERTY")
+            _write_property_table(
+                model,
+                file_out_dir / f"IFC PROPERTY - {base_name}.csv",
+                safe_name,
+                objects,
+                pset_template,
+            )
+            log(f"[{safe_name}] Extraction complete.")
+
+        tables: Dict[str, List[Dict[str, str]]] = {}
+        for csv_path in output_dir.rglob("*.csv"):
+            stem = csv_path.name.split(" - ")[0].strip()
+            tables.setdefault(stem, [])
+            tables[stem].extend(_read_csv_rows(csv_path))
+
+        failures, totals_by_page, total_checks = _evaluate_qa_rules(
+            tables,
+            qa_rules,
+            qa_property_requirements,
+            qa_unacceptable,
+        )
+        objects_checked = len(tables.get("IFC OBJECT TYPE", []))
+        total_failures = len(failures)
+        pass_percent = 100.0 if total_checks == 0 else round(100.0 * (total_checks - total_failures) / total_checks, 2)
+
+        pages = [
+            "project_naming",
+            "occurrence_naming",
+            "type_naming",
+            "classification_template",
+            "classification_values",
+            "pset_template",
+            "property_values",
+            "system",
+            "zone",
+        ]
+        per_page = {}
+        for page in pages:
+            stats = totals_by_page.get(page, {"checks": 0, "fails": 0})
+            checks = stats["checks"]
+            fails = stats["fails"]
+            per_page[page] = {
+                "checks": checks,
+                "fails": fails,
+                "pass_percent": 100.0 if checks == 0 else round(100.0 * (checks - fails) / checks, 2),
+            }
+
+        qa_summary = {
+            "overall": {
+                "files_checked": len(ifc_paths),
+                "objects_checked": objects_checked,
+                "total_checks": total_checks,
+                "total_failures": total_failures,
+                "pass_percent": pass_percent,
+            },
+            "per_page": per_page,
+            "failures": failures,
+        }
+        summary_path = job_dir / "qa_summary.json"
+        with open(summary_path, "w", encoding="utf-8") as handle:
+            json.dump(qa_summary, handle, indent=2)
+
+        zip_path = job_dir / f"ifc_qa_{job_id}.zip"
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zipf:
+            for file_path in output_dir.rglob("*.csv"):
+                arcname = file_path.relative_to(output_dir)
+                zipf.write(file_path, arcname.as_posix())
+            zipf.write(summary_path, summary_path.name)
+
+        update_ifc_qa_job(
+            job_id,
+            status="complete",
+            percent=100,
+            currentStep="Complete",
+            result_path=str(zip_path),
+            summary=qa_summary,
+        )
+    except Exception as exc:  # pragma: no cover - job-level guard
+        log(f"ERROR: {exc}")
+        update_ifc_qa_job(job_id, status="failed", percent=100, currentStep="Failed")
+
+
 def apply_edits(session_id: str, in_path: str, edits: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
     if not edits:
         raise HTTPException(status_code=400, detail="No edits supplied")
@@ -3422,6 +3822,30 @@ def cleaner_page(request: Request):
 @app.get("/excel", response_class=HTMLResponse)
 def excel_page(request: Request):
     return templates.TemplateResponse("excel.html", {"request": request, "active": "excel"})
+
+
+@app.get("/ifc-qa/extractor", response_class=HTMLResponse)
+def ifc_qa_extractor_page(request: Request):
+    return templates.TemplateResponse(
+        "ifc_qa.html",
+        {"request": request, "active": "ifc-qa", "qa_page": "extractor"},
+    )
+
+
+@app.get("/ifc-qa/dashboard", response_class=HTMLResponse)
+def ifc_qa_dashboard_page(request: Request):
+    return templates.TemplateResponse(
+        "ifc_qa.html",
+        {"request": request, "active": "ifc-qa", "qa_page": "dashboard"},
+    )
+
+
+@app.get("/ifc-qa/config", response_class=HTMLResponse)
+def ifc_qa_config_page(request: Request):
+    return templates.TemplateResponse(
+        "ifc_qa.html",
+        {"request": request, "active": "ifc-qa", "qa_page": "config"},
+    )
 
 
 @app.get("/data-extractor", response_class=HTMLResponse)
@@ -3588,6 +4012,182 @@ async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
             dst.write(content)
         saved.append({"name": safe, "size": os.path.getsize(dest)})
     return {"files": saved}
+
+
+@app.post("/api/ifc-qa/extract")
+async def ifc_qa_extract(
+    files: List[UploadFile] = File(...),
+    qa_rules_csv: UploadFile = File(None),
+    qa_property_requirements_csv: UploadFile = File(None),
+    qa_unacceptable_values_csv: UploadFile = File(None),
+    regex_patterns_csv: UploadFile = File(None),
+    exclude_filter_csv: UploadFile = File(None),
+    pset_template_csv: UploadFile = File(None),
+    session_id: Optional[str] = Form(None),
+    background_tasks: BackgroundTasks = None,
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one IFC file is required")
+    job_id = uuid.uuid4().hex
+    IFC_QA_JOBS[job_id] = {
+        "jobId": job_id,
+        "status": "queued",
+        "percent": 0,
+        "currentFile": "",
+        "currentStep": "Queued",
+        "logs": [],
+        "result_path": None,
+        "summary": None,
+    }
+
+    upload_dir = Path(tempfile.mkdtemp(prefix="ifc_qa_uploads_"))
+    ifc_paths: List[Path] = []
+    for upload in files:
+        safe = sanitize_filename(upload.filename)
+        if not safe.lower().endswith(".ifc"):
+            continue
+        dest = upload_dir / safe
+        with open(dest, "wb") as handle:
+            handle.write(await upload.read())
+        ifc_paths.append(dest)
+    if not ifc_paths:
+        raise HTTPException(status_code=400, detail="No IFC files uploaded")
+
+    override_paths: Dict[str, Optional[Path]] = {
+        "qa_rules": None,
+        "qa_property_requirements": None,
+        "qa_unacceptable_values": None,
+        "regex_patterns": None,
+        "exclude_filter": None,
+        "pset_template": None,
+    }
+
+    async def save_override(upload: Optional[UploadFile], key: str) -> None:
+        if not upload:
+            return
+        safe = sanitize_filename(upload.filename)
+        dest = upload_dir / safe
+        with open(dest, "wb") as handle:
+            handle.write(await upload.read())
+        override_paths[key] = dest
+
+    await save_override(qa_rules_csv, "qa_rules")
+    await save_override(qa_property_requirements_csv, "qa_property_requirements")
+    await save_override(qa_unacceptable_values_csv, "qa_unacceptable_values")
+    await save_override(regex_patterns_csv, "regex_patterns")
+    await save_override(exclude_filter_csv, "exclude_filter")
+    await save_override(pset_template_csv, "pset_template")
+
+    if background_tasks is None:
+        background_tasks = BackgroundTasks()
+    background_tasks.add_task(run_ifc_qa_job, job_id, ifc_paths, override_paths, session_id)
+    return {"jobId": job_id}
+
+
+@app.get("/api/ifc-qa/progress/{job_id}")
+def ifc_qa_progress(job_id: str):
+    job = IFC_QA_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "status": job.get("status"),
+        "percent": job.get("percent"),
+        "currentFile": job.get("currentFile"),
+        "currentStep": job.get("currentStep"),
+        "logs": job.get("logs"),
+    }
+
+
+@app.get("/api/ifc-qa/result/{job_id}")
+def ifc_qa_result(job_id: str):
+    job = IFC_QA_JOBS.get(job_id)
+    if not job or not job.get("result_path"):
+        raise HTTPException(status_code=404, detail="Result not ready")
+    path = Path(job["result_path"])
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Result file not found")
+    return FileResponse(path, filename=path.name)
+
+
+@app.get("/api/ifc-qa/summary/{job_id}")
+def ifc_qa_summary(job_id: str):
+    job = IFC_QA_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    summary = job.get("summary")
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Summary not ready")
+    return summary
+
+
+@app.get("/api/ifc-qa/config/{session_id}")
+def ifc_qa_config_status(session_id: str):
+    override_dir = _qa_override_dir(session_id)
+    overrides = sorted(p.name for p in override_dir.glob("*.csv"))
+    return {
+        "session_id": session_id,
+        "overrides": overrides,
+        "defaults": {k: str(v) for k, v in _qa_default_paths().items()},
+    }
+
+
+@app.get("/api/ifc-qa/config/{session_id}/download")
+def ifc_qa_config_download(session_id: str):
+    override_dir = _qa_override_dir(session_id)
+    config_zip = Path(SESSION_STORE.ensure(session_id)) / "ifc_qa_configs.zip"
+    defaults = _qa_default_paths()
+    with zipfile.ZipFile(config_zip, "w", compression=zipfile.ZIP_DEFLATED) as zipf:
+        for key, path in defaults.items():
+            override = override_dir / f"{key}.csv"
+            chosen = override if override.exists() else path
+            if chosen.exists():
+                zipf.write(chosen, f"{key}.csv")
+    return FileResponse(config_zip, filename="ifc_qa_configs.zip")
+
+
+@app.get("/api/ifc-qa/config/{session_id}/regex")
+def ifc_qa_config_regex(session_id: str):
+    regex_path = _qa_config_path(session_id, "regex_patterns")
+    patterns = []
+    if regex_path.exists():
+        with open(regex_path, newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                patterns.append(
+                    {
+                        "key": row.get("key", ""),
+                        "pattern": row.get("pattern", ""),
+                        "enabled": (row.get("enabled") or "true").strip().lower(),
+                    }
+                )
+    return {"patterns": patterns}
+
+
+@app.post("/api/ifc-qa/config/{session_id}/upload")
+async def ifc_qa_config_upload(session_id: str, config_zip: UploadFile = File(...)):
+    override_dir = _qa_override_dir(session_id)
+    zip_path = override_dir / sanitize_filename(config_zip.filename)
+    with open(zip_path, "wb") as handle:
+        handle.write(await config_zip.read())
+    with zipfile.ZipFile(zip_path, "r") as zipf:
+        for name in zipf.namelist():
+            base = Path(name).name
+            key = base.replace(".csv", "")
+            if key not in _qa_default_paths():
+                continue
+            target = override_dir / f"{key}.csv"
+            with zipf.open(name) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+    zip_path.unlink(missing_ok=True)
+    return {"status": "ok"}
+
+
+@app.post("/api/ifc-qa/config/{session_id}/reset")
+def ifc_qa_config_reset(session_id: str):
+    override_dir = _qa_override_dir(session_id)
+    for entry in override_dir.glob("*.csv"):
+        entry.unlink(missing_ok=True)
+    return {"status": "ok"}
 
 
 @app.post("/api/session/{session_id}/data-extractor/start")

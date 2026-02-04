@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title">
+    <h2>IFC Data QA</h2>
+    <span class="badge">Extractor, QA evaluation, dashboards</span>
+  </div>
+  <div id="ifc-qa-root" data-qa-page="{{ qa_page }}"></div>
+</div>
+
+<div class="modal" id="regexModal" hidden>
+  <div class="modal-content">
+    <div class="section-title">
+      <h3>Regex configuration (session only)</h3>
+    </div>
+    <div id="regexModalBody"></div>
+    <div class="inline" style="margin-top: 12px">
+      <button class="btn" id="regexSave">Apply</button>
+      <button class="btn secondary" id="regexExport">Export CSV</button>
+      <button class="btn ghost" id="regexClose">Close</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="/static/ifc_qa_app.js"></script>
+{% endblock %}

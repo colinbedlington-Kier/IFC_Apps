@@ -1,15 +1,1 @@
-value,category,severity,notes
-0.,Provisional,WARN,
-0.0,Provisional,WARN,
-Blank,Provisional,WARN,
-By Contractor,Disallowed,FAIL,
-n/a,Disallowed,FAIL,
-Not Applicable,Disallowed,FAIL,
-Placeholder,Provisional,WARN,
-Stage 4,Disallowed,FAIL,
-Stage 4A,Disallowed,FAIL,
-Stage 4B,Disallowed,FAIL,
-Stage 4C,Disallowed,FAIL,
-Stage 5,Disallowed,FAIL,
-tbc,Provisional,WARN,
-To Be Confirmed,Provisional,WARN,
+field,unacceptable_value,severity,message
