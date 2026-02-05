@@ -291,6 +291,23 @@ nav {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 16px;
 }
+.qa-bar-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.qa-bar-row {
+  display: grid;
+  grid-template-columns: 120px 1fr 40px;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+.qa-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
 .stack {
   display: flex;
   flex-direction: column;
