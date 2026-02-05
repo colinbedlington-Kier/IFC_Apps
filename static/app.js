@@ -1232,6 +1232,142 @@ async function reassignLevelRequest() {
   if (el("reassignStatus")) el("reassignStatus").textContent = "Queued reassignment.";
 }
 
+async function startDataExtraction() {
+  const ifcInput = el("dataIfcFiles");
+  if (!ifcInput) return;
+  const ifcFiles = Array.from(ifcInput.files || []);
+  if (!ifcFiles.length) return alert("Select at least one IFC file.");
+  const tableValues = Array.from(document.querySelectorAll("#dataTables input:checked")).map((cb) => cb.value);
+  if (!tableValues.length) return alert("Select at least one table.");
+
+  const excludeFile = el("dataExcludeFilter")?.files?.[0] || null;
+  const psetFile = el("dataPsetTemplate")?.files?.[0] || null;
+  const form = new FormData();
+  const uploadOrder = [];
+  ifcFiles.forEach((file) => {
+    form.append("files", file, file.name);
+    uploadOrder.push(file);
+  });
+  if (excludeFile) {
+    form.append("files", excludeFile, excludeFile.name);
+    uploadOrder.push(excludeFile);
+  }
+  if (psetFile) {
+    form.append("files", psetFile, psetFile.name);
+    uploadOrder.push(psetFile);
+  }
+
+  el("dataExtractorStatus").textContent = "Uploading inputs…";
+  const uploadResp = await fetch(`/api/session/${state.sessionId}/upload`, { method: "POST", body: form });
+  if (!uploadResp.ok) {
+    el("dataExtractorStatus").textContent = "Upload failed.";
+    return;
+  }
+  const uploadData = await uploadResp.json();
+  const saved = uploadData.files || [];
+  const savedNames = saved.map((f) => f.name);
+  const uploadMap = {};
+  uploadOrder.forEach((file, index) => {
+    uploadMap[file.name] = savedNames[index];
+  });
+  const excludeName = excludeFile ? uploadMap[excludeFile.name] : null;
+  const psetName = psetFile ? uploadMap[psetFile.name] : null;
+
+  const payload = {
+    ifc_files: ifcFiles.map((f) => uploadMap[f.name] || f.name),
+    exclude_filter: excludeName,
+    pset_template: psetName,
+    pset_template_default: el("dataPsetDefault")?.value || "GPA_Pset_Template.csv",
+    tables: tableValues,
+    regex_overrides: {
+      regex_ifc_name: el("regex_ifc_name")?.value || "",
+      regex_ifc_type: el("regex_ifc_type")?.value || "",
+      regex_ifc_system: el("regex_ifc_system")?.value || "",
+      regex_ifc_layer: el("regex_ifc_layer")?.value || "",
+      regex_ifc_name_code: el("regex_ifc_name_code")?.value || "",
+      regex_ifc_type_code: el("regex_ifc_type_code")?.value || "",
+      regex_ifc_system_code: el("regex_ifc_system_code")?.value || "",
+    },
+  };
+
+  el("dataExtractorLog").value = "";
+  el("dataExtractorDownload").innerHTML = "";
+  const previewTable = el("dataExtractorPreview");
+  if (previewTable) previewTable.innerHTML = "";
+
+  el("dataExtractorStatus").textContent = "Starting extraction…";
+  const resp = await fetch(`/api/session/${state.sessionId}/data-extractor/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    el("dataExtractorStatus").textContent = "Failed to start extraction.";
+    return;
+  }
+  const data = await resp.json();
+  pollDataExtraction(data.status_url);
+}
+
+function renderPreviewTable(preview) {
+  const table = el("dataExtractorPreview");
+  if (!table) return;
+  table.innerHTML = "";
+  if (!preview || !preview.columns || !preview.rows) {
+    table.innerHTML = "<tr><td class=\"muted\">No preview available.</td></tr>";
+    return;
+  }
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  preview.columns.forEach((col) => {
+    const th = document.createElement("th");
+    th.textContent = col;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  preview.rows.forEach((row) => {
+    const tr = document.createElement("tr");
+    row.forEach((cell) => {
+      const td = document.createElement("td");
+      td.textContent = cell;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+}
+
+function pollDataExtraction(statusUrl) {
+  if (!statusUrl) return;
+  const progressBar = el("dataExtractorProgress");
+  const statusEl = el("dataExtractorStatus");
+  const logEl = el("dataExtractorLog");
+  const downloadEl = el("dataExtractorDownload");
+  const poll = async () => {
+    const resp = await fetch(statusUrl);
+    if (!resp.ok) {
+      statusEl.textContent = "Status check failed.";
+      return;
+    }
+    const data = await resp.json();
+    if (progressBar) progressBar.style.width = `${data.progress || 0}%`;
+    statusEl.textContent = data.message || "Processing…";
+    if (logEl && data.logs) logEl.value = data.logs.join("\n");
+    if (data.done) {
+      if (downloadEl && data.outputs && data.outputs.length) {
+        const link = data.outputs[0];
+        downloadEl.innerHTML = `<a href=\"${link.url}\">Download ZIP (${link.name})</a>`;
+      }
+      if (data.preview) renderPreviewTable(data.preview);
+      return;
+    }
+    setTimeout(poll, 1200);
+  };
+  poll();
+}
+
 function wireEvents() {
   const uploadBtn = el("uploadBtn");
   if (uploadBtn) uploadBtn.addEventListener("click", uploadFiles);
@@ -1354,6 +1490,9 @@ function wireEvents() {
 
   const reassignLevelBtn = el("reassignLevel");
   if (reassignLevelBtn) reassignLevelBtn.addEventListener("click", reassignLevelRequest);
+
+  const dataExtractorBtn = el("dataExtractorStart");
+  if (dataExtractorBtn) dataExtractorBtn.addEventListener("click", startDataExtraction);
 
   const step2ifcFiles = el("step2ifcFiles");
   if (step2ifcFiles) {

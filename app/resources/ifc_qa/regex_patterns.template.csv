@@ -1,0 +1,8 @@
+key,pattern,enabled
+regex_ifc_name,^[A-Za-z0-9 _\-]+$,true
+regex_ifc_type,^[A-Za-z0-9 _\-]+$,true
+regex_ifc_system,^[A-Za-z0-9 _\-]+$,true
+regex_ifc_layer,,false
+regex_ifc_name_code,([A-Z]{2,3}\d{2,}),true
+regex_ifc_type_code,([A-Z]{2,3}\d{2,}),true
+regex_ifc_system_code,([A-Z]{2,3}\d{2,}),true
