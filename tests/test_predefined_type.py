@@ -1,7 +1,7 @@
 import ifcopenshell
 from ifcopenshell.guid import new as new_guid
 
-from app import apply_predefined_type_changes, scan_predefined_types
+from app import apply_predefined_type_changes, rewrite_proxy_types, scan_predefined_types
 
 
 def build_predefined_model() -> ifcopenshell.file:
@@ -83,3 +83,26 @@ def test_predefined_type_scan_matches_pascal_and_space_case(tmp_path):
     assert rows_by_name[spaced_elem.GlobalId]["match_found"] is True
     assert rows_by_name[pascal_elem.GlobalId]["proposed_predefined_type"] == "NOTDEFINED"
     assert rows_by_name[spaced_elem.GlobalId]["proposed_predefined_type"] == "NOTDEFINED"
+
+
+def test_rewrite_proxy_types_extracts_predefined_from_multi_token_name(tmp_path):
+    in_path = tmp_path / "proxy_in.ifc"
+    out_path = tmp_path / "proxy_out.ifc"
+    in_path.write_text(
+        "\n".join(
+            [
+                "ISO-10303-21;",
+                "DATA;",
+                "#10=IFCBUILDINGELEMENTPROXYTYPE('g',#2,'WasteTerminal_GullySump_Type01',$,.NOTDEFINED.);",
+                "ENDSEC;",
+                "END-ISO-10303-21;",
+                "",
+            ]
+        )
+    )
+
+    rewrite_proxy_types(str(in_path), str(out_path))
+    output = out_path.read_text()
+
+    assert "IFCWASTETERMINALTYPE" in output
+    assert ".GULLYSUMP." in output

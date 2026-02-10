@@ -1970,10 +1970,20 @@ def build_enum_library(model):
 
 
 def parse_type_tokens(type_name: str):
-    parts = type_name.split("_")
-    class_token = parts[0].strip().lower() if parts else ""
-    predef_raw = parts[1].strip() if len(parts) > 1 else ""
-    return class_token, predef_raw
+    parts = [part.strip() for part in (type_name or "").split("_")]
+    class_token = parts[0].lower() if parts else ""
+    predef_tokens = [part for part in parts[1:] if part]
+    return class_token, predef_tokens
+
+
+def type_library_entry_from_name(type_name: str) -> Optional[dict]:
+    class_token, _ = parse_type_tokens(type_name)
+    class_norm = normalize_mapping_token(class_token)
+    if class_norm in TYPE_LIBRARY_NORMALIZED:
+        return TYPE_LIBRARY_NORMALIZED[class_norm]
+    if "pipe" in (type_name or "").lower():
+        return TYPE_LIBRARY["pipe"]
+    return None
 
 
 def type_library_entry_from_name(type_name: str) -> Optional[dict]:
@@ -1989,9 +1999,18 @@ def type_library_entry_from_name(type_name: str) -> Optional[dict]:
 def enum_from_token(raw: str, enum_set: str, enumlib: dict) -> str:
     if not raw:
         return "USERDEFINED"
-    candidate = raw.replace(" ", "").upper()
+    candidate = normalize_mapping_token(raw).upper()
     values = enumlib.get(enum_set, set())
     return candidate if candidate in values else "USERDEFINED"
+
+
+def enum_from_type_name(type_name: str, enum_set: str, enumlib: dict) -> str:
+    _, predef_tokens = parse_type_tokens(type_name)
+    for token in predef_tokens:
+        mapped = enum_from_token(token, enum_set, enumlib)
+        if mapped != "USERDEFINED":
+            return mapped
+    return "USERDEFINED"
 
 
 def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
@@ -2054,7 +2073,6 @@ def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
             type_name = g["name"]
             mid = g["mid"]
 
-            _, predef_raw = parse_type_tokens(type_name)
             lib_entry = type_library_entry_from_name(type_name)
 
             if not lib_entry:
@@ -2069,7 +2087,7 @@ def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
             if forced:
                 enum_val = forced
             else:
-                enum_val = enum_from_token(predef_raw, enum_set, enumlib)
+                enum_val = enum_from_type_name(type_name, enum_set, enumlib)
 
             new_line = (
                 f"{ws}{type_id}={target_type}('{guid}',{owner},"
@@ -2092,7 +2110,6 @@ def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
             type_name = g["name"]
             mid = g["mid"]
 
-            _, predef_raw = parse_type_tokens(type_name)
             lib_entry = type_library_entry_from_name(type_name)
 
             if not lib_entry:
@@ -2107,7 +2124,7 @@ def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
             if forced:
                 enum_val = forced
             else:
-                enum_val = enum_from_token(predef_raw, enum_set, enumlib)
+                enum_val = enum_from_type_name(type_name, enum_set, enumlib)
 
             new_line = (
                 f"{ws}{type_id}={target_type}('{guid}',{owner},"
