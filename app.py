@@ -1918,6 +1918,15 @@ TYPE_LIBRARY = {
     },
 }
 
+
+def normalize_mapping_token(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (value or "").lower())
+
+
+TYPE_LIBRARY_NORMALIZED = {
+    normalize_mapping_token(key): value for key, value in TYPE_LIBRARY.items()
+}
+
 FORCED_PREDEFINED = {
     "ifcpipesegmenttype": "RIGIDSEGMENT",
 }
@@ -1965,6 +1974,16 @@ def parse_type_tokens(type_name: str):
     class_token = parts[0].strip().lower() if parts else ""
     predef_raw = parts[1].strip() if len(parts) > 1 else ""
     return class_token, predef_raw
+
+
+def type_library_entry_from_name(type_name: str) -> Optional[dict]:
+    class_token, _ = parse_type_tokens(type_name)
+    class_norm = normalize_mapping_token(class_token)
+    if class_norm in TYPE_LIBRARY_NORMALIZED:
+        return TYPE_LIBRARY_NORMALIZED[class_norm]
+    if "pipe" in (type_name or "").lower():
+        return TYPE_LIBRARY["pipe"]
+    return None
 
 
 def enum_from_token(raw: str, enum_set: str, enumlib: dict) -> str:
@@ -2035,14 +2054,8 @@ def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
             type_name = g["name"]
             mid = g["mid"]
 
-            class_token, predef_raw = parse_type_tokens(type_name)
-            class_norm = class_token.lower()
-
-            lib_entry = None
-            if class_norm in TYPE_LIBRARY:
-                lib_entry = TYPE_LIBRARY[class_norm]
-            elif "pipe" in type_name.lower():
-                lib_entry = TYPE_LIBRARY["pipe"]
+            _, predef_raw = parse_type_tokens(type_name)
+            lib_entry = type_library_entry_from_name(type_name)
 
             if not lib_entry:
                 stats["left_as_proxy_type"] += 1
@@ -2079,14 +2092,8 @@ def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
             type_name = g["name"]
             mid = g["mid"]
 
-            class_token, predef_raw = parse_type_tokens(type_name)
-            class_norm = class_token.lower()
-
-            lib_entry = None
-            if class_norm in TYPE_LIBRARY:
-                lib_entry = TYPE_LIBRARY[class_norm]
-            elif "pipe" in type_name.lower():
-                lib_entry = TYPE_LIBRARY["pipe"]
+            _, predef_raw = parse_type_tokens(type_name)
+            lib_entry = type_library_entry_from_name(type_name)
 
             if not lib_entry:
                 stats["left_as_building_type"] += 1
@@ -2545,11 +2552,7 @@ def apply_layer_changes(
 def match_type_name_for_proxy(type_name: str) -> bool:
     if not type_name:
         return False
-    class_token, _ = parse_type_tokens(type_name)
-    class_norm = class_token.lower()
-    if class_norm in TYPE_LIBRARY:
-        return True
-    return "pipe" in type_name.lower()
+    return type_library_entry_from_name(type_name) is not None
 
 
 def list_instance_classes(ifc_path: str) -> List[str]:
