@@ -1986,6 +1986,16 @@ def type_library_entry_from_name(type_name: str) -> Optional[dict]:
     return None
 
 
+def type_library_entry_from_name(type_name: str) -> Optional[dict]:
+    class_token, _ = parse_type_tokens(type_name)
+    class_norm = normalize_mapping_token(class_token)
+    if class_norm in TYPE_LIBRARY_NORMALIZED:
+        return TYPE_LIBRARY_NORMALIZED[class_norm]
+    if "pipe" in (type_name or "").lower():
+        return TYPE_LIBRARY["pipe"]
+    return None
+
+
 def enum_from_token(raw: str, enum_set: str, enumlib: dict) -> str:
     if not raw:
         return "USERDEFINED"
