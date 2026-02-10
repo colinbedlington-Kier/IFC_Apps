@@ -106,3 +106,39 @@ def test_rewrite_proxy_types_extracts_predefined_from_multi_token_name(tmp_path)
 
     assert "IFCWASTETERMINALTYPE" in output
     assert ".GULLYSUMP." in output
+
+
+def test_predefined_type_scan_and_apply_targets_proxy_type(tmp_path):
+    model = ifcopenshell.file(schema="IFC4")
+    project = model.create_entity("IfcProject", GlobalId=new_guid(), Name="Proj")
+    _ = project
+
+    proxy_type = model.create_entity(
+        "IfcBuildingElementProxyType",
+        GlobalId=new_guid(),
+        Name="WasteTerminal_GullySump_Type04",
+        PredefinedType="NOTDEFINED",
+    )
+    proxy_occ = model.create_entity("IfcBuildingElementProxy", GlobalId=new_guid(), Name="Proxy-1")
+    model.create_entity(
+        "IfcRelDefinesByType",
+        GlobalId=new_guid(),
+        RelatedObjects=[proxy_occ],
+        RelatingType=proxy_type,
+    )
+
+    in_path = tmp_path / "proxy_predef.ifc"
+    model.write(str(in_path))
+
+    _, rows = scan_predefined_types(str(in_path), class_filter=["IfcBuildingElementProxy"])
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["match_found"] is True
+    assert row["proposed_predefined_type"] == "NOTDEFINED"
+    assert row["predef_target_source"] == "type"
+    assert row["predef_target_class"] == "IfcBuildingElementProxyType"
+
+    out_path, _, _ = apply_predefined_type_changes(str(in_path), rows)
+    updated = ifcopenshell.open(out_path)
+    updated_type = updated.by_guid(proxy_type.GlobalId)
+    assert updated_type.PredefinedType == "NOTDEFINED"

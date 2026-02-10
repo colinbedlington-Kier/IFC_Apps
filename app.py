@@ -1986,16 +1986,6 @@ def type_library_entry_from_name(type_name: str) -> Optional[dict]:
     return None
 
 
-def type_library_entry_from_name(type_name: str) -> Optional[dict]:
-    class_token, _ = parse_type_tokens(type_name)
-    class_norm = normalize_mapping_token(class_token)
-    if class_norm in TYPE_LIBRARY_NORMALIZED:
-        return TYPE_LIBRARY_NORMALIZED[class_norm]
-    if "pipe" in (type_name or "").lower():
-        return TYPE_LIBRARY["pipe"]
-    return None
-
-
 def enum_from_token(raw: str, enum_set: str, enumlib: dict) -> str:
     if not raw:
         return "USERDEFINED"
@@ -2556,6 +2546,7 @@ def apply_layer_changes(
                 "old_value",
                 "new_value",
                 "mapping_reason",
+                "target_class",
                 "allowed_status",
                 "timestamp",
             ],
@@ -2592,10 +2583,23 @@ def scan_predefined_types(
         element_type = ifcopenshell.util.element.get_type(element)
         type_name = getattr(element_type, "Name", "") if element_type else ""
         match_found = match_type_name_for_proxy(type_name)
-        has_predef = hasattr(element, "PredefinedType")
+
+        predef_target = None
+        predef_target_source = "none"
+        if element.is_a("IfcBuildingElementProxy") and element_type is not None and hasattr(element_type, "PredefinedType"):
+            predef_target = element_type
+            predef_target_source = "type"
+        elif hasattr(element, "PredefinedType"):
+            predef_target = element
+            predef_target_source = "occurrence"
+        elif element_type is not None and hasattr(element_type, "PredefinedType"):
+            predef_target = element_type
+            predef_target_source = "type"
+
         proposed = "N/A"
-        if has_predef:
+        if predef_target is not None:
             proposed = "NOTDEFINED" if match_found else "USERDEFINED"
+
         rows.append(
             {
                 "row_id": uuid.uuid4().hex,
@@ -2604,7 +2608,11 @@ def scan_predefined_types(
                 "type_name": type_name or "",
                 "match_found": match_found,
                 "proposed_predefined_type": proposed,
-                "apply_default": has_predef,
+                "apply_default": predef_target is not None,
+                "predef_target_source": predef_target_source,
+                "predef_target_globalid": getattr(predef_target, "GlobalId", None) if predef_target else None,
+                "predef_target_id": int(predef_target.id()) if predef_target else None,
+                "predef_target_class": predef_target.is_a() if predef_target else None,
             }
         )
     stats = {"schema": model.schema, "elements": len(elements), "rows": len(rows)}
@@ -2623,25 +2631,46 @@ def apply_predefined_type_changes(
         target = row.get("proposed_predefined_type")
         if target in (None, "", "N/A"):
             continue
-        element = None
-        gid = row.get("globalid")
-        if gid:
-            element = model.by_guid(gid)
-        if not element or not hasattr(element, "PredefinedType"):
+        target_entity = None
+        target_gid = row.get("predef_target_globalid")
+        if target_gid:
+            target_entity = model.by_guid(target_gid)
+
+        if target_entity is None:
+            gid = row.get("globalid")
+            if gid:
+                candidate = model.by_guid(gid)
+                if candidate is not None and hasattr(candidate, "PredefinedType"):
+                    target_entity = candidate
+
+        if target_entity is None:
+            target_id = row.get("predef_target_id")
+            if target_id is not None:
+                try:
+                    candidate = model.by_id(int(target_id))
+                except Exception:
+                    candidate = None
+                if candidate is not None and hasattr(candidate, "PredefinedType"):
+                    target_entity = candidate
+
+        if not target_entity or not hasattr(target_entity, "PredefinedType"):
             continue
-        old_value = getattr(element, "PredefinedType", None)
+
+        old_value = getattr(target_entity, "PredefinedType", None)
         if old_value == target:
             continue
-        element.PredefinedType = target
+
+        target_entity.PredefinedType = target
         updated += 1
         change_log.append(
             {
                 "globalid": row.get("globalid"),
                 "ifc_class": row.get("ifc_class"),
-                "target": "predefined_type",
+                "target": f"predefined_type:{row.get('predef_target_source', 'occurrence')}",
                 "old_value": old_value,
                 "new_value": target,
                 "mapping_reason": "Type name match" if row.get("match_found") else "No match",
+                "target_class": row.get("predef_target_class") or (target_entity.is_a() if target_entity else None),
                 "allowed_status": "n/a",
                 "timestamp": now,
             }
@@ -2667,6 +2696,7 @@ def apply_predefined_type_changes(
                 "old_value",
                 "new_value",
                 "mapping_reason",
+                "target_class",
                 "allowed_status",
                 "timestamp",
             ],
