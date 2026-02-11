@@ -123,6 +123,8 @@ def test_ifc2x3_apply_pset_applicability_adds_pset_to_type(tmp_path):
         psets = ifcopenshell.util.element.get_psets(updated_type, psets_only=True)
     assert "Pset_ActuatorTypeCommon" in psets
 
+    in_path = tmp_path / "ifc2x3.ifc"
+    model.write(str(in_path))
 
 def test_target_selection_prefers_type_then_occurrence(tmp_path):
     model = ifcopenshell.file(schema="IFC4")
