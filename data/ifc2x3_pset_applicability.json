@@ -1,0 +1,797 @@
+[
+  {
+    "pset_name": "Pset_ActuatorTypeCommon",
+    "ifc_class": "IfcActuatorType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_ActuatorTypeElectricActuator",
+    "ifc_class": "IfcActuatorType",
+    "applicable_type_value": "ElectricActuator"
+  },
+  {
+    "pset_name": "Pset_ActuatorTypeHydraulicActuator",
+    "ifc_class": "IfcActuatorType",
+    "applicable_type_value": "HydraulicActuator"
+  },
+  {
+    "pset_name": "Pset_ActuatorTypeLinearActuation",
+    "ifc_class": "IfcActuatorType",
+    "applicable_type_value": "LinearActuation"
+  },
+  {
+    "pset_name": "Pset_ActuatorTypePneumaticActuator",
+    "ifc_class": "IfcActuatorType",
+    "applicable_type_value": "PneumaticActuator"
+  },
+  {
+    "pset_name": "Pset_ActuatorTypeRotationalActuation",
+    "ifc_class": "IfcActuatorType",
+    "applicable_type_value": "RotationalActuation"
+  },
+  {
+    "pset_name": "Pset_AirTerminalBoxTypeCommon",
+    "ifc_class": "IfcAirTerminalBoxType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_AirTerminalTypeCommon",
+    "ifc_class": "IfcAirTerminalType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_AirTerminalTypeRectangular",
+    "ifc_class": "IfcAirTerminalType",
+    "applicable_type_value": "Rectangular"
+  },
+  {
+    "pset_name": "Pset_AirTerminalTypeRound",
+    "ifc_class": "IfcAirTerminalType",
+    "applicable_type_value": "Round"
+  },
+  {
+    "pset_name": "Pset_AirTerminalTypeSlot",
+    "ifc_class": "IfcAirTerminalType",
+    "applicable_type_value": "Slot"
+  },
+  {
+    "pset_name": "Pset_AirTerminalTypeSquare",
+    "ifc_class": "IfcAirTerminalType",
+    "applicable_type_value": "Square"
+  },
+  {
+    "pset_name": "Pset_AirToAirHeatRecoveryTypeCommon",
+    "ifc_class": "IfcAirToAirHeatRecoveryType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_BoilerTypeCommon",
+    "ifc_class": "IfcBoilerType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_BoilerTypeSteam",
+    "ifc_class": "IfcBoilerType",
+    "applicable_type_value": "Steam"
+  },
+  {
+    "pset_name": "Pset_CableCarrierSegmentTypeCableLadderSegment",
+    "ifc_class": "IfcCableCarrierSegmentType",
+    "applicable_type_value": "CableLadderSegment"
+  },
+  {
+    "pset_name": "Pset_CableCarrierSegmentTypeCableTraySegment",
+    "ifc_class": "IfcCableCarrierSegmentType",
+    "applicable_type_value": "CableTraySegment"
+  },
+  {
+    "pset_name": "Pset_CableCarrierSegmentTypeCableTrunkingSegment",
+    "ifc_class": "IfcCableCarrierSegmentType",
+    "applicable_type_value": "CableTrunkingSegment"
+  },
+  {
+    "pset_name": "Pset_CableCarrierSegmentTypeConduitSegment",
+    "ifc_class": "IfcCableCarrierSegmentType",
+    "applicable_type_value": "ConduitSegment"
+  },
+  {
+    "pset_name": "Pset_CableSegmentTypeCableSegment",
+    "ifc_class": "IfcCableSegmentType",
+    "applicable_type_value": "CableSegment"
+  },
+  {
+    "pset_name": "Pset_CableSegmentTypeConductorSegment",
+    "ifc_class": "IfcCableSegmentType",
+    "applicable_type_value": "ConductorSegment"
+  },
+  {
+    "pset_name": "Pset_ChillerTypeCommon",
+    "ifc_class": "IfcChillerType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_CoilTypeCommon",
+    "ifc_class": "IfcCoilType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_CoilTypeHydronic",
+    "ifc_class": "IfcCoilType",
+    "applicable_type_value": "Hydronic"
+  },
+  {
+    "pset_name": "Pset_CompressorTypeCommon",
+    "ifc_class": "IfcCompressorType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_CondenserTypeCommon",
+    "ifc_class": "IfcCondenserType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_ControllerTypeCommon",
+    "ifc_class": "IfcControllerType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_ControllerTypeProportional",
+    "ifc_class": "IfcControllerType",
+    "applicable_type_value": "Proportional"
+  },
+  {
+    "pset_name": "Pset_ControllerTypeTwoPosition",
+    "ifc_class": "IfcControllerType",
+    "applicable_type_value": "TwoPosition"
+  },
+  {
+    "pset_name": "Pset_CooledBeamTypeActive",
+    "ifc_class": "IfcCooledBeamType",
+    "applicable_type_value": "Active"
+  },
+  {
+    "pset_name": "Pset_CooledBeamTypeCommon",
+    "ifc_class": "IfcCooledBeamType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_CoolingTowerTypeCommon",
+    "ifc_class": "IfcCoolingTowerType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_DamperTypeCommon",
+    "ifc_class": "IfcDamperType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_DamperTypeControlDamper",
+    "ifc_class": "IfcDamperType",
+    "applicable_type_value": "ControlDamper"
+  },
+  {
+    "pset_name": "Pset_DamperTypeFireDamper",
+    "ifc_class": "IfcDamperType",
+    "applicable_type_value": "FireDamper"
+  },
+  {
+    "pset_name": "Pset_DamperTypeFireSmokeDamper",
+    "ifc_class": "IfcDamperType",
+    "applicable_type_value": "FireSmokeDamper"
+  },
+  {
+    "pset_name": "Pset_DamperTypeSmokeDamper",
+    "ifc_class": "IfcDamperType",
+    "applicable_type_value": "SmokeDamper"
+  },
+  {
+    "pset_name": "Pset_DistributionChamberElementTypeFormedDuct",
+    "ifc_class": "IfcDistributionChamberElementType",
+    "applicable_type_value": "FormedDuct"
+  },
+  {
+    "pset_name": "Pset_DistributionChamberElementTypeInspectionChamber",
+    "ifc_class": "IfcDistributionChamberElementType",
+    "applicable_type_value": "InspectionChamber"
+  },
+  {
+    "pset_name": "Pset_DistributionChamberElementTypeInspectionPit",
+    "ifc_class": "IfcDistributionChamberElementType",
+    "applicable_type_value": "InspectionPit"
+  },
+  {
+    "pset_name": "Pset_DistributionChamberElementTypeManhole",
+    "ifc_class": "IfcDistributionChamberElementType",
+    "applicable_type_value": "Manhole"
+  },
+  {
+    "pset_name": "Pset_DistributionChamberElementTypeMeterChamber",
+    "ifc_class": "IfcDistributionChamberElementType",
+    "applicable_type_value": "MeterChamber"
+  },
+  {
+    "pset_name": "Pset_DistributionChamberElementTypeSump",
+    "ifc_class": "IfcDistributionChamberElementType",
+    "applicable_type_value": "Sump"
+  },
+  {
+    "pset_name": "Pset_DistributionChamberElementTypeTrench",
+    "ifc_class": "IfcDistributionChamberElementType",
+    "applicable_type_value": "Trench"
+  },
+  {
+    "pset_name": "Pset_DistributionChamberElementTypeValveChamber",
+    "ifc_class": "IfcDistributionChamberElementType",
+    "applicable_type_value": "ValveChamber"
+  },
+  {
+    "pset_name": "Pset_DuctFittingTypeCommon",
+    "ifc_class": "IfcDuctFittingType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_DuctSegmentTypeCommon",
+    "ifc_class": "IfcDuctSegmentType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_DuctSilencerTypeCommon",
+    "ifc_class": "IfcDuctSilencerType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_ElectricGeneratorTypeCommon",
+    "ifc_class": "IfcElectricGeneratorType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_ElectricHeaterTypeElectricalCableHeater",
+    "ifc_class": "IfcElectricHeaterType",
+    "applicable_type_value": "ElectricalCableHeater"
+  },
+  {
+    "pset_name": "Pset_ElectricHeaterTypeElectricalMatHeater",
+    "ifc_class": "IfcElectricHeaterType",
+    "applicable_type_value": "ElectricalMatHeater"
+  },
+  {
+    "pset_name": "Pset_ElectricHeaterTypeElectricalPointHeater",
+    "ifc_class": "IfcElectricHeaterType",
+    "applicable_type_value": "ElectricalPointHeater"
+  },
+  {
+    "pset_name": "Pset_EvaporativeCoolerTypeCommon",
+    "ifc_class": "IfcEvaporativeCoolerType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_EvaporatorTypeCommon",
+    "ifc_class": "IfcEvaporatorType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_FanTypeCommon",
+    "ifc_class": "IfcFanType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_FanTypeSmokeControl",
+    "ifc_class": "IfcFanType",
+    "applicable_type_value": "SmokeControl"
+  },
+  {
+    "pset_name": "Pset_FilterTypeAirParticleFilter",
+    "ifc_class": "IfcFilterType",
+    "applicable_type_value": "AirParticleFilter"
+  },
+  {
+    "pset_name": "Pset_FilterTypeCommon",
+    "ifc_class": "IfcFilterType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_FireSuppressionTerminalTypeBreechingInlet",
+    "ifc_class": "IfcFireSuppressionTerminalType",
+    "applicable_type_value": "BreechingInlet"
+  },
+  {
+    "pset_name": "Pset_FireSuppressionTerminalTypeFireHydrant",
+    "ifc_class": "IfcFireSuppressionTerminalType",
+    "applicable_type_value": "FireHydrant"
+  },
+  {
+    "pset_name": "Pset_FireSuppressionTerminalTypeHoseReel",
+    "ifc_class": "IfcFireSuppressionTerminalType",
+    "applicable_type_value": "HoseReel"
+  },
+  {
+    "pset_name": "Pset_FireSuppressionTerminalTypeSprinkler",
+    "ifc_class": "IfcFireSuppressionTerminalType",
+    "applicable_type_value": "Sprinkler"
+  },
+  {
+    "pset_name": "Pset_FlowInstrumentTypePressureGauge",
+    "ifc_class": "IfcFlowInstrumentType",
+    "applicable_type_value": "PressureGauge"
+  },
+  {
+    "pset_name": "Pset_FlowInstrumentTypeThermometer",
+    "ifc_class": "IfcFlowInstrumentType",
+    "applicable_type_value": "Thermometer"
+  },
+  {
+    "pset_name": "Pset_FlowMeterTypeCommon",
+    "ifc_class": "IfcFlowMeterType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_FlowMeterTypeEnergyMeter",
+    "ifc_class": "IfcFlowMeterType",
+    "applicable_type_value": "EnergyMeter"
+  },
+  {
+    "pset_name": "Pset_FlowMeterTypeGasMeter",
+    "ifc_class": "IfcFlowMeterType",
+    "applicable_type_value": "GasMeter"
+  },
+  {
+    "pset_name": "Pset_FlowMeterTypeOilMeter",
+    "ifc_class": "IfcFlowMeterType",
+    "applicable_type_value": "OilMeter"
+  },
+  {
+    "pset_name": "Pset_FlowMeterTypeWaterMeter",
+    "ifc_class": "IfcFlowMeterType",
+    "applicable_type_value": "WaterMeter"
+  },
+  {
+    "pset_name": "Pset_FurnitureTypeChair",
+    "ifc_class": "IfcFurnitureType",
+    "applicable_type_value": "Chair"
+  },
+  {
+    "pset_name": "Pset_FurnitureTypeCommon",
+    "ifc_class": "IfcFurnitureType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_FurnitureTypeDesk",
+    "ifc_class": "IfcFurnitureType",
+    "applicable_type_value": "Desk"
+  },
+  {
+    "pset_name": "Pset_FurnitureTypeFileCabinet",
+    "ifc_class": "IfcFurnitureType",
+    "applicable_type_value": "FileCabinet"
+  },
+  {
+    "pset_name": "Pset_FurnitureTypeTable",
+    "ifc_class": "IfcFurnitureType",
+    "applicable_type_value": "Table"
+  },
+  {
+    "pset_name": "Pset_GasTerminalTypeCommon",
+    "ifc_class": "IfcGasTerminalType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_GasTerminalTypeGasAppliance",
+    "ifc_class": "IfcGasTerminalType",
+    "applicable_type_value": "GasAppliance"
+  },
+  {
+    "pset_name": "Pset_GasTerminalTypeGasBurner",
+    "ifc_class": "IfcGasTerminalType",
+    "applicable_type_value": "GasBurner"
+  },
+  {
+    "pset_name": "Pset_HeatExchangerTypeCommon",
+    "ifc_class": "IfcHeatExchangerType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_HeatExchangerTypePlate",
+    "ifc_class": "IfcHeatExchangerType",
+    "applicable_type_value": "Plate"
+  },
+  {
+    "pset_name": "Pset_HumidifierTypeCommon",
+    "ifc_class": "IfcHumidifierType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_LampTypeCommon",
+    "ifc_class": "IfcLampType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_LightFixtureTypeCommon",
+    "ifc_class": "IfcLightFixtureType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_LightFixtureTypeExitSign",
+    "ifc_class": "IfcLightFixtureType",
+    "applicable_type_value": "ExitSign"
+  },
+  {
+    "pset_name": "Pset_LightFixtureTypeThermal",
+    "ifc_class": "IfcLightFixtureType",
+    "applicable_type_value": "Thermal"
+  },
+  {
+    "pset_name": "Pset_OutletTypeCommon",
+    "ifc_class": "IfcOutletType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_PipeFittingTypeCommon",
+    "ifc_class": "IfcPipeFittingType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_PipeSegmentTypeCommon",
+    "ifc_class": "IfcPipeSegmentType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_PipeSegmentTypeGutter",
+    "ifc_class": "IfcPipeSegmentType",
+    "applicable_type_value": "Gutter"
+  },
+  {
+    "pset_name": "Pset_ProtectiveDeviceTypeCircuitBreaker",
+    "ifc_class": "IfcProtectiveDeviceType",
+    "applicable_type_value": "CircuitBreaker"
+  },
+  {
+    "pset_name": "Pset_ProtectiveDeviceTypeCommon",
+    "ifc_class": "IfcProtectiveDeviceType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_ProtectiveDeviceTypeEarthFailureDevice",
+    "ifc_class": "IfcProtectiveDeviceType",
+    "applicable_type_value": "EarthFailureDevice"
+  },
+  {
+    "pset_name": "Pset_ProtectiveDeviceTypeFuseDisconnector",
+    "ifc_class": "IfcProtectiveDeviceType",
+    "applicable_type_value": "FuseDisconnector"
+  },
+  {
+    "pset_name": "Pset_ProtectiveDeviceTypeResidualCurrentCircuitBreaker",
+    "ifc_class": "IfcProtectiveDeviceType",
+    "applicable_type_value": "ResidualCurrentCircuitBreaker"
+  },
+  {
+    "pset_name": "Pset_ProtectiveDeviceTypeResidualCurrentSwitch",
+    "ifc_class": "IfcProtectiveDeviceType",
+    "applicable_type_value": "ResidualCurrentSwitch"
+  },
+  {
+    "pset_name": "Pset_ProtectiveDeviceTypeVaristor",
+    "ifc_class": "IfcProtectiveDeviceType",
+    "applicable_type_value": "Varistor"
+  },
+  {
+    "pset_name": "Pset_PumpTypeCommon",
+    "ifc_class": "IfcPumpType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_SanitaryTerminalTypeBath",
+    "ifc_class": "IfcSanitaryTerminalType",
+    "applicable_type_value": "Bath"
+  },
+  {
+    "pset_name": "Pset_SanitaryTerminalTypeBidet",
+    "ifc_class": "IfcSanitaryTerminalType",
+    "applicable_type_value": "Bidet"
+  },
+  {
+    "pset_name": "Pset_SanitaryTerminalTypeCistern",
+    "ifc_class": "IfcSanitaryTerminalType",
+    "applicable_type_value": "Cistern"
+  },
+  {
+    "pset_name": "Pset_SanitaryTerminalTypeSanitaryFountain",
+    "ifc_class": "IfcSanitaryTerminalType",
+    "applicable_type_value": "SanitaryFountain"
+  },
+  {
+    "pset_name": "Pset_SanitaryTerminalTypeShower",
+    "ifc_class": "IfcSanitaryTerminalType",
+    "applicable_type_value": "Shower"
+  },
+  {
+    "pset_name": "Pset_SanitaryTerminalTypeSink",
+    "ifc_class": "IfcSanitaryTerminalType",
+    "applicable_type_value": "Sink"
+  },
+  {
+    "pset_name": "Pset_SanitaryTerminalTypeToiletPan",
+    "ifc_class": "IfcSanitaryTerminalType",
+    "applicable_type_value": "ToiletPan"
+  },
+  {
+    "pset_name": "Pset_SanitaryTerminalTypeUrinal",
+    "ifc_class": "IfcSanitaryTerminalType",
+    "applicable_type_value": "Urinal"
+  },
+  {
+    "pset_name": "Pset_SanitaryTerminalTypeWCSeat",
+    "ifc_class": "IfcSanitaryTerminalType",
+    "applicable_type_value": "WCSeat"
+  },
+  {
+    "pset_name": "Pset_SanitaryTerminalTypeWashHandBasin",
+    "ifc_class": "IfcSanitaryTerminalType",
+    "applicable_type_value": "WashHandBasin"
+  },
+  {
+    "pset_name": "Pset_SensorTypeCO2Sensor",
+    "ifc_class": "IfcSensorType",
+    "applicable_type_value": "CO2Sensor"
+  },
+  {
+    "pset_name": "Pset_SensorTypeFireSensor",
+    "ifc_class": "IfcSensorType",
+    "applicable_type_value": "FireSensor"
+  },
+  {
+    "pset_name": "Pset_SensorTypeGasSensor",
+    "ifc_class": "IfcSensorType",
+    "applicable_type_value": "GasSensor"
+  },
+  {
+    "pset_name": "Pset_SensorTypeHeatSensor",
+    "ifc_class": "IfcSensorType",
+    "applicable_type_value": "HeatSensor"
+  },
+  {
+    "pset_name": "Pset_SensorTypeHumiditySensor",
+    "ifc_class": "IfcSensorType",
+    "applicable_type_value": "HumiditySensor"
+  },
+  {
+    "pset_name": "Pset_SensorTypeLightSensor",
+    "ifc_class": "IfcSensorType",
+    "applicable_type_value": "LightSensor"
+  },
+  {
+    "pset_name": "Pset_SensorTypeMovementSensor",
+    "ifc_class": "IfcSensorType",
+    "applicable_type_value": "MovementSensor"
+  },
+  {
+    "pset_name": "Pset_SensorTypePressureSensor",
+    "ifc_class": "IfcSensorType",
+    "applicable_type_value": "PressureSensor"
+  },
+  {
+    "pset_name": "Pset_SensorTypeSmokeSensor",
+    "ifc_class": "IfcSensorType",
+    "applicable_type_value": "SmokeSensor"
+  },
+  {
+    "pset_name": "Pset_SensorTypeSoundSensor",
+    "ifc_class": "IfcSensorType",
+    "applicable_type_value": "SoundSensor"
+  },
+  {
+    "pset_name": "Pset_SensorTypeTemperatureSensor",
+    "ifc_class": "IfcSensorType",
+    "applicable_type_value": "TemperatureSensor"
+  },
+  {
+    "pset_name": "Pset_SpaceHeaterTypeCommon",
+    "ifc_class": "IfcSpaceHeaterType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_SpaceHeaterTypeHydronic",
+    "ifc_class": "IfcSpaceHeaterType",
+    "applicable_type_value": "Hydronic"
+  },
+  {
+    "pset_name": "Pset_SwitchingDeviceTypeCommon",
+    "ifc_class": "IfcSwitchingDeviceType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_SwitchingDeviceTypeContactor",
+    "ifc_class": "IfcSwitchingDeviceType",
+    "applicable_type_value": "Contactor"
+  },
+  {
+    "pset_name": "Pset_SwitchingDeviceTypeEmergencyStop",
+    "ifc_class": "IfcSwitchingDeviceType",
+    "applicable_type_value": "EmergencyStop"
+  },
+  {
+    "pset_name": "Pset_SwitchingDeviceTypeStarter",
+    "ifc_class": "IfcSwitchingDeviceType",
+    "applicable_type_value": "Starter"
+  },
+  {
+    "pset_name": "Pset_SwitchingDeviceTypeSwitchDisconnector",
+    "ifc_class": "IfcSwitchingDeviceType",
+    "applicable_type_value": "SwitchDisconnector"
+  },
+  {
+    "pset_name": "Pset_SwitchingDeviceTypeToggleSwitch",
+    "ifc_class": "IfcSwitchingDeviceType",
+    "applicable_type_value": "ToggleSwitch"
+  },
+  {
+    "pset_name": "Pset_SystemFurnitureElementTypeCommon",
+    "ifc_class": "IfcSystemFurnitureElementType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_SystemFurnitureElementTypePanel",
+    "ifc_class": "IfcSystemFurnitureElementType",
+    "applicable_type_value": "Panel"
+  },
+  {
+    "pset_name": "Pset_SystemFurnitureElementTypeWorkSurface",
+    "ifc_class": "IfcSystemFurnitureElementType",
+    "applicable_type_value": "WorkSurface"
+  },
+  {
+    "pset_name": "Pset_TankTypeCommon",
+    "ifc_class": "IfcTankType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_TankTypeExpansion",
+    "ifc_class": "IfcTankType",
+    "applicable_type_value": "Expansion"
+  },
+  {
+    "pset_name": "Pset_TankTypePreformed",
+    "ifc_class": "IfcTankType",
+    "applicable_type_value": "Preformed"
+  },
+  {
+    "pset_name": "Pset_TankTypePressureVessel",
+    "ifc_class": "IfcTankType",
+    "applicable_type_value": "PressureVessel"
+  },
+  {
+    "pset_name": "Pset_TankTypeSectional",
+    "ifc_class": "IfcTankType",
+    "applicable_type_value": "Sectional"
+  },
+  {
+    "pset_name": "Pset_TransformerTypeCommon",
+    "ifc_class": "IfcTransformerType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_TubeBundleTypeCommon",
+    "ifc_class": "IfcTubeBundleType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_TubeBundleTypeFinned",
+    "ifc_class": "IfcTubeBundleType",
+    "applicable_type_value": "Finned"
+  },
+  {
+    "pset_name": "Pset_UnitaryEquipmentTypeAirConditioningUnit",
+    "ifc_class": "IfcUnitaryEquipmentType",
+    "applicable_type_value": "AirConditioningUnit"
+  },
+  {
+    "pset_name": "Pset_UnitaryEquipmentTypeAirHandler",
+    "ifc_class": "IfcUnitaryEquipmentType",
+    "applicable_type_value": "AirHandler"
+  },
+  {
+    "pset_name": "Pset_ValveTypeAirRelease",
+    "ifc_class": "IfcValveType",
+    "applicable_type_value": "AirRelease"
+  },
+  {
+    "pset_name": "Pset_ValveTypeCommon",
+    "ifc_class": "IfcValveType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_ValveTypeDrawOffCock",
+    "ifc_class": "IfcValveType",
+    "applicable_type_value": "DrawOffCock"
+  },
+  {
+    "pset_name": "Pset_ValveTypeFaucet",
+    "ifc_class": "IfcValveType",
+    "applicable_type_value": "Faucet"
+  },
+  {
+    "pset_name": "Pset_ValveTypeFlushing",
+    "ifc_class": "IfcValveType",
+    "applicable_type_value": "Flushing"
+  },
+  {
+    "pset_name": "Pset_ValveTypeGasTap",
+    "ifc_class": "IfcValveType",
+    "applicable_type_value": "GasTap"
+  },
+  {
+    "pset_name": "Pset_ValveTypeIsolating",
+    "ifc_class": "IfcValveType",
+    "applicable_type_value": "Isolating"
+  },
+  {
+    "pset_name": "Pset_ValveTypeMixing",
+    "ifc_class": "IfcValveType",
+    "applicable_type_value": "Mixing"
+  },
+  {
+    "pset_name": "Pset_ValveTypePressureReducing",
+    "ifc_class": "IfcValveType",
+    "applicable_type_value": "PressureReducing"
+  },
+  {
+    "pset_name": "Pset_ValveTypePressureRelief",
+    "ifc_class": "IfcValveType",
+    "applicable_type_value": "PressureRelief"
+  },
+  {
+    "pset_name": "Pset_VibrationIsolatorTypeCommon",
+    "ifc_class": "IfcVibrationIsolatorType",
+    "applicable_type_value": "Common"
+  },
+  {
+    "pset_name": "Pset_WasteTerminalTypeFloorTrap",
+    "ifc_class": "IfcWasteTerminalType",
+    "applicable_type_value": "FloorTrap"
+  },
+  {
+    "pset_name": "Pset_WasteTerminalTypeFloorWaste",
+    "ifc_class": "IfcWasteTerminalType",
+    "applicable_type_value": "FloorWaste"
+  },
+  {
+    "pset_name": "Pset_WasteTerminalTypeGreaseInterceptor",
+    "ifc_class": "IfcWasteTerminalType",
+    "applicable_type_value": "GreaseInterceptor"
+  },
+  {
+    "pset_name": "Pset_WasteTerminalTypeGullySump",
+    "ifc_class": "IfcWasteTerminalType",
+    "applicable_type_value": "GullySump"
+  },
+  {
+    "pset_name": "Pset_WasteTerminalTypeGullyTrap",
+    "ifc_class": "IfcWasteTerminalType",
+    "applicable_type_value": "GullyTrap"
+  },
+  {
+    "pset_name": "Pset_WasteTerminalTypeOilInterceptor",
+    "ifc_class": "IfcWasteTerminalType",
+    "applicable_type_value": "OilInterceptor"
+  },
+  {
+    "pset_name": "Pset_WasteTerminalTypePetrolInterceptor",
+    "ifc_class": "IfcWasteTerminalType",
+    "applicable_type_value": "PetrolInterceptor"
+  },
+  {
+    "pset_name": "Pset_WasteTerminalTypeRoofDrain",
+    "ifc_class": "IfcWasteTerminalType",
+    "applicable_type_value": "RoofDrain"
+  },
+  {
+    "pset_name": "Pset_WasteTerminalTypeWasteDisposalUnit",
+    "ifc_class": "IfcWasteTerminalType",
+    "applicable_type_value": "WasteDisposalUnit"
+  },
+  {
+    "pset_name": "Pset_WasteTerminalTypeWasteTrap",
+    "ifc_class": "IfcWasteTerminalType",
+    "applicable_type_value": "WasteTrap"
+  }
+]
