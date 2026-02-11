@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title">
+    <h2>COBie QC</h2>
+    <span class="badge">COBieQcReporter</span>
+  </div>
+  <p>Upload a COBie Excel workbook and generate a QC HTML report for Design (D) or Construction (C) stage validation.</p>
+
+  <form id="cobieqcForm" class="two-col" style="margin-bottom:16px; gap:16px; align-items:start;">
+    <div>
+      <label for="cobieqcFile">COBie workbook (.xlsx)</label>
+      <input id="cobieqcFile" type="file" accept=".xlsx" required />
+      <div class="field" style="margin-top:12px;">
+        <label>Stage</label>
+        <div style="display:flex; gap:16px; margin-top:6px;">
+          <label><input type="radio" name="cobieStage" value="D" checked /> Design (D)</label>
+          <label><input type="radio" name="cobieStage" value="C" /> Construction (C)</label>
+        </div>
+      </div>
+      <button id="cobieqcRun" class="btn" type="submit" style="margin-top:12px;" disabled>Run COBie QC</button>
+    </div>
+    <div>
+      <div class="upload-progress visible" style="margin-top:0;">
+        <div class="upload-progress-top">
+          <strong>Job progress</strong>
+          <span id="cobieqcProgressPct">0%</span>
+        </div>
+        <div class="progress-bar">
+          <div class="progress-bar-fill" id="cobieqcProgressBar" style="width:0%"></div>
+        </div>
+        <div class="muted" id="cobieqcStatus">Waiting for input.</div>
+      </div>
+    </div>
+  </form>
+
+  <h3>Live Logs</h3>
+  <pre id="cobieqcLogs" style="background:#111;color:#ddd;padding:12px;border-radius:8px;max-height:280px;overflow:auto;">No logs yet.</pre>
+
+  <div id="cobieqcError" class="card" style="display:none; margin-top:12px; border-left:4px solid #c0392b;"></div>
+
+  <div id="cobieqcResult" style="display:none; margin-top:16px;">
+    <h3>Report Preview</h3>
+    <iframe id="cobieqcPreview" title="COBie QC report preview" sandbox="allow-same-origin" style="width:100%;height:520px;border:1px solid #d8d8d8;border-radius:8px;"></iframe>
+    <div style="margin-top:12px;">
+      <a id="cobieqcDownload" class="btn secondary" href="#" download>Download HTML report</a>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/cobieqc.js"></script>
+{% endblock %}

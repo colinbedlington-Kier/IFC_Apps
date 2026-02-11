@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -38,6 +39,15 @@ from mapping_store import (
     save_mapping_for_check,
 )
 from validation import validate_value
+from cobieqc_service.jobs import (
+    STATUS_DONE,
+    STATUS_ERROR,
+    STATUS_RUNNING,
+    CobieQcJobStore,
+)
+from cobieqc_service.runner import run_cobieqc
+from cobieqc_service.security import sanitize_filename as sanitize_upload_filename
+from cobieqc_service.security import validate_upload
 
 STEP2IFC_ROOT = Path(__file__).resolve().parent / "step2ifc"
 if STEP2IFC_ROOT.exists():
@@ -130,6 +140,7 @@ SESSION_STORE = SessionStore(os.path.join(tempfile.gettempdir(), "ifc_app_sessio
 STEP2IFC_JOBS: Dict[str, Dict[str, Any]] = {}
 DATA_EXTRACT_JOBS: Dict[str, Dict[str, Any]] = {}
 IFC_QA_JOBS: Dict[str, Dict[str, Any]] = {}
+COBIEQC_JOB_STORE = CobieQcJobStore()
 
 
 # ----------------------------------------------------------------------------
@@ -4132,6 +4143,59 @@ def apply_edits(session_id: str, in_path: str, edits: List[Dict[str, Any]]) -> T
     return out_name, audits
 
 
+
+def _tail_text(value: str, max_chars: int = 4000) -> str:
+    return (value or "")[-max_chars:]
+
+
+def _run_cobieqc_job(job_id: str) -> None:
+    try:
+        job = COBIEQC_JOB_STORE.update_job(
+            job_id,
+            status=STATUS_RUNNING,
+            progress=0.1,
+            started_at=datetime.datetime.utcnow().isoformat() + "Z",
+            message="Running COBieQC reporter",
+        )
+        job_dir = COBIEQC_JOB_STORE.get_job_dir(job_id)
+        input_path = job_dir / job.get("input_filename", "input.xlsx")
+        stage = str(job.get("stage", "D")).upper()
+        COBIEQC_JOB_STORE.append_log(job_id, f"Running stage {stage} for {input_path.name}")
+
+        result = run_cobieqc(str(input_path), stage, str(job_dir))
+        COBIEQC_JOB_STORE.append_log(job_id, "--- STDOUT ---")
+        COBIEQC_JOB_STORE.append_log(job_id, result.get("stdout", ""))
+        COBIEQC_JOB_STORE.append_log(job_id, "--- STDERR ---")
+        COBIEQC_JOB_STORE.append_log(job_id, result.get("stderr", ""))
+
+        if result.get("ok"):
+            COBIEQC_JOB_STORE.update_job(
+                job_id,
+                status=STATUS_DONE,
+                progress=1.0,
+                message="Report generated",
+                finished_at=datetime.datetime.utcnow().isoformat() + "Z",
+                output_filename=result.get("output_filename", "report.html"),
+            )
+        else:
+            COBIEQC_JOB_STORE.update_job(
+                job_id,
+                status=STATUS_ERROR,
+                progress=1.0,
+                message=result.get("error") or "COBieQC failed",
+                finished_at=datetime.datetime.utcnow().isoformat() + "Z",
+            )
+    except Exception as exc:
+        COBIEQC_JOB_STORE.append_log(job_id, f"Unhandled error: {exc}")
+        COBIEQC_JOB_STORE.update_job(
+            job_id,
+            status=STATUS_ERROR,
+            progress=1.0,
+            message=str(exc),
+            finished_at=datetime.datetime.utcnow().isoformat() + "Z",
+        )
+
+
 # ----------------------------------------------------------------------------
 # FastAPI app + routes
 # ----------------------------------------------------------------------------
@@ -4144,6 +4208,15 @@ templates = Jinja2Templates(directory="templates")
 @app.on_event("startup")
 def startup_cleanup():
     SESSION_STORE.cleanup_stale()
+    COBIEQC_JOB_STORE.cleanup_old_jobs()
+    try:
+        proc = subprocess.run(["java", "-version"], capture_output=True, text=True, check=False, timeout=10)
+        if proc.returncode == 0:
+            APP_LOGGER.info("COBieQC Java runtime detected")
+        else:
+            APP_LOGGER.warning("COBieQC Java runtime check failed: %s", (proc.stderr or proc.stdout or "").strip())
+    except Exception as exc:
+        APP_LOGGER.warning("COBieQC Java runtime unavailable: %s", exc)
 
 
 @app.on_event("shutdown")
@@ -4222,6 +4295,11 @@ def step2ifc_page(request: Request):
     return templates.TemplateResponse("step2ifc.html", {"request": request, "active": "step2ifc"})
 
 
+@app.get("/tools/cobieqc", response_class=HTMLResponse)
+def cobieqc_page(request: Request):
+    return templates.TemplateResponse("cobieqc.html", {"request": request, "active": "cobieqc"})
+
+
 @app.get("/files", response_class=HTMLResponse)
 def files_page(request: Request):
     return templates.TemplateResponse("files.html", {"request": request, "active": "files"})
@@ -4283,6 +4361,103 @@ def list_files(session_id: str):
                 "modified": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
             })
     return {"files": files}
+
+
+@app.get("/api/tools/cobieqc/health")
+def cobieqc_health():
+    try:
+        proc = subprocess.run(["java", "-version"], capture_output=True, text=True, check=False, timeout=10)
+    except Exception as exc:
+        return {"ok": False, "java_available": False, "detail": str(exc)}
+    return {
+        "ok": proc.returncode == 0,
+        "java_available": proc.returncode == 0,
+        "detail": (proc.stderr or proc.stdout or "").strip(),
+    }
+
+
+@app.post("/api/tools/cobieqc/run")
+async def cobieqc_run(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    stage: str = Form("D"),
+):
+    stage = (stage or "D").upper()
+    if stage not in {"D", "C"}:
+        raise HTTPException(status_code=400, detail="Stage must be D or C")
+
+    data = await file.read()
+    safe_name = sanitize_upload_filename(file.filename or "input.xlsx")
+    try:
+        validate_upload(safe_name, len(data))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    job = COBIEQC_JOB_STORE.create_job(stage=stage, original_filename=safe_name)
+    job_dir = COBIEQC_JOB_STORE.get_job_dir(job["job_id"])
+    input_path = job_dir / "input.xlsx"
+    input_path.write_bytes(data)
+    COBIEQC_JOB_STORE.append_log(job["job_id"], f"Saved input file {safe_name} ({len(data)} bytes)")
+
+    background_tasks.add_task(_run_cobieqc_job, job["job_id"])
+    return {"job_id": job["job_id"], "status": "queued"}
+
+
+@app.get("/api/tools/cobieqc/jobs/{job_id}")
+def cobieqc_job_status(job_id: str):
+    if not COBIEQC_JOB_STORE.job_exists(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = COBIEQC_JOB_STORE.read_job(job_id)
+    return {
+        "job_id": job["job_id"],
+        "status": job.get("status"),
+        "stage": job.get("stage"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "message": job.get("message"),
+        "progress": job.get("progress", 0.0),
+        "logs_tail": COBIEQC_JOB_STORE.logs_tail(job_id),
+    }
+
+
+@app.get("/api/tools/cobieqc/jobs/{job_id}/result")
+def cobieqc_job_result(job_id: str):
+    if not COBIEQC_JOB_STORE.job_exists(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = COBIEQC_JOB_STORE.read_job(job_id)
+    if job.get("status") not in {STATUS_DONE, STATUS_ERROR}:
+        raise HTTPException(status_code=409, detail="Job not finished")
+
+    job_dir = COBIEQC_JOB_STORE.get_job_dir(job_id)
+    output_path = job_dir / (job.get("output_filename") or "report.html")
+    preview_html = ""
+    if output_path.exists() and output_path.stat().st_size > 0:
+        preview_html = output_path.read_text(encoding="utf-8", errors="replace")[:200000]
+
+    logs = COBIEQC_JOB_STORE.logs_tail(job_id, max_chars=24000)
+    return {
+        "ok": job.get("status") == STATUS_DONE,
+        "output_filename": output_path.name,
+        "preview_html": preview_html,
+        "stdout_tail": _tail_text(logs),
+        "stderr_tail": _tail_text(logs),
+        "message": job.get("message"),
+    }
+
+
+@app.get("/api/tools/cobieqc/jobs/{job_id}/download")
+def cobieqc_job_download(job_id: str):
+    if not COBIEQC_JOB_STORE.job_exists(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = COBIEQC_JOB_STORE.read_job(job_id)
+    output_path = COBIEQC_JOB_STORE.get_job_dir(job_id) / (job.get("output_filename") or "report.html")
+    if not output_path.exists():
+        raise HTTPException(status_code=404, detail="Report not found")
+    return FileResponse(
+        path=str(output_path),
+        media_type="text/html",
+        filename=output_path.name,
+    )
 
 
 @app.post("/api/session/{session_id}/step2ifc/auto")
