@@ -57,6 +57,7 @@ except Exception as exc:  # pragma: no cover - runtime dependency checks
 APP_LOGGER = logging.getLogger("ifc_app")
 RESOURCE_DIR = Path(__file__).resolve().parent / "resources"
 QA_RESOURCE_DIR = Path(__file__).resolve().parent / "app" / "resources" / "ifc_qa"
+DATA_DIR = Path(__file__).resolve().parent / "data"
 
 
 # ----------------------------------------------------------------------------
@@ -2056,46 +2057,87 @@ def resolve_occurrence_from_type_class(schema_name: str, type_class: Optional[st
         return base
     return LEGACY_OCCURRENCE_FALLBACK.get(type_class.upper())
 
-FORCED_PREDEFINED = {
-    "ifcpipesegmenttype": "RIGIDSEGMENT",
-}
+_ENUM_LIBRARY_CACHE: Dict[str, Dict[Tuple[str, str, str], str]] = {}
+_PSET_APPLICABILITY_CACHE: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None
 
 
-def build_enum_library(model):
-    enums = {}
-    if model is None:
-        return enums
+def build_entity_predefined_enum_library(schema_name: str) -> Dict[Tuple[str, str, str], str]:
+    if schema_name in _ENUM_LIBRARY_CACHE:
+        return _ENUM_LIBRARY_CACHE[schema_name]
+    lookup: Dict[Tuple[str, str, str], str] = {}
+    schema_def = _schema_definition(schema_name)
+    if schema_def is None:
+        _ENUM_LIBRARY_CACHE[schema_name] = lookup
+        return lookup
 
-    try:
-        schema = model.wrapped_data.schema
-    except Exception:
+    for entity_name in _entity_names(schema_def):
+        info = _predefined_type_info(schema_name, entity_name)
+        if not info.get("has_predefined"):
+            continue
+        for lit in info.get("enum_items", []):
+            lookup[(entity_name, "PredefinedType", normalize_token(lit))] = lit
+
+    _ENUM_LIBRARY_CACHE[schema_name] = lookup
+    return lookup
+
+
+def _extract_applicable_type_value(pset_name: str, ifc_class: str) -> str:
+    stem = pset_name[len("Pset_") :] if pset_name.startswith("Pset_") else pset_name
+    class_stem = ifc_class[3:] if ifc_class.startswith("Ifc") else ifc_class
+    if stem.startswith(class_stem):
+        return stem[len(class_stem) :]
+    return ""
+
+
+def load_ifc2x3_pset_applicability_library() -> Dict[Tuple[str, str], Dict[str, str]]:
+    global _PSET_APPLICABILITY_CACHE
+    if _PSET_APPLICABILITY_CACHE is not None:
+        return _PSET_APPLICABILITY_CACHE
+
+    lookup: Dict[Tuple[str, str], Dict[str, str]] = {}
+    p = DATA_DIR / "ifc2x3_pset_applicability.json"
+    if p.exists():
         try:
-            schema = model.wrapped_data.schema()
+            records = json.loads(p.read_text(encoding="utf-8"))
+            for row in records:
+                ifc_class = row.get("ifc_class", "")
+                value = row.get("applicable_type_value", "")
+                if not ifc_class or not value:
+                    continue
+                lookup[(ifc_class, normalize_token(value))] = {
+                    "pset_name": row.get("pset_name", ""),
+                    "applicable_type_value": value,
+                }
         except Exception:
-            return enums
+            lookup = {}
 
-    try:
-        for t in schema.types():
-            try:
-                is_enum = t.is_enumeration_type()
-            except AttributeError:
-                is_enum = getattr(t, "is_enumeration", lambda: False)()
-            if not is_enum:
-                continue
+    if not lookup:
+        template = ifcopenshell.util.pset.get_template("IFC2X3")
+        for template_file in template.templates:
+            for pset in template_file.by_type("IfcPropertySetTemplate"):
+                pset_name = getattr(pset, "Name", "") or ""
+                ifc_class = getattr(pset, "ApplicableEntity", "") or ""
+                if not pset_name.startswith("Pset_"):
+                    continue
+                if not ifc_class.startswith("Ifc") or not ifc_class.endswith("Type"):
+                    continue
+                value = _extract_applicable_type_value(pset_name, ifc_class)
+                if not value:
+                    continue
+                lookup[(ifc_class, normalize_token(value))] = {
+                    "pset_name": pset_name,
+                    "applicable_type_value": value,
+                }
 
-            name = t.name()
-            values = set()
-            try:
-                for it in t.enumeration_items():
-                    values.add(it.name())
-            except Exception:
-                pass
-            if values:
-                enums[name] = values
-    except Exception:
-        pass
+    _PSET_APPLICABILITY_CACHE = lookup
+    return lookup
 
-    return enums
+
+def resolve_pset_applicability(resolved_type_class: str, parsed_predef_token: str) -> Optional[Dict[str, str]]:
+    if not resolved_type_class or not parsed_predef_token:
+        return None
+    lib = load_ifc2x3_pset_applicability_library()
+    return lib.get((resolved_type_class, normalize_token(parsed_predef_token)))
 
 
 def resolve_type_and_predefined_for_name(type_name: str, schema_name: str) -> Dict[str, Any]:
@@ -2108,11 +2150,13 @@ def resolve_type_and_predefined_for_name(type_name: str, schema_name: str) -> Di
         "enum_items": [],
     }
     predef_resolution = resolve_predefined_literal(resolved.get("parsed_predef", ""), predef_info.get("enum_items", []))
+    pset_match = resolve_pset_applicability(resolved_type_class, resolved.get("parsed_predef", "")) if schema_name.upper() == "IFC2X3" else None
     return {
         **resolved,
         "resolved_predefined_type": predef_resolution.get("value", ""),
         "resolved_predefined_reason": predef_resolution.get("reason", ""),
         "predef_info": predef_info,
+        "pset_applicability_match": pset_match,
     }
 
 
@@ -2683,12 +2727,14 @@ def scan_predefined_types(
         element_type = ifcopenshell.util.element.get_type(element)
         type_name = getattr(element_type, "Name", "") if element_type else ""
         resolved = resolve_type_and_predefined_for_name(type_name, schema_name)
-        match_found = bool(resolved.get("resolved_type_class"))
+        resolved_type_class = resolved.get("resolved_type_class")
+        parsed_predef_token = resolved.get("parsed_predef", "")
 
         predef_target = None
         predef_target_source = "none"
-        predef_reason = ""
         predef_target_info = {"has_predefined": False, "enum_name": None, "enum_items": []}
+        alt_target = None
+        alt_target_info = {"has_predefined": False, "enum_name": None, "enum_items": []}
 
         if element_type is not None:
             type_info = _predefined_type_info(schema_name, element_type.is_a())
@@ -2696,7 +2742,10 @@ def scan_predefined_types(
                 predef_target = element_type
                 predef_target_source = "type"
                 predef_target_info = type_info
-                predef_reason = "target type has PredefinedType"
+            occ_info = _predefined_type_info(schema_name, element.is_a())
+            if occ_info["has_predefined"]:
+                alt_target = element
+                alt_target_info = occ_info
 
         if predef_target is None:
             occ_info = _predefined_type_info(schema_name, element.is_a())
@@ -2704,32 +2753,58 @@ def scan_predefined_types(
                 predef_target = element
                 predef_target_source = "occurrence"
                 predef_target_info = occ_info
-                predef_reason = "target occurrence has PredefinedType"
+            if element_type is not None:
+                type_info = _predefined_type_info(schema_name, element_type.is_a())
+                if type_info["has_predefined"]:
+                    alt_target = element_type
+                    alt_target_info = type_info
 
+        match_source = "none"
+        matched_pset_name = ""
+        predef_reason = ""
         proposed = "USERDEFINED"
-        resolved_predef = resolved.get("resolved_predefined_type") or ""
-        resolved_reason = resolved.get("resolved_predefined_reason") or ""
-        resolved_type_class = resolved.get("resolved_type_class")
-        resolved_type_info = (
-            _predefined_type_info(schema_name, resolved_type_class) if resolved_type_class else {"has_predefined": False}
-        )
-        if not match_found:
-            predef_reason = "classish not resolved from type name"
-        elif not resolved_type_info.get("has_predefined"):
-            predef_reason = "PredefinedType not supported for this class in schema"
-        elif predef_target is None:
-            predef_reason = "PredefinedType not writable (no attr on type or occurrence)"
-        elif predef_target_info.get("enum_items"):
-            enum_items = predef_target_info.get("enum_items")
-            predef_choice = resolve_predefined_literal(resolved.get("parsed_predef", ""), enum_items)
-            proposed = predef_choice["value"] or "USERDEFINED"
-            predef_reason = predef_choice["reason"]
-        elif predef_target_info.get("has_predefined"):
-            proposed = resolved_predef or "USERDEFINED"
-            predef_reason = resolved_reason or "PredefinedType supported without enum metadata"
+
+        if not resolved_type_class:
+            predef_reason = "class resolution failed"
         else:
-            proposed = "USERDEFINED"
-            predef_reason = "PredefinedType not supported for this class in schema"
+            enum_lookup = build_entity_predefined_enum_library(schema_name)
+            normalized_token = normalize_token(parsed_predef_token)
+
+            if predef_target is not None and normalized_token:
+                key = (predef_target.is_a(), "PredefinedType", normalized_token)
+                enum_val = enum_lookup.get(key)
+                if enum_val:
+                    proposed = enum_val
+                    match_source = "enum"
+                    predef_reason = "enum matched on primary target"
+
+            if match_source == "none" and alt_target is not None and normalized_token:
+                key = (alt_target.is_a(), "PredefinedType", normalized_token)
+                enum_val = enum_lookup.get(key)
+                if enum_val:
+                    proposed = enum_val
+                    match_source = "enum_alt_target"
+                    predef_reason = "enum matched on alternate target"
+
+            if match_source == "none" and schema_name.upper() == "IFC2X3":
+                pset_match = resolve_pset_applicability(resolved_type_class, parsed_predef_token)
+                if pset_match:
+                    proposed = pset_match["applicable_type_value"]
+                    matched_pset_name = pset_match["pset_name"]
+                    match_source = "pset_applicability"
+                    predef_reason = "matched IFC2X3 Pset applicability"
+
+            if match_source == "none" and predef_target is not None and predef_target_info.get("enum_items"):
+                if "USERDEFINED" in predef_target_info.get("enum_items", []):
+                    proposed = "USERDEFINED"
+                    match_source = "enum_fallback_userdefined"
+                    predef_reason = "no enum match → USERDEFINED"
+                else:
+                    predef_reason = "no enum match"
+            elif match_source == "none":
+                predef_reason = "no enum or IFC2X3 pset applicability match"
+
+        match_found = match_source != "none"
 
         rows.append(
             {
@@ -2744,9 +2819,9 @@ def scan_predefined_types(
                 "predef_target_globalid": getattr(predef_target, "GlobalId", None) if predef_target else None,
                 "predef_target_id": int(predef_target.id()) if predef_target else None,
                 "predef_target_class": predef_target.is_a() if predef_target else None,
-                "parsed_classish": resolved.get("parsed_classish", ""),
-                "resolved_type_class": resolved.get("resolved_type_class"),
-                "parsed_predef_token": resolved.get("parsed_predef", ""),
+                "parsed_class": resolved.get("parsed_classish", ""),
+                "resolved_type_class": resolved_type_class,
+                "parsed_predef_token": parsed_predef_token,
                 "resolved_predefined_type": proposed,
                 "target_source": predef_target_source,
                 "target_globalid": getattr(predef_target, "GlobalId", None) if predef_target else None,
@@ -2754,6 +2829,8 @@ def scan_predefined_types(
                 "target_class": predef_target.is_a() if predef_target else None,
                 "predef_supported": bool(predef_target_info.get("has_predefined")),
                 "predef_reason": predef_reason,
+                "match_source": match_source,
+                "matched_pset_name": matched_pset_name,
                 "schema": schema_name,
             }
         )
@@ -2769,10 +2846,81 @@ def apply_predefined_type_changes(
     change_log = []
     now = datetime.datetime.utcnow().isoformat() + "Z"
     updated = 0
+
+    def _ensure_pset_on_entity(entity, pset_name: str) -> bool:
+        if not entity or not pset_name:
+            return False
+        try:
+            psets = ifcopenshell.util.element.get_psets(entity, psets_only=True, include_inherited=False) or {}
+        except TypeError:
+            psets = ifcopenshell.util.element.get_psets(entity, psets_only=True) or {}
+        if pset_name in psets:
+            return False
+        owner_history = next(iter(model.by_type("IfcOwnerHistory")), None)
+        if owner_history is None:
+            return False
+        pset = model.create_entity(
+            "IfcPropertySet",
+            GlobalId=new_guid(),
+            OwnerHistory=owner_history,
+            Name=pset_name,
+            Description=None,
+            HasProperties=[],
+        )
+        if hasattr(entity, "HasPropertySets"):
+            existing = list(getattr(entity, "HasPropertySets", []) or [])
+            existing.append(pset)
+            entity.HasPropertySets = existing
+        else:
+            model.create_entity(
+                "IfcRelDefinesByProperties",
+                GlobalId=new_guid(),
+                OwnerHistory=owner_history,
+                Name=None,
+                Description=None,
+                RelatedObjects=[entity],
+                RelatingPropertyDefinition=pset,
+            )
+        return True
+
     for row in rows_to_apply:
         target = row.get("proposed_predefined_type")
         if target in (None, ""):
             continue
+        if row.get("match_source") == "pset_applicability":
+            type_entity = None
+            type_gid = row.get("target_globalid")
+            if type_gid:
+                type_entity = model.by_guid(type_gid)
+            if type_entity is None:
+                element = model.by_guid(row.get("globalid")) if row.get("globalid") else None
+                if element is not None:
+                    type_entity = ifcopenshell.util.element.get_type(element)
+            if type_entity is not None:
+                pset_name = row.get("matched_pset_name") or ""
+                added = _ensure_pset_on_entity(type_entity, pset_name)
+                change_log.append(
+                    {
+                        "globalid": row.get("globalid"),
+                        "ifc_class": row.get("ifc_class"),
+                        "target": "pset_applicability",
+                        "target_source": "type",
+                        "target_globalid": getattr(type_entity, "GlobalId", None),
+                        "target_ifc_id": int(type_entity.id()),
+                        "old_value": "",
+                        "new_value": target,
+                        "mapping_reason": row.get("predef_reason") or "matched IFC2X3 Pset applicability",
+                        "target_class": type_entity.is_a(),
+                        "applied_pset": pset_name,
+                        "applied_mode": "pset_only",
+                        "allowed_status": "n/a",
+                        "timestamp": now,
+                    }
+                )
+                if added:
+                    updated += 1
+            continue
+
         target_entity = None
         target_gid = row.get("target_globalid") or row.get("predef_target_globalid")
         if target_gid:
@@ -2809,6 +2957,8 @@ def apply_predefined_type_changes(
                 "new_value": target,
                 "mapping_reason": row.get("predef_reason") or ("Type name match" if row.get("match_found") else "No match"),
                 "target_class": row.get("target_class") or row.get("predef_target_class") or (target_entity.is_a() if target_entity else None),
+                "applied_pset": "",
+                "applied_mode": "predefined_type",
                 "allowed_status": "n/a",
                 "timestamp": now,
             }
@@ -2838,6 +2988,8 @@ def apply_predefined_type_changes(
                 "new_value",
                 "mapping_reason",
                 "target_class",
+                "applied_pset",
+                "applied_mode",
                 "allowed_status",
                 "timestamp",
             ],

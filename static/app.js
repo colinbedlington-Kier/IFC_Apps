@@ -770,10 +770,12 @@ function renderProxyPredefRows() {
       <td>${row.globalid}</td>
       <td>${row.ifc_class}</td>
       <td>${row.type_name || "-"}</td>
-      <td>${row.parsed_classish || "-"}</td>
+      <td>${row.parsed_class || "-"}</td>
       <td>${row.resolved_type_class || "-"}</td>
       <td>${row.parsed_predef_token || "-"}</td>
       <td>${row.match_found ? "Yes" : "No"}</td>
+      <td>${row.match_source || "none"}</td>
+      <td>${row.matched_pset_name || "-"}</td>
       <td>${row.proposed_predefined_type}</td>
       <td>${row.target_source || "none"}</td>
       <td>${row.predef_reason || "-"}</td>

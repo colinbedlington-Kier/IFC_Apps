@@ -3,6 +3,7 @@ from ifcopenshell.guid import new as new_guid
 
 from app import (
     apply_predefined_type_changes,
+    load_ifc2x3_pset_applicability_library,
     parse_name_parts,
     resolve_predefined_literal,
     resolve_type_and_predefined_for_name,
@@ -45,34 +46,94 @@ def test_enum_normalization_matches_spacing_and_underscore_variants():
     assert resolve_predefined_literal("GULLY_SUMP", enum_items)["value"] == "GULLYSUMP"
 
 
-def test_ifc2x3_unsupported_predefinedtype_proposes_userdefined(tmp_path):
+def test_ifc2x3_pset_library_loaded_and_contains_core_rows():
+    lib = load_ifc2x3_pset_applicability_library()
+    assert ("IfcWasteTerminalType", "gullysump") in lib
+    assert lib[("IfcWasteTerminalType", "gullysump")]["pset_name"] == "Pset_WasteTerminalTypeGullySump"
+    assert ("IfcDistributionChamberElementType", "inspectionchamber") in lib
+
+
+def test_ifc2x3_scan_matches_pset_applicability_and_proposes_value(tmp_path):
     model = ifcopenshell.file(schema="IFC2X3")
+    person = model.create_entity("IfcPerson")
+    org = model.create_entity("IfcOrganization", Name="Org")
+    pao = model.create_entity("IfcPersonAndOrganization", ThePerson=person, TheOrganization=org)
+    app = model.create_entity("IfcApplication", ApplicationDeveloper=org, Version="1", ApplicationFullName="t", ApplicationIdentifier="t")
+    model.create_entity(
+        "IfcOwnerHistory",
+        OwningUser=pao,
+        OwningApplication=app,
+        ChangeAction="ADDED",
+        CreationDate=1,
+    )
     _ = model.create_entity("IfcProject", GlobalId=new_guid(), Name="Proj")
 
-    occ = model.create_entity("IfcBuildingElementProxy", GlobalId=new_guid(), Name="P")
-    typ = model.create_entity("IfcBuildingElementType", GlobalId=new_guid(), Name="BuildingElement_Anything_Type01")
+    occ = model.create_entity("IfcFlowTerminal", GlobalId=new_guid(), Name="Act-1")
+    typ = model.create_entity("IfcActuatorType", GlobalId=new_guid(), Name="Actuator_Common_Type01")
     model.create_entity("IfcRelDefinesByType", GlobalId=new_guid(), RelatedObjects=[occ], RelatingType=typ)
+
+    in_path = tmp_path / "ifc2x3_pset_scan.ifc"
+    model.write(str(in_path))
+
+    _, rows = scan_predefined_types(str(in_path), class_filter=["IfcFlowTerminal"])
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["parsed_class"] == "Actuator"
+    assert row["resolved_type_class"] == "IfcActuatorType"
+    assert row["parsed_predef_token"] == "Common"
+    assert row["match_source"] == "pset_applicability"
+    assert row["matched_pset_name"] == "Pset_ActuatorTypeCommon"
+    assert row["proposed_predefined_type"] == "Common"
+    assert row["match_found"] is True
+
+
+def test_ifc2x3_apply_pset_applicability_adds_pset_to_type(tmp_path):
+    model = ifcopenshell.file(schema="IFC2X3")
+    person = model.create_entity("IfcPerson")
+    org = model.create_entity("IfcOrganization", Name="Org")
+    pao = model.create_entity("IfcPersonAndOrganization", ThePerson=person, TheOrganization=org)
+    app = model.create_entity("IfcApplication", ApplicationDeveloper=org, Version="1", ApplicationFullName="t", ApplicationIdentifier="t")
+    model.create_entity(
+        "IfcOwnerHistory",
+        OwningUser=pao,
+        OwningApplication=app,
+        ChangeAction="ADDED",
+        CreationDate=1,
+    )
+    _ = model.create_entity("IfcProject", GlobalId=new_guid(), Name="Proj")
+
+    occ = model.create_entity("IfcFlowTerminal", GlobalId=new_guid(), Name="Act-1")
+    typ = model.create_entity("IfcActuatorType", GlobalId=new_guid(), Name="Actuator_Common_Type01")
+    model.create_entity("IfcRelDefinesByType", GlobalId=new_guid(), RelatedObjects=[occ], RelatingType=typ)
+
+    in_path = tmp_path / "ifc2x3_pset_apply.ifc"
+    model.write(str(in_path))
+
+    _, rows = scan_predefined_types(str(in_path), class_filter=["IfcFlowTerminal"])
+    row = rows[0]
+    assert row["match_source"] == "pset_applicability"
+
+    out_path, _, _ = apply_predefined_type_changes(str(in_path), [row])
+    updated = ifcopenshell.open(out_path)
+    updated_type = updated.by_guid(typ.GlobalId)
+    
+    try:
+        psets = ifcopenshell.util.element.get_psets(updated_type, psets_only=True, include_inherited=False)
+    except TypeError:
+        psets = ifcopenshell.util.element.get_psets(updated_type, psets_only=True)
+    assert "Pset_ActuatorTypeCommon" in psets
 
     in_path = tmp_path / "ifc2x3.ifc"
     model.write(str(in_path))
-
-    _, rows = scan_predefined_types(str(in_path), class_filter=["IfcBuildingElementProxy"])
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["proposed_predefined_type"] == "USERDEFINED"
-    assert "not supported" in row["predef_reason"].lower()
-
 
 def test_target_selection_prefers_type_then_occurrence(tmp_path):
     model = ifcopenshell.file(schema="IFC4")
     _ = model.create_entity("IfcProject", GlobalId=new_guid(), Name="Proj")
 
-    # type target
     waste_occ = model.create_entity("IfcWasteTerminal", GlobalId=new_guid(), Name="Waste")
     waste_type = model.create_entity("IfcWasteTerminalType", GlobalId=new_guid(), Name="WasteTerminal_GullySump_Type01")
     model.create_entity("IfcRelDefinesByType", GlobalId=new_guid(), RelatedObjects=[waste_occ], RelatingType=waste_type)
 
-    # occurrence target (no type relationship)
     chamber_occ = model.create_entity(
         "IfcDistributionChamberElement",
         GlobalId=new_guid(),
@@ -98,7 +159,7 @@ def test_scan_and_apply_mutates_correct_entity_and_rescan_is_stable(tmp_path):
     model = ifcopenshell.file(schema="IFC4")
     _ = model.create_entity("IfcProject", GlobalId=new_guid(), Name="Proj")
 
-    waste_occ = model.create_entity("IfcWasteTerminal", GlobalId=new_guid(), Name="Waste-1")
+    waste_occ = model.create_entity("IfcFlowTerminal", GlobalId=new_guid(), Name="Waste-1")
     waste_type = model.create_entity(
         "IfcWasteTerminalType",
         GlobalId=new_guid(),
@@ -110,7 +171,7 @@ def test_scan_and_apply_mutates_correct_entity_and_rescan_is_stable(tmp_path):
     in_path = tmp_path / "apply.ifc"
     model.write(str(in_path))
 
-    _, rows = scan_predefined_types(str(in_path), class_filter=["IfcWasteTerminal"])
+    _, rows = scan_predefined_types(str(in_path), class_filter=["IfcFlowTerminal"])
     row = rows[0]
     assert row["resolved_type_class"] == "IfcWasteTerminalType"
     assert row["proposed_predefined_type"] == "GULLYSUMP"
@@ -121,7 +182,7 @@ def test_scan_and_apply_mutates_correct_entity_and_rescan_is_stable(tmp_path):
     updated_type = updated.by_guid(waste_type.GlobalId)
     assert updated_type.PredefinedType == "GULLYSUMP"
 
-    _, rows_after = scan_predefined_types(str(out_path), class_filter=["IfcWasteTerminal"])
+    _, rows_after = scan_predefined_types(str(out_path), class_filter=["IfcFlowTerminal"])
     assert rows_after[0]["proposed_predefined_type"] == "GULLYSUMP"
 
 
