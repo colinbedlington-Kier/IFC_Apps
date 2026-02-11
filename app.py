@@ -1890,42 +1890,171 @@ FALLBACK_ENUM_LIBRARY = {
     },
 }
 
-TYPE_LIBRARY = {
-    "waste terminal": {
-        "type_entity": "IFCWASTETERMINALTYPE",
-        "enum_set": "IfcWasteTerminalTypeEnum",
-        "occ_entity": "IFCFLOWTERMINAL",
-    },
-    "distribution chamber element": {
-        "type_entity": "IFCDISTRIBUTIONCHAMBERELEMENTTYPE",
-        "enum_set": "IfcDistributionChamberElementTypeEnum",
-        "occ_entity": "IFCDISTRIBUTIONCHAMBERELEMENT",
-    },
-    "pipe segment": {
-        "type_entity": "IFCPIPESEGMENTTYPE",
-        "enum_set": "IfcPipeSegmentTypeEnum",
-        "occ_entity": "IFCFLOWSEGMENT",
-    },
-    "pipe": {
-        "type_entity": "IFCPIPESEGMENTTYPE",
-        "enum_set": "IfcPipeSegmentTypeEnum",
-        "occ_entity": "IFCFLOWSEGMENT",
-    },
-    "tank": {
-        "type_entity": "IFCTANKTYPE",
-        "enum_set": "IfcTankTypeEnum",
-        "occ_entity": "IFCFLOWSTORAGEDEVICE",
-    },
+LEGACY_OCCURRENCE_FALLBACK = {
+    "IFCWASTETERMINALTYPE": "IFCFLOWTERMINAL",
+    "IFCPIPESEGMENTTYPE": "IFCFLOWSEGMENT",
+    "IFCTANKTYPE": "IFCFLOWSTORAGEDEVICE",
 }
 
 
-def normalize_mapping_token(value: str) -> str:
+def normalize_token(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (value or "").lower())
 
 
-TYPE_LIBRARY_NORMALIZED = {
-    normalize_mapping_token(key): value for key, value in TYPE_LIBRARY.items()
-}
+def split_meaningful_tokens(type_name: str) -> List[str]:
+    return [part.strip() for part in (type_name or "").split("_") if part.strip()]
+
+
+def parse_name_parts(type_name: str) -> Dict[str, Any]:
+    raw_tokens = split_meaningful_tokens(type_name)
+    ordinal_index = None
+    for idx in range(len(raw_tokens) - 1, -1, -1):
+        if re.fullmatch(r"type\s*\d*", raw_tokens[idx], re.IGNORECASE):
+            ordinal_index = idx
+            break
+
+    tokens_without_ordinal = raw_tokens[:ordinal_index] if ordinal_index is not None else raw_tokens
+    classish_raw = tokens_without_ordinal[0] if tokens_without_ordinal else ""
+    predef_candidate_raw = ""
+    if len(tokens_without_ordinal) > 1:
+        predef_candidate_raw = "_".join(tokens_without_ordinal[1:])
+
+    return {
+        "raw_tokens": raw_tokens,
+        "tokens_without_ordinal": tokens_without_ordinal,
+        "classish_raw": classish_raw,
+        "predef_candidate_raw": predef_candidate_raw,
+        "ordinal_raw": raw_tokens[ordinal_index] if ordinal_index is not None else "",
+    }
+
+
+def _schema_definition(schema_name: str):
+    try:
+        return ifcopenshell.ifcopenshell_wrapper.schema_by_name(schema_name)
+    except Exception:
+        return None
+
+
+def _entity_names(schema_def) -> set:
+    if schema_def is None:
+        return set()
+    out = set()
+    try:
+        for decl in schema_def.declarations():
+            try:
+                if decl.as_entity() is not None:
+                    out.add(decl.name())
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def build_type_class_lookup(schema_name: str) -> Dict[str, str]:
+    schema_def = _schema_definition(schema_name)
+    lookup = {}
+    if schema_def is None:
+        return lookup
+    for entity_name in _entity_names(schema_def):
+        if not entity_name.startswith("Ifc") or not entity_name.endswith("Type"):
+            continue
+        key = normalize_token(entity_name[3:-4])
+        if key:
+            lookup[key] = entity_name
+    return lookup
+
+
+def resolve_type_class_from_name(type_name: str, type_lookup: Dict[str, str]) -> Dict[str, Any]:
+    parsed = parse_name_parts(type_name)
+    raw_tokens = parsed["raw_tokens"]
+    tokens_without_ordinal = parsed["tokens_without_ordinal"]
+
+    classish_tokens_used = 0
+    resolved_type_class = None
+    parsed_classish = parsed["classish_raw"]
+    parsed_predef = parsed["predef_candidate_raw"]
+
+    if parsed_classish:
+        direct_key = normalize_token(parsed_classish)
+        resolved_type_class = type_lookup.get(direct_key)
+        if resolved_type_class:
+            classish_tokens_used = 1
+
+    if not resolved_type_class:
+        for i in range(1, len(tokens_without_ordinal) + 1):
+            candidate = "".join(tokens_without_ordinal[:i])
+            resolved = type_lookup.get(normalize_token(candidate))
+            if resolved:
+                resolved_type_class = resolved
+                classish_tokens_used = i
+                parsed_classish = "_".join(tokens_without_ordinal[:i])
+                parsed_predef = "_".join(tokens_without_ordinal[i:])
+                break
+
+    return {
+        **parsed,
+        "parsed_classish": parsed_classish,
+        "parsed_predef": parsed_predef,
+        "resolved_type_class": resolved_type_class,
+        "classish_tokens_used": classish_tokens_used,
+        "raw_tokens": raw_tokens,
+    }
+
+
+def _predefined_type_info(schema_name: str, entity_class: str) -> Dict[str, Any]:
+    schema_def = _schema_definition(schema_name)
+    if schema_def is None:
+        return {"has_predefined": False, "enum_name": None, "enum_items": []}
+    try:
+        decl = schema_def.declaration_by_name(entity_class)
+    except Exception:
+        return {"has_predefined": False, "enum_name": None, "enum_items": []}
+
+    attr = None
+    try:
+        for a in decl.all_attributes():
+            if a.name().lower() == "predefinedtype":
+                attr = a
+                break
+    except Exception:
+        attr = None
+    if attr is None:
+        return {"has_predefined": False, "enum_name": None, "enum_items": []}
+
+    enum_name = None
+    enum_items: List[str] = []
+    try:
+        attr_type = attr.type_of_attribute()
+        declared = attr_type.declared_type() if hasattr(attr_type, "declared_type") else None
+        if declared is not None and hasattr(declared, "enumeration_items"):
+            enum_name = declared.name()
+            enum_items = [str(item) for item in declared.enumeration_items()]
+    except Exception:
+        pass
+    return {"has_predefined": True, "enum_name": enum_name, "enum_items": enum_items}
+
+
+def resolve_predefined_literal(predef_candidate_raw: str, enum_items: List[str]) -> Dict[str, str]:
+    enum_lookup = {normalize_token(item): item for item in enum_items}
+    normalized_candidate = normalize_token(predef_candidate_raw)
+    if normalized_candidate and normalized_candidate in enum_lookup:
+        return {"value": enum_lookup[normalized_candidate], "reason": "enum matched"}
+    if "USERDEFINED" in enum_items:
+        return {"value": "USERDEFINED", "reason": "no enum match → USERDEFINED"}
+    return {"value": "", "reason": "no enum match"}
+
+
+def resolve_occurrence_from_type_class(schema_name: str, type_class: Optional[str]) -> Optional[str]:
+    if not type_class:
+        return None
+    if not type_class.upper().endswith("TYPE"):
+        return None
+    base = type_class[:-4]
+    entity_names = _entity_names(_schema_definition(schema_name))
+    if base in entity_names:
+        return base
+    return LEGACY_OCCURRENCE_FALLBACK.get(type_class.upper())
 
 FORCED_PREDEFINED = {
     "ifcpipesegmenttype": "RIGIDSEGMENT",
@@ -1969,54 +2098,35 @@ def build_enum_library(model):
     return enums
 
 
-def parse_type_tokens(type_name: str):
-    parts = [part.strip() for part in (type_name or "").split("_")]
-    class_token = parts[0].lower() if parts else ""
-    predef_tokens = [part for part in parts[1:] if part]
-    return class_token, predef_tokens
-
-
-def type_library_entry_from_name(type_name: str) -> Optional[dict]:
-    class_token, _ = parse_type_tokens(type_name)
-    class_norm = normalize_mapping_token(class_token)
-    if class_norm in TYPE_LIBRARY_NORMALIZED:
-        return TYPE_LIBRARY_NORMALIZED[class_norm]
-    if "pipe" in (type_name or "").lower():
-        return TYPE_LIBRARY["pipe"]
-    return None
-
-
-def enum_from_token(raw: str, enum_set: str, enumlib: dict) -> str:
-    if not raw:
-        return "USERDEFINED"
-    candidate = normalize_mapping_token(raw).upper()
-    values = enumlib.get(enum_set, set())
-    return candidate if candidate in values else "USERDEFINED"
-
-
-def enum_from_type_name(type_name: str, enum_set: str, enumlib: dict) -> str:
-    _, predef_tokens = parse_type_tokens(type_name)
-    for token in predef_tokens:
-        mapped = enum_from_token(token, enum_set, enumlib)
-        if mapped != "USERDEFINED":
-            return mapped
-    return "USERDEFINED"
+def resolve_type_and_predefined_for_name(type_name: str, schema_name: str) -> Dict[str, Any]:
+    type_lookup = build_type_class_lookup(schema_name)
+    resolved = resolve_type_class_from_name(type_name, type_lookup)
+    resolved_type_class = resolved.get("resolved_type_class")
+    predef_info = _predefined_type_info(schema_name, resolved_type_class) if resolved_type_class else {
+        "has_predefined": False,
+        "enum_name": None,
+        "enum_items": [],
+    }
+    predef_resolution = resolve_predefined_literal(resolved.get("parsed_predef", ""), predef_info.get("enum_items", []))
+    return {
+        **resolved,
+        "resolved_predefined_type": predef_resolution.get("value", ""),
+        "resolved_predefined_reason": predef_resolution.get("reason", ""),
+        "predef_info": predef_info,
+    }
 
 
 def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
     with open(in_path, "r", encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
 
-    enumlib = {}
     model = None
+    schema_name = "IFC4"
     try:
         model = ifcopenshell.open(in_path)
-        enumlib = build_enum_library(model)
+        schema_name = model.schema
     except Exception:
-        enumlib = FALLBACK_ENUM_LIBRARY.copy()
-
-    if not enumlib:
-        enumlib = FALLBACK_ENUM_LIBRARY.copy()
+        schema_name = "IFC4"
 
     stats = {
         "proxy_types_total": 0,
@@ -2063,21 +2173,13 @@ def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
             type_name = g["name"]
             mid = g["mid"]
 
-            lib_entry = type_library_entry_from_name(type_name)
-
-            if not lib_entry:
+            resolved = resolve_type_and_predefined_for_name(type_name, schema_name)
+            target_type = resolved.get("resolved_type_class")
+            if not target_type:
                 stats["left_as_proxy_type"] += 1
                 updated_lines.append(line)
                 continue
-
-            target_type = lib_entry["type_entity"]
-            enum_set = lib_entry["enum_set"]
-
-            forced = FORCED_PREDEFINED.get(target_type.lower())
-            if forced:
-                enum_val = forced
-            else:
-                enum_val = enum_from_type_name(type_name, enum_set, enumlib)
+            enum_val = resolved.get("resolved_predefined_type") or "USERDEFINED"
 
             new_line = (
                 f"{ws}{type_id}={target_type}('{guid}',{owner},"
@@ -2086,7 +2188,8 @@ def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
             updated_lines.append(new_line)
             stats["proxy_types_converted"] += 1
 
-            typeid_to_occ_entity[type_id] = lib_entry["occ_entity"]
+            occ_entity = resolve_occurrence_from_type_class(schema_name, target_type) or "IFCBUILDINGELEMENTPROXY"
+            typeid_to_occ_entity[type_id] = occ_entity.upper()
             continue
 
         m_build = building_type_re.match(line)
@@ -2100,21 +2203,13 @@ def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
             type_name = g["name"]
             mid = g["mid"]
 
-            lib_entry = type_library_entry_from_name(type_name)
-
-            if not lib_entry:
+            resolved = resolve_type_and_predefined_for_name(type_name, schema_name)
+            target_type = resolved.get("resolved_type_class")
+            if not target_type:
                 stats["left_as_building_type"] += 1
                 updated_lines.append(line)
                 continue
-
-            target_type = lib_entry["type_entity"]
-            enum_set = lib_entry["enum_set"]
-
-            forced = FORCED_PREDEFINED.get(target_type.lower())
-            if forced:
-                enum_val = forced
-            else:
-                enum_val = enum_from_type_name(type_name, enum_set, enumlib)
+            enum_val = resolved.get("resolved_predefined_type") or "USERDEFINED"
 
             new_line = (
                 f"{ws}{type_id}={target_type}('{guid}',{owner},"
@@ -2123,7 +2218,8 @@ def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
             updated_lines.append(new_line)
             stats["building_types_converted"] += 1
 
-            typeid_to_occ_entity[type_id] = lib_entry["occ_entity"]
+            occ_entity = resolve_occurrence_from_type_class(schema_name, target_type) or "IFCBUILDINGELEMENTPROXY"
+            typeid_to_occ_entity[type_id] = occ_entity.upper()
             continue
 
         updated_lines.append(line)
@@ -2543,6 +2639,9 @@ def apply_layer_changes(
                 "globalid",
                 "ifc_class",
                 "target",
+                "target_source",
+                "target_globalid",
+                "target_ifc_id",
                 "old_value",
                 "new_value",
                 "mapping_reason",
@@ -2560,7 +2659,7 @@ def apply_layer_changes(
 def match_type_name_for_proxy(type_name: str) -> bool:
     if not type_name:
         return False
-    return type_library_entry_from_name(type_name) is not None
+    return bool(resolve_type_and_predefined_for_name(type_name, "IFC4").get("resolved_type_class"))
 
 
 def list_instance_classes(ifc_path: str) -> List[str]:
@@ -2574,6 +2673,7 @@ def scan_predefined_types(
     class_filter: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     model = ifcopenshell.open(ifc_path)
+    schema_name = model.schema
     class_set = {c for c in (class_filter or []) if c}
     elements = [e for e in model.by_type("IfcObject") if getattr(e, "GlobalId", None)]
     if class_set:
@@ -2582,23 +2682,54 @@ def scan_predefined_types(
     for element in elements:
         element_type = ifcopenshell.util.element.get_type(element)
         type_name = getattr(element_type, "Name", "") if element_type else ""
-        match_found = match_type_name_for_proxy(type_name)
+        resolved = resolve_type_and_predefined_for_name(type_name, schema_name)
+        match_found = bool(resolved.get("resolved_type_class"))
 
         predef_target = None
         predef_target_source = "none"
-        if element.is_a("IfcBuildingElementProxy") and element_type is not None and hasattr(element_type, "PredefinedType"):
-            predef_target = element_type
-            predef_target_source = "type"
-        elif hasattr(element, "PredefinedType"):
-            predef_target = element
-            predef_target_source = "occurrence"
-        elif element_type is not None and hasattr(element_type, "PredefinedType"):
-            predef_target = element_type
-            predef_target_source = "type"
+        predef_reason = ""
+        predef_target_info = {"has_predefined": False, "enum_name": None, "enum_items": []}
 
-        proposed = "N/A"
-        if predef_target is not None:
-            proposed = "NOTDEFINED" if match_found else "USERDEFINED"
+        if element_type is not None:
+            type_info = _predefined_type_info(schema_name, element_type.is_a())
+            if type_info["has_predefined"]:
+                predef_target = element_type
+                predef_target_source = "type"
+                predef_target_info = type_info
+                predef_reason = "target type has PredefinedType"
+
+        if predef_target is None:
+            occ_info = _predefined_type_info(schema_name, element.is_a())
+            if occ_info["has_predefined"]:
+                predef_target = element
+                predef_target_source = "occurrence"
+                predef_target_info = occ_info
+                predef_reason = "target occurrence has PredefinedType"
+
+        proposed = "USERDEFINED"
+        resolved_predef = resolved.get("resolved_predefined_type") or ""
+        resolved_reason = resolved.get("resolved_predefined_reason") or ""
+        resolved_type_class = resolved.get("resolved_type_class")
+        resolved_type_info = (
+            _predefined_type_info(schema_name, resolved_type_class) if resolved_type_class else {"has_predefined": False}
+        )
+        if not match_found:
+            predef_reason = "classish not resolved from type name"
+        elif not resolved_type_info.get("has_predefined"):
+            predef_reason = "PredefinedType not supported for this class in schema"
+        elif predef_target is None:
+            predef_reason = "PredefinedType not writable (no attr on type or occurrence)"
+        elif predef_target_info.get("enum_items"):
+            enum_items = predef_target_info.get("enum_items")
+            predef_choice = resolve_predefined_literal(resolved.get("parsed_predef", ""), enum_items)
+            proposed = predef_choice["value"] or "USERDEFINED"
+            predef_reason = predef_choice["reason"]
+        elif predef_target_info.get("has_predefined"):
+            proposed = resolved_predef or "USERDEFINED"
+            predef_reason = resolved_reason or "PredefinedType supported without enum metadata"
+        else:
+            proposed = "USERDEFINED"
+            predef_reason = "PredefinedType not supported for this class in schema"
 
         rows.append(
             {
@@ -2608,11 +2739,22 @@ def scan_predefined_types(
                 "type_name": type_name or "",
                 "match_found": match_found,
                 "proposed_predefined_type": proposed,
-                "apply_default": predef_target is not None,
+                "apply_default": predef_target is not None and proposed not in ("", "N/A"),
                 "predef_target_source": predef_target_source,
                 "predef_target_globalid": getattr(predef_target, "GlobalId", None) if predef_target else None,
                 "predef_target_id": int(predef_target.id()) if predef_target else None,
                 "predef_target_class": predef_target.is_a() if predef_target else None,
+                "parsed_classish": resolved.get("parsed_classish", ""),
+                "resolved_type_class": resolved.get("resolved_type_class"),
+                "parsed_predef_token": resolved.get("parsed_predef", ""),
+                "resolved_predefined_type": proposed,
+                "target_source": predef_target_source,
+                "target_globalid": getattr(predef_target, "GlobalId", None) if predef_target else None,
+                "target_ifc_id": int(predef_target.id()) if predef_target else None,
+                "target_class": predef_target.is_a() if predef_target else None,
+                "predef_supported": bool(predef_target_info.get("has_predefined")),
+                "predef_reason": predef_reason,
+                "schema": schema_name,
             }
         )
     stats = {"schema": model.schema, "elements": len(elements), "rows": len(rows)}
@@ -2629,22 +2771,15 @@ def apply_predefined_type_changes(
     updated = 0
     for row in rows_to_apply:
         target = row.get("proposed_predefined_type")
-        if target in (None, "", "N/A"):
+        if target in (None, ""):
             continue
         target_entity = None
-        target_gid = row.get("predef_target_globalid")
+        target_gid = row.get("target_globalid") or row.get("predef_target_globalid")
         if target_gid:
             target_entity = model.by_guid(target_gid)
 
         if target_entity is None:
-            gid = row.get("globalid")
-            if gid:
-                candidate = model.by_guid(gid)
-                if candidate is not None and hasattr(candidate, "PredefinedType"):
-                    target_entity = candidate
-
-        if target_entity is None:
-            target_id = row.get("predef_target_id")
+            target_id = row.get("target_ifc_id") or row.get("predef_target_id")
             if target_id is not None:
                 try:
                     candidate = model.by_id(int(target_id))
@@ -2666,11 +2801,14 @@ def apply_predefined_type_changes(
             {
                 "globalid": row.get("globalid"),
                 "ifc_class": row.get("ifc_class"),
-                "target": f"predefined_type:{row.get('predef_target_source', 'occurrence')}",
+                "target": f"predefined_type:{row.get('target_source') or row.get('predef_target_source', 'none')}",
+                "target_source": row.get("target_source") or row.get("predef_target_source", "none"),
+                "target_globalid": row.get("target_globalid") or row.get("predef_target_globalid"),
+                "target_ifc_id": row.get("target_ifc_id") or row.get("predef_target_id"),
                 "old_value": old_value,
                 "new_value": target,
-                "mapping_reason": "Type name match" if row.get("match_found") else "No match",
-                "target_class": row.get("predef_target_class") or (target_entity.is_a() if target_entity else None),
+                "mapping_reason": row.get("predef_reason") or ("Type name match" if row.get("match_found") else "No match"),
+                "target_class": row.get("target_class") or row.get("predef_target_class") or (target_entity.is_a() if target_entity else None),
                 "allowed_status": "n/a",
                 "timestamp": now,
             }
@@ -2693,6 +2831,9 @@ def apply_predefined_type_changes(
                 "globalid",
                 "ifc_class",
                 "target",
+                "target_source",
+                "target_globalid",
+                "target_ifc_id",
                 "old_value",
                 "new_value",
                 "mapping_reason",
