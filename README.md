@@ -68,6 +68,25 @@ The **Proxy → Types** page now includes a **PredefinedType Fixer** panel that 
 - Skips entities without a `PredefinedType` attribute (reported as N/A).
 - Supports dry-run mode to review proposed changes before exporting a new IFC plus change logs.
 
+
+## COBie QC tool (integrated)
+
+COBie QC is now a built-in IFC Toolkit page available at **/tools/cobieqc** (no Gradio runtime).
+
+### Runtime requirements
+
+- Java runtime is required because the backend executes `COBieQC/CobieQcReporter/CobieQcReporter.jar`.
+- The Docker image installs `default-jre-headless`.
+- Reports are generated into per-job data directories (`$IFC_APP_DATA_DIR/jobs/cobieqc/<job_id>/`) instead of `COBieQC/reports/`.
+
+### API endpoints
+
+- `POST /api/tools/cobieqc/run` — multipart upload (`file=.xlsx`, `stage=D|C`) and returns a queued `job_id`.
+- `GET /api/tools/cobieqc/jobs/{job_id}` — job status, progress, and log tail.
+- `GET /api/tools/cobieqc/jobs/{job_id}/result` — result metadata and preview HTML.
+- `GET /api/tools/cobieqc/jobs/{job_id}/download` — download generated report HTML.
+- `GET /api/tools/cobieqc/health` — Java/runtime diagnostic.
+
 ## Running locally
 
 ```bash

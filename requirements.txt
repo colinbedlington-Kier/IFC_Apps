@@ -6,3 +6,4 @@ openpyxl
 jinja2
 python-multipart
 pytest
+pyyaml
