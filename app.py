@@ -4600,6 +4600,24 @@ def ifc_qa_default_config():
     return default_config_from_dir(IFC_QA_REFERENCE_DIR)
 
 
+@app.get("/api/ifc-qa/config/{session_id}")
+def ifc_qa_config_session(session_id: str):
+    return {
+        "session_id": session_id,
+        "config": default_config_from_dir(IFC_QA_REFERENCE_DIR),
+        "overrides": {},
+    }
+
+
+@app.get("/api/ifc-qa/config/{session_id}/regex")
+def ifc_qa_config_regex_compat(session_id: str):
+    return {
+        "regex": [],
+        "overrides": {},
+        "message": "Regex extractor deprecated; using IFCOpenShell config.",
+    }
+
+
 @app.post("/api/ifc-qa/config/import")
 async def ifc_qa_config_import(config_json: UploadFile = File(...)):
     payload = json.loads((await config_json.read()).decode("utf-8"))
