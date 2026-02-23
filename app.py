@@ -13,6 +13,7 @@ import tempfile
 import traceback
 import uuid
 import zipfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -48,6 +49,8 @@ from cobieqc_service.jobs import (
 from cobieqc_service.runner import run_cobieqc
 from cobieqc_service.security import sanitize_filename as sanitize_upload_filename
 from cobieqc_service.security import validate_upload
+from ifc_qa_service import REGISTRY as IFC_QA_V2_REGISTRY
+from ifc_qa_service import default_config_from_dir, start_job as start_ifc_qa_v2_job
 
 STEP2IFC_ROOT = Path(__file__).resolve().parent / "step2ifc"
 if STEP2IFC_ROOT.exists():
@@ -68,6 +71,11 @@ APP_LOGGER = logging.getLogger("ifc_app")
 RESOURCE_DIR = Path(__file__).resolve().parent / "resources"
 QA_RESOURCE_DIR = Path(__file__).resolve().parent / "app" / "resources" / "ifc_qa"
 DATA_DIR = Path(__file__).resolve().parent / "data"
+IFC_QA_REFERENCE_DIR = Path(__file__).resolve().parent / "backend" / "ifc_qa" / "reference"
+UTC = datetime.timezone.utc
+
+def utc_now() -> datetime.datetime:
+    return datetime.datetime.now(UTC)
 
 
 # ----------------------------------------------------------------------------
@@ -98,7 +106,7 @@ class SessionStore:
     def create(self) -> str:
         session_id = uuid.uuid4().hex
         os.makedirs(self.session_path(session_id), exist_ok=True)
-        now = datetime.datetime.utcnow()
+        now = utc_now()
         self.sessions[session_id] = now
         return session_id
 
@@ -108,13 +116,13 @@ class SessionStore:
     def touch(self, session_id: str) -> None:
         if not self.exists(session_id):
             raise HTTPException(status_code=404, detail="Session not found")
-        self.sessions[session_id] = datetime.datetime.utcnow()
+        self.sessions[session_id] = utc_now()
 
     def exists(self, session_id: str) -> bool:
         return session_id in self.sessions and os.path.isdir(self.session_path(session_id))
 
     def cleanup_stale(self) -> None:
-        cutoff = datetime.datetime.utcnow() - datetime.timedelta(hours=self.ttl_hours)
+        cutoff = utc_now() - datetime.timedelta(hours=self.ttl_hours)
         stale = [sid for sid, ts in self.sessions.items() if ts < cutoff]
         for sid in stale:
             self.drop(sid)
@@ -2600,7 +2608,7 @@ def apply_layer_changes(
     updated_layers = set()
     updated_props = set()
     change_log = []
-    now = datetime.datetime.utcnow().isoformat() + "Z"
+    now = utc_now().isoformat() + "Z"
 
     for row in rows_to_apply:
         target = row.get("target_layer") or ""
@@ -2678,7 +2686,7 @@ def apply_layer_changes(
                 )
 
     base_dir = os.path.dirname(ifc_path)
-    ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    ts = utc_now().strftime("%Y%m%d_%H%M%S")
     base = os.path.splitext(os.path.basename(ifc_path))[0]
     out_path = os.path.join(base_dir, f"{base}_layer_purged_{ts}.ifc")
     model.write(out_path)
@@ -2855,7 +2863,7 @@ def apply_predefined_type_changes(
 ) -> Tuple[str, str, str]:
     model = ifcopenshell.open(ifc_path)
     change_log = []
-    now = datetime.datetime.utcnow().isoformat() + "Z"
+    now = utc_now().isoformat() + "Z"
     updated = 0
 
     def _ensure_pset_on_entity(entity, pset_name: str) -> bool:
@@ -2976,7 +2984,7 @@ def apply_predefined_type_changes(
         )
 
     base_dir = os.path.dirname(ifc_path)
-    ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    ts = utc_now().strftime("%Y%m%d_%H%M%S")
     base = os.path.splitext(os.path.basename(ifc_path))[0]
     out_path = os.path.join(base_dir, f"{base}_predefined_{ts}.ifc")
     model.write(out_path)
@@ -4131,11 +4139,11 @@ def apply_edits(session_id: str, in_path: str, edits: List[Dict[str, Any]]) -> T
                 "field": desc.path_label(),
                 "old": _to_serializable(old_val),
                 "new": _to_serializable(new_val),
-                "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+                "timestamp": utc_now().isoformat() + "Z",
             }
         )
     base, ext = os.path.splitext(os.path.basename(in_path))
-    ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    ts = utc_now().strftime("%Y%m%d_%H%M%S")
     out_name = f"{base}_checked_{ts}{ext or '.ifc'}"
     out_path = os.path.join(os.path.dirname(in_path), out_name)
     model.write(out_path)
@@ -4154,7 +4162,7 @@ def _run_cobieqc_job(job_id: str) -> None:
             job_id,
             status=STATUS_RUNNING,
             progress=0.1,
-            started_at=datetime.datetime.utcnow().isoformat() + "Z",
+            started_at=utc_now().isoformat() + "Z",
             message="Running COBieQC reporter",
         )
         job_dir = COBIEQC_JOB_STORE.get_job_dir(job_id)
@@ -4174,7 +4182,7 @@ def _run_cobieqc_job(job_id: str) -> None:
                 status=STATUS_DONE,
                 progress=1.0,
                 message="Report generated",
-                finished_at=datetime.datetime.utcnow().isoformat() + "Z",
+                finished_at=utc_now().isoformat() + "Z",
                 output_filename=result.get("output_filename", "report.html"),
             )
         else:
@@ -4183,7 +4191,7 @@ def _run_cobieqc_job(job_id: str) -> None:
                 status=STATUS_ERROR,
                 progress=1.0,
                 message=result.get("error") or "COBieQC failed",
-                finished_at=datetime.datetime.utcnow().isoformat() + "Z",
+                finished_at=utc_now().isoformat() + "Z",
             )
     except Exception as exc:
         COBIEQC_JOB_STORE.append_log(job_id, f"Unhandled error: {exc}")
@@ -4192,7 +4200,7 @@ def _run_cobieqc_job(job_id: str) -> None:
             status=STATUS_ERROR,
             progress=1.0,
             message=str(exc),
-            finished_at=datetime.datetime.utcnow().isoformat() + "Z",
+            finished_at=utc_now().isoformat() + "Z",
         )
 
 
@@ -4200,13 +4208,7 @@ def _run_cobieqc_job(job_id: str) -> None:
 # FastAPI app + routes
 # ----------------------------------------------------------------------------
 
-app = FastAPI(title="IFC Toolkit Hub")
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
-
-
-@app.on_event("startup")
-def startup_cleanup():
+def startup_cleanup() -> None:
     SESSION_STORE.cleanup_stale()
     COBIEQC_JOB_STORE.cleanup_old_jobs()
     try:
@@ -4219,10 +4221,23 @@ def startup_cleanup():
         APP_LOGGER.warning("COBieQC Java runtime unavailable: %s", exc)
 
 
-@app.on_event("shutdown")
-def shutdown_cleanup():
+def shutdown_cleanup() -> None:
     for sid in list(SESSION_STORE.sessions.keys()):
         SESSION_STORE.drop(sid)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    startup_cleanup()
+    try:
+        yield
+    finally:
+        shutdown_cleanup()
+
+
+app = FastAPI(title="IFC Toolkit Hub", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -4337,7 +4352,7 @@ def create_session(payload: Dict[str, Any] = Body(default=None)):
         session_id = incoming
     else:
         session_id = SESSION_STORE.create()
-    expiry = datetime.datetime.utcnow() + datetime.timedelta(hours=SESSION_STORE.ttl_hours)
+    expiry = utc_now() + datetime.timedelta(hours=SESSION_STORE.ttl_hours)
     return {"session_id": session_id, "expires_at": expiry.isoformat() + "Z"}
 
 
@@ -4532,182 +4547,94 @@ async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
     return {"files": saved}
 
 
-@app.post("/api/ifc-qa/extract")
-async def ifc_qa_extract(
+@app.post("/api/ifc-qa/run")
+async def ifc_qa_run(
     files: List[UploadFile] = File(...),
-    qa_rules_csv: UploadFile = File(None),
-    qa_property_requirements_csv: UploadFile = File(None),
-    qa_unacceptable_values_csv: UploadFile = File(None),
-    regex_patterns_csv: UploadFile = File(None),
-    exclude_filter_csv: UploadFile = File(None),
-    pset_template_csv: UploadFile = File(None),
-    session_id: Optional[str] = Form(None),
-    background_tasks: BackgroundTasks = None,
+    options_json: Optional[str] = Form(None),
+    config_override_json: Optional[str] = Form(None),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="At least one IFC file is required")
-    job_id = uuid.uuid4().hex
-    IFC_QA_JOBS[job_id] = {
-        "jobId": job_id,
-        "status": "queued",
-        "percent": 0,
-        "currentFile": "",
-        "currentStep": "Queued",
-        "logs": [],
-        "result_path": None,
-        "summary": None,
-    }
 
-    upload_dir = Path(tempfile.mkdtemp(prefix="ifc_qa_uploads_"))
-    ifc_paths: List[Path] = []
+    upload_dir = Path(tempfile.mkdtemp(prefix="ifc_qa_uploads_v2_"))
+    file_records: List[Tuple[str, str]] = []
     for upload in files:
-        safe = sanitize_filename(upload.filename)
-        if not safe.lower().endswith(".ifc"):
-            continue
-        dest = upload_dir / safe
+        original_name = upload.filename or "upload.ifc"
+        dest = upload_dir / sanitize_filename(original_name)
         with open(dest, "wb") as handle:
             handle.write(await upload.read())
-        ifc_paths.append(dest)
-    if not ifc_paths:
-        raise HTTPException(status_code=400, detail="No IFC files uploaded")
+        file_records.append((original_name, str(dest)))
 
-    override_paths: Dict[str, Optional[Path]] = {
-        "qa_rules": None,
-        "qa_property_requirements": None,
-        "qa_unacceptable_values": None,
-        "regex_patterns": None,
-        "exclude_filter": None,
-        "pset_template": None,
-    }
+    options: Dict[str, Any] = {}
+    if options_json:
+        options = json.loads(options_json)
+    cfg = default_config_from_dir(IFC_QA_REFERENCE_DIR)
+    if config_override_json:
+        override = json.loads(config_override_json)
+        if isinstance(override, dict):
+            cfg.update(override)
 
-    async def save_override(upload: Optional[UploadFile], key: str) -> None:
-        if not upload:
-            return
-        safe = sanitize_filename(upload.filename)
-        dest = upload_dir / safe
-        with open(dest, "wb") as handle:
-            handle.write(await upload.read())
-        override_paths[key] = dest
-
-    await save_override(qa_rules_csv, "qa_rules")
-    await save_override(qa_property_requirements_csv, "qa_property_requirements")
-    await save_override(qa_unacceptable_values_csv, "qa_unacceptable_values")
-    await save_override(regex_patterns_csv, "regex_patterns")
-    await save_override(exclude_filter_csv, "exclude_filter")
-    await save_override(pset_template_csv, "pset_template")
-
-    if background_tasks is None:
-        background_tasks = BackgroundTasks()
-    background_tasks.add_task(run_ifc_qa_job, job_id, ifc_paths, override_paths, session_id)
-    return {"jobId": job_id}
+    job_id = start_ifc_qa_v2_job(file_records, options, cfg)
+    return {"job_id": job_id}
 
 
-@app.get("/api/ifc-qa/progress/{job_id}")
-def ifc_qa_progress(job_id: str):
-    job = IFC_QA_JOBS.get(job_id)
+@app.get("/api/ifc-qa/status/{job_id}")
+def ifc_qa_status(job_id: str):
+    job = IFC_QA_V2_REGISTRY.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return {
         "status": job.get("status"),
-        "percent": job.get("percent"),
-        "currentFile": job.get("currentFile"),
-        "currentStep": job.get("currentStep"),
-        "logs": job.get("logs"),
+        "percent": job.get("percent", 0),
+        "currentStep": job.get("currentStep", ""),
+        "currentFile": job.get("currentFile", ""),
+        "logs": job.get("logs", []),
+        "files": job.get("files", []),
     }
 
 
 @app.get("/api/ifc-qa/result/{job_id}")
 def ifc_qa_result(job_id: str):
-    job = IFC_QA_JOBS.get(job_id)
-    if not job or not job.get("result_path"):
-        raise HTTPException(status_code=404, detail="Result not ready")
-    path = Path(job["result_path"])
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Result file not found")
-    return FileResponse(path, filename=path.name)
-
-
-@app.get("/api/ifc-qa/summary/{job_id}")
-def ifc_qa_summary(job_id: str):
-    job = IFC_QA_JOBS.get(job_id)
+    job = IFC_QA_V2_REGISTRY.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    summary = job.get("summary")
-    if summary is None:
-        raise HTTPException(status_code=404, detail="Summary not ready")
-    return summary
+    result_path = job.get("result_path")
+    if not result_path:
+        raise HTTPException(status_code=404, detail="Result not ready")
+    path = Path(result_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Result file not found")
+    return FileResponse(path, media_type="application/zip", filename="IFC Output.zip")
+
+
+@app.get("/api/ifc-qa/config/default")
+def ifc_qa_default_config():
+    return default_config_from_dir(IFC_QA_REFERENCE_DIR)
 
 
 @app.get("/api/ifc-qa/config/{session_id}")
-def ifc_qa_config_status(session_id: str):
-    override_dir = _qa_override_dir(session_id)
-    overrides = sorted(p.name for p in override_dir.glob("*.csv"))
+def ifc_qa_config_session(session_id: str):
     return {
         "session_id": session_id,
-        "overrides": overrides,
-        "defaults": {k: str(v) for k, v in _qa_default_paths().items()},
+        "config": default_config_from_dir(IFC_QA_REFERENCE_DIR),
+        "overrides": {},
     }
 
 
-@app.get("/api/ifc-qa/config/{session_id}/download")
-def ifc_qa_config_download(session_id: str):
-    override_dir = _qa_override_dir(session_id)
-    config_zip = Path(SESSION_STORE.ensure(session_id)) / "ifc_qa_configs.zip"
-    defaults = _qa_default_paths()
-    with zipfile.ZipFile(config_zip, "w", compression=zipfile.ZIP_DEFLATED) as zipf:
-        for key, path in defaults.items():
-            override = override_dir / f"{key}.csv"
-            chosen = override if override.exists() else path
-            if chosen.exists():
-                zipf.write(chosen, f"{key}.csv")
-    return FileResponse(config_zip, filename="ifc_qa_configs.zip")
-
-
 @app.get("/api/ifc-qa/config/{session_id}/regex")
-def ifc_qa_config_regex(session_id: str):
-    regex_path = _qa_config_path(session_id, "regex_patterns")
-    patterns = []
-    if regex_path.exists():
-        with open(regex_path, newline="", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            for row in reader:
-                patterns.append(
-                    {
-                        "key": row.get("key", ""),
-                        "pattern": row.get("pattern", ""),
-                        "enabled": (row.get("enabled") or "true").strip().lower(),
-                    }
-                )
-    return {"patterns": patterns}
+def ifc_qa_config_regex_compat(session_id: str):
+    return {
+        "regex": [],
+        "patterns": [],
+        "overrides": {},
+        "message": "Regex extractor deprecated; using IFCOpenShell config.",
+    }
 
 
-@app.post("/api/ifc-qa/config/{session_id}/upload")
-async def ifc_qa_config_upload(session_id: str, config_zip: UploadFile = File(...)):
-    override_dir = _qa_override_dir(session_id)
-    zip_path = override_dir / sanitize_filename(config_zip.filename)
-    with open(zip_path, "wb") as handle:
-        handle.write(await config_zip.read())
-    with zipfile.ZipFile(zip_path, "r") as zipf:
-        for name in zipf.namelist():
-            base = Path(name).name
-            key = base.replace(".csv", "")
-            if key not in _qa_default_paths():
-                continue
-            target = override_dir / f"{key}.csv"
-            with zipf.open(name) as src, open(target, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-    zip_path.unlink(missing_ok=True)
-    return {"status": "ok"}
-
-
-@app.post("/api/ifc-qa/config/{session_id}/reset")
-def ifc_qa_config_reset(session_id: str):
-    override_dir = _qa_override_dir(session_id)
-    for entry in override_dir.glob("*.csv"):
-        entry.unlink(missing_ok=True)
-    return {"status": "ok"}
-
-
+@app.post("/api/ifc-qa/config/import")
+async def ifc_qa_config_import(config_json: UploadFile = File(...)):
+    payload = json.loads((await config_json.read()).decode("utf-8"))
+    return {"config": payload}
 @app.post("/api/session/{session_id}/data-extractor/start")
 def start_data_extractor(session_id: str, payload: Dict[str, Any] = Body(...), background_tasks: BackgroundTasks = None):
     root = Path(SESSION_STORE.ensure(session_id))
@@ -4884,7 +4811,7 @@ def run_cleaner(session_id: str, payload: Dict[str, Any] = Body(...)):
 
     reports = []
     outputs = []
-    ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    ts = utc_now().strftime("%Y%m%d_%H%M%S")
     for fname in files:
         in_path = os.path.join(root, sanitize_filename(fname))
         if not os.path.isfile(in_path):
