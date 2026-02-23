@@ -233,11 +233,16 @@ async function pollStatus() {
   const perFile = qs("#qaPerFile");
   const dashboard = qs("#qaDashboardStatus");
 
-  if (fill) fill.style.width = `${data.percent || 0}%`;
+  const overallPercent = data.overall_percent ?? data.percent ?? 0;
+  if (fill) fill.style.width = `${overallPercent}%`;
   if (label) label.textContent = `${data.currentStep || ""} ${data.currentFile ? `(${data.currentFile})` : ""}`;
   if (log) log.value = (data.logs || []).join("\n");
-  if (perFile) perFile.textContent = (data.files || []).map((f) => `${f.name}: ${f.percent || 0}%`).join(" | ");
-  if (dashboard) dashboard.textContent = `Status: ${data.status || "unknown"} (${data.percent || 0}%)`;
+  if (perFile) {
+    perFile.textContent = (data.files || [])
+      .map((f) => `${f.name}: ${f.percent || 0}% ${f.stage ? `(${f.stage})` : ""}`)
+      .join(" | ");
+  }
+  if (dashboard) dashboard.textContent = `Status: ${data.status || "unknown"} (${overallPercent}%)`;
 
   if (data.status === "complete") {
     const downloadBtn = qs("#qaDownloadBtn");
