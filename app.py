@@ -4586,10 +4586,14 @@ def ifc_qa_status(job_id: str):
     return {
         "status": job.get("status"),
         "percent": job.get("percent", 0),
+        "overall_percent": job.get("overall_percent", job.get("percent", 0)),
         "currentStep": job.get("currentStep", ""),
         "currentFile": job.get("currentFile", ""),
         "logs": job.get("logs", []),
         "files": job.get("files", []),
+        "per_file_percent": job.get("per_file_percent", {}),
+        "per_file_stage": job.get("per_file_stage", {}),
+        "processed_counts": job.get("processed_counts", {}),
     }
 
 

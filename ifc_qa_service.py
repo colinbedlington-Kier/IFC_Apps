@@ -1,6 +1,5 @@
 import csv
 import datetime as dt
-import io
 import json
 import os
 import shutil
@@ -9,8 +8,10 @@ import threading
 import time
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import ifcopenshell
 import ifcopenshell.util.element
@@ -38,6 +39,92 @@ HEADERS = {
     "system": ["IFC_Line_Ref", "Source_File", "IFC_Name", "IFC_GlobalId", "IFC_Entity", "IFC_Description", "IFC_Tag", "Property_Set", "Property_Name", "Property_Value", "IFC_SystemName_Syntax_Check", "IFC_SystemName_Code"],
 }
 
+STAGE_WEIGHTS = {
+    "open": 2.0,
+    "definesByType": 8.0,
+    "definesByProps": 30.0,
+    "containment": 10.0,
+    "aggregates": 5.0,
+    "classification": 5.0,
+    "predefined": 5.0,
+    "layers": 10.0,
+    "coords": 10.0,
+    "write": 15.0,
+}
+
+
+@dataclass
+class BasicRow:
+    line_ref: str
+    name: str
+    gid: str
+    entity: str
+    desc: str
+    tag: str
+    longname: str
+    objecttype: str
+
+
+@dataclass
+class TypeRow:
+    line_ref: str
+    name: str
+    entity: str
+    gid: str
+    desc: str
+    predefined: str
+
+
+@dataclass
+class ObjectFact:
+    obj_id: int
+    line_ref: str
+    name: str
+    gid: str
+    entity: str
+    desc: str
+    objecttype: str
+    tag: str
+    longname: str
+    type_id: Optional[int]
+    type_entity: str
+    type_name: str
+    type_desc: str
+    type_gid: str
+    type_line_ref: str
+    predefined: str
+    layer: str
+    coords: str
+    containing_structure: str
+    containing_structure_tag: str
+    containing_structure_entity: str
+    storey: str
+    group: str
+
+
+@dataclass
+class FileContext:
+    f: ifcopenshell.file
+    source_file: str
+    ifc_path: Path
+    schema: str
+    include: Dict[str, bool]
+    objects: List[Any] = field(default_factory=list)
+    obj_basic: Dict[int, BasicRow] = field(default_factory=dict)
+    obj_type: Dict[int, Optional[int]] = field(default_factory=dict)
+    type_basic: Dict[int, TypeRow] = field(default_factory=dict)
+    predefined: Dict[int, str] = field(default_factory=dict)
+    layers: Dict[int, str] = field(default_factory=dict)
+    coords: Dict[int, str] = field(default_factory=dict)
+    psets_occ: Dict[int, Dict[Tuple[str, str], str]] = field(default_factory=dict)
+    psets_type: Dict[int, Dict[Tuple[str, str], str]] = field(default_factory=dict)
+    contained_in: Dict[int, Optional[int]] = field(default_factory=dict)
+    assigns_group: Dict[int, str] = field(default_factory=dict)
+    aggregates_children: Dict[int, List[int]] = field(default_factory=dict)
+    classifications: List[List[str]] = field(default_factory=list)
+    line_map: Dict[int, str] = field(default_factory=dict)
+
+
 class IfcQaRegistry:
     def __init__(self, ttl_hours: int = 24):
         self.jobs: Dict[str, Dict[str, Any]] = {}
@@ -47,7 +134,18 @@ class IfcQaRegistry:
     def create(self) -> str:
         with self.lock:
             job_id = uuid.uuid4().hex
-            self.jobs[job_id] = {"status": "queued", "percent": 0, "logs": [], "files": [], "created": time.time(), "currentStep": "Queued"}
+            self.jobs[job_id] = {
+                "status": "queued",
+                "percent": 0,
+                "overall_percent": 0,
+                "logs": [],
+                "files": [],
+                "created": time.time(),
+                "currentStep": "Queued",
+                "per_file_stage": {},
+                "per_file_percent": {},
+                "processed_counts": {},
+            }
             return job_id
 
     def update(self, job_id: str, **kwargs: Any) -> None:
@@ -65,6 +163,39 @@ class IfcQaRegistry:
             if len(logs) > 400:
                 del logs[:-400]
 
+    def patch_file_progress(self, job_id: str, file_name: str, percent: float, stage: str, counts: Dict[str, int]) -> None:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                return
+            per_file = dict(job.get("per_file_percent", {}))
+            per_file[file_name] = round(max(0.0, min(100.0, percent)), 2)
+            stages = dict(job.get("per_file_stage", {}))
+            stages[file_name] = stage
+            processed = dict(job.get("processed_counts", {}))
+            processed[file_name] = counts
+            files = list(job.get("files", []))
+            for f in files:
+                if f.get("name") == file_name:
+                    f["percent"] = per_file[file_name]
+                    f["stage"] = stage
+                    f["counts"] = counts
+            overall = 0.0
+            if files:
+                overall = sum(float(f.get("percent", 0.0)) for f in files) / len(files)
+            job.update(
+                {
+                    "per_file_percent": per_file,
+                    "per_file_stage": stages,
+                    "processed_counts": processed,
+                    "files": files,
+                    "overall_percent": round(overall, 2),
+                    "percent": int(round(overall)),
+                    "currentFile": file_name,
+                    "currentStep": stage,
+                }
+            )
+
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
         self.cleanup()
         with self.lock:
@@ -78,11 +209,14 @@ class IfcQaRegistry:
                 result = self.jobs[job_id].get("result_path")
                 workdir = self.jobs[job_id].get("workdir")
                 if result and os.path.exists(result):
-                    try: os.remove(result)
-                    except OSError: pass
+                    try:
+                        os.remove(result)
+                    except OSError:
+                        pass
                 if workdir and os.path.exists(workdir):
                     shutil.rmtree(workdir, ignore_errors=True)
                 self.jobs.pop(job_id, None)
+
 
 REGISTRY = IfcQaRegistry()
 
@@ -101,15 +235,14 @@ def _line_ref(entity: Any) -> str:
 
 def _step_line_map(ifc_path: Path) -> Dict[int, str]:
     data: Dict[int, str] = {}
-    with open(ifc_path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(ifc_path, "rb") as f:
         for raw in f:
-            line = raw.strip()
-            if not line.startswith("#") or "=" not in line:
+            if not raw or raw[0] != 35 or b"=" not in raw:  # '#'
                 continue
             try:
-                left = line.split("=", 1)[0]
-                idx = int(left[1:])
-                data[idx] = line
+                eq = raw.find(b"=")
+                idx = int(raw[1:eq])
+                data[idx] = raw.decode("utf-8", errors="ignore").strip()
             except Exception:
                 continue
     return data
@@ -124,6 +257,19 @@ def _object_layer_name(obj: Any) -> str:
         name = getattr(lyr, "Name", "") or ""
         if name:
             return name
+
+    rep = getattr(obj, "Representation", None)
+    reps = getattr(rep, "Representations", []) if rep else []
+    for shape in reps or []:
+        for item in getattr(shape, "Items", []) or []:
+            for la in getattr(item, "LayerAssignment", []) or []:
+                name = getattr(la, "Name", "") or ""
+                if name:
+                    return name
+            for la in getattr(item, "LayerAssignments", []) or []:
+                name = getattr(la, "Name", "") or ""
+                if name:
+                    return name
     return ""
 
 
@@ -138,6 +284,536 @@ def _coords(obj: Any) -> str:
         return ""
 
 
+def _iter_property_values(pset: Any) -> Iterable[Tuple[str, str]]:
+    for p in getattr(pset, "HasProperties", []) or []:
+        if not p.is_a("IfcPropertySingleValue"):
+            continue
+        nominal = getattr(p, "NominalValue", None)
+        val = getattr(nominal, "wrappedValue", nominal)
+        yield (getattr(p, "Name", "") or "", _str(val))
+
+
+def _get_targets(model: ifcopenshell.file) -> List[Any]:
+    out: List[Any] = []
+    seen: Set[int] = set()
+    for ent in model.by_type("IfcProduct"):
+        eid = ent.id()
+        if eid not in seen:
+            seen.add(eid)
+            out.append(ent)
+    for t in ["IfcSpace", "IfcBuildingStorey"]:
+        for ent in model.by_type(t):
+            eid = ent.id()
+            if eid not in seen:
+                seen.add(eid)
+                out.append(ent)
+    return out
+
+
+def _required_line_map(include: Dict[str, bool]) -> bool:
+    return bool(include.get("project") or include.get("object"))
+
+
+def _progress_for_stage(done: float, total: float) -> float:
+    if total <= 0:
+        return 1.0
+    return max(0.0, min(1.0, done / total))
+
+
+def _update_stage_progress(
+    job_id: str,
+    source_file: str,
+    stage: str,
+    processed: int,
+    total: int,
+    stage_done: Dict[str, float],
+    counts: Dict[str, int],
+    last_emit: Dict[str, float],
+) -> None:
+    stage_done[stage] = _progress_for_stage(processed, total)
+    weighted = 0.0
+    for k, w in STAGE_WEIGHTS.items():
+        weighted += w * stage_done.get(k, 0.0)
+    now = time.time()
+    should_emit = processed == total or now - last_emit.get("t", 0.0) >= 2.0 or (total > 0 and (processed % max(1, total // 100) == 0))
+    if should_emit:
+        REGISTRY.patch_file_progress(job_id, source_file, weighted, stage, dict(counts))
+        last_emit["t"] = now
+
+
+def _collect_context(job_id: str, ifc_path: Path, source_file: str, include: Dict[str, bool]) -> FileContext:
+    started = time.perf_counter()
+    model = ifcopenshell.open(str(ifc_path))
+    ctx = FileContext(f=model, source_file=source_file, ifc_path=ifc_path, schema=getattr(model, "schema", ""), include=include)
+
+    counts: Dict[str, int] = {"objects": 0}
+    stage_done: Dict[str, float] = {}
+    last_emit = {"t": 0.0}
+    _update_stage_progress(job_id, source_file, "open", 1, 1, stage_done, counts, last_emit)
+
+    ctx.objects = _get_targets(model)
+    object_ids = {o.id() for o in ctx.objects}
+    for o in ctx.objects:
+        oid = o.id()
+        ctx.obj_basic[oid] = BasicRow(
+            line_ref=_line_ref(o),
+            name=getattr(o, "Name", "") or "",
+            gid=getattr(o, "GlobalId", "") or "",
+            entity=o.is_a(),
+            desc=getattr(o, "Description", "") or "",
+            tag=getattr(o, "Tag", "") or "",
+            longname=getattr(o, "LongName", "") or "",
+            objecttype=getattr(o, "ObjectType", "") or "",
+        )
+        ctx.psets_occ[oid] = {}
+        ctx.contained_in[oid] = None
+
+    stage_t = time.perf_counter()
+    rel_type = ctx.f.by_type("IfcRelDefinesByType")
+    counts["rel_defines_by_type_total"] = len(rel_type)
+    for i, rel in enumerate(rel_type, start=1):
+        type_obj = getattr(rel, "RelatingType", None)
+        tid = type_obj.id() if type_obj else None
+        if tid and tid not in ctx.type_basic:
+            ctx.type_basic[tid] = TypeRow(
+                line_ref=_line_ref(type_obj),
+                name=getattr(type_obj, "Name", "") or "",
+                entity=type_obj.is_a(),
+                gid=getattr(type_obj, "GlobalId", "") or "",
+                desc=getattr(type_obj, "Description", "") or "",
+                predefined=_str(getattr(type_obj, "PredefinedType", "") or ""),
+            )
+            ctx.psets_type.setdefault(tid, {})
+            for pset in getattr(type_obj, "HasPropertySets", []) or []:
+                if not pset or not pset.is_a("IfcPropertySet"):
+                    continue
+                pset_name = getattr(pset, "Name", "") or ""
+                if not pset_name:
+                    continue
+                for prop_name, value in _iter_property_values(pset):
+                    ctx.psets_type[tid][(pset_name, prop_name)] = value
+        for obj in getattr(rel, "RelatedObjects", []) or []:
+            oid = obj.id()
+            if oid in object_ids:
+                ctx.obj_type[oid] = tid
+        counts["rel_defines_by_type_processed"] = i
+        _update_stage_progress(job_id, source_file, "definesByType", i, len(rel_type), stage_done, counts, last_emit)
+    REGISTRY.append_log(job_id, f"{source_file}: definesByType {time.perf_counter()-stage_t:.2f}s")
+
+    stage_t = time.perf_counter()
+    rel_props = ctx.f.by_type("IfcRelDefinesByProperties")
+    counts["rel_defines_by_props_total"] = len(rel_props)
+    for i, rel in enumerate(rel_props, start=1):
+        pdef = getattr(rel, "RelatingPropertyDefinition", None)
+        if not pdef or not pdef.is_a("IfcPropertySet"):
+            counts["rel_defines_by_props_processed"] = i
+            _update_stage_progress(job_id, source_file, "definesByProps", i, len(rel_props), stage_done, counts, last_emit)
+            continue
+        pset_name = getattr(pdef, "Name", "") or ""
+        if not pset_name:
+            counts["rel_defines_by_props_processed"] = i
+            _update_stage_progress(job_id, source_file, "definesByProps", i, len(rel_props), stage_done, counts, last_emit)
+            continue
+        kvs = list(_iter_property_values(pdef))
+        for obj in getattr(rel, "RelatedObjects", []) or []:
+            oid = obj.id()
+            if oid not in object_ids:
+                continue
+            bucket = ctx.psets_occ.setdefault(oid, {})
+            for prop_name, value in kvs:
+                bucket[(pset_name, prop_name)] = value
+        counts["rel_defines_by_props_processed"] = i
+        _update_stage_progress(job_id, source_file, "definesByProps", i, len(rel_props), stage_done, counts, last_emit)
+    REGISTRY.append_log(job_id, f"{source_file}: definesByProps {time.perf_counter()-stage_t:.2f}s")
+
+    stage_t = time.perf_counter()
+    rel_contain = ctx.f.by_type("IfcRelContainedInSpatialStructure")
+    counts["rel_containment_total"] = len(rel_contain)
+    for i, rel in enumerate(rel_contain, start=1):
+        structure = getattr(rel, "RelatingStructure", None)
+        sid = structure.id() if structure else None
+        for obj in getattr(rel, "RelatedElements", []) or []:
+            oid = obj.id()
+            if oid in object_ids:
+                ctx.contained_in[oid] = sid
+        counts["rel_containment_processed"] = i
+        _update_stage_progress(job_id, source_file, "containment", i, len(rel_contain), stage_done, counts, last_emit)
+    REGISTRY.append_log(job_id, f"{source_file}: containment {time.perf_counter()-stage_t:.2f}s")
+
+    stage_t = time.perf_counter()
+    rel_aggs = ctx.f.by_type("IfcRelAggregates")
+    counts["rel_aggregates_total"] = len(rel_aggs)
+    for i, rel in enumerate(rel_aggs, start=1):
+        parent = getattr(rel, "RelatingObject", None)
+        if parent:
+            pid = parent.id()
+            ctx.aggregates_children.setdefault(pid, [])
+            for child in getattr(rel, "RelatedObjects", []) or []:
+                ctx.aggregates_children[pid].append(child.id())
+        counts["rel_aggregates_processed"] = i
+        _update_stage_progress(job_id, source_file, "aggregates", i, len(rel_aggs), stage_done, counts, last_emit)
+    REGISTRY.append_log(job_id, f"{source_file}: aggregates {time.perf_counter()-stage_t:.2f}s")
+
+    stage_t = time.perf_counter()
+    rel_class = ctx.f.by_type("IfcRelAssociatesClassification")
+    counts["rel_classification_total"] = len(rel_class)
+    for i, rel in enumerate(rel_class, start=1):
+        c = getattr(rel, "RelatingClassification", None)
+        if c:
+            ctype = getattr(getattr(c, "ReferencedSource", None), "Name", "") or getattr(c, "Name", "") or ""
+            ident = getattr(c, "Identification", "") or getattr(c, "ItemReference", "") or ""
+            cname = getattr(c, "Name", "") or ""
+            cvalue = f"{ident}: {cname}" if ident and cname else (cname or ident or _str(c))
+            for o in getattr(rel, "RelatedObjects", []) or []:
+                oid = o.id()
+                if oid not in object_ids:
+                    continue
+                t = ctx.obj_type.get(oid)
+                type_entity = ctx.type_basic.get(t).entity if t and t in ctx.type_basic else ""
+                ctx.classifications.append([
+                    _line_ref(o),
+                    source_file,
+                    getattr(o, "Name", "") or "",
+                    getattr(o, "GlobalId", "") or "",
+                    o.is_a(),
+                    type_entity,
+                    "Type" if o.is_a("IfcTypeObject") else "Occurrence",
+                    ctype,
+                    cvalue,
+                ])
+        counts["rel_classification_processed"] = i
+        _update_stage_progress(job_id, source_file, "classification", i, len(rel_class), stage_done, counts, last_emit)
+    REGISTRY.append_log(job_id, f"{source_file}: classification {time.perf_counter()-stage_t:.2f}s")
+
+    stage_t = time.perf_counter()
+    for i, o in enumerate(ctx.objects, start=1):
+        oid = o.id()
+        type_id = ctx.obj_type.get(oid)
+        predefined = _str(getattr(o, "PredefinedType", "") or "")
+        if not predefined and type_id and type_id in ctx.type_basic:
+            predefined = ctx.type_basic[type_id].predefined
+        ctx.predefined[oid] = predefined
+
+        grp = ""
+        for rel in getattr(o, "HasAssignments", []) or []:
+            g = getattr(rel, "RelatingGroup", None)
+            if g:
+                grp = getattr(g, "Name", "") or ""
+                if grp:
+                    break
+        ctx.assigns_group[oid] = grp
+        counts["objects"] = i
+        _update_stage_progress(job_id, source_file, "predefined", i, len(ctx.objects), stage_done, counts, last_emit)
+    REGISTRY.append_log(job_id, f"{source_file}: predefined {time.perf_counter()-stage_t:.2f}s")
+
+    stage_t = time.perf_counter()
+    for i, o in enumerate(ctx.objects, start=1):
+        ctx.layers[o.id()] = _object_layer_name(o)
+        _update_stage_progress(job_id, source_file, "layers", i, len(ctx.objects), stage_done, counts, last_emit)
+    REGISTRY.append_log(job_id, f"{source_file}: layers {time.perf_counter()-stage_t:.2f}s")
+
+    stage_t = time.perf_counter()
+    for i, o in enumerate(ctx.objects, start=1):
+        ctx.coords[o.id()] = _coords(o)
+        _update_stage_progress(job_id, source_file, "coords", i, len(ctx.objects), stage_done, counts, last_emit)
+    REGISTRY.append_log(job_id, f"{source_file}: coords {time.perf_counter()-stage_t:.2f}s")
+
+    if _required_line_map(include):
+        ctx.line_map = _step_line_map(ifc_path)
+
+    elapsed = time.perf_counter() - started
+    REGISTRY.append_log(job_id, f"Indexed {source_file} in {elapsed:.2f}s (objects={len(ctx.objects)})")
+    return ctx
+
+
+def _storey_name_from_map(ctx: FileContext, sid: Optional[int]) -> str:
+    cur = sid
+    visited: Set[int] = set()
+    while cur and cur not in visited:
+        visited.add(cur)
+        ent = ctx.f.by_id(cur)
+        if not ent:
+            return ""
+        if ent.is_a("IfcBuildingStorey"):
+            return getattr(ent, "Name", "") or ""
+        parent = None
+        for rel in getattr(ent, "Decomposes", []) or []:
+            parent = getattr(rel, "RelatingObject", None)
+            if parent:
+                break
+        cur = parent.id() if parent else None
+    return ""
+
+
+def _object_facts(ctx: FileContext) -> Iterable[ObjectFact]:
+    for o in ctx.objects:
+        oid = o.id()
+        basic = ctx.obj_basic[oid]
+        tid = ctx.obj_type.get(oid)
+        trow = ctx.type_basic.get(tid) if tid else None
+        sid = ctx.contained_in.get(oid)
+        structure = ctx.f.by_id(sid) if sid else None
+        yield ObjectFact(
+            obj_id=oid,
+            line_ref=basic.line_ref,
+            name=basic.name,
+            gid=basic.gid,
+            entity=basic.entity,
+            desc=basic.desc,
+            objecttype=basic.objecttype,
+            tag=basic.tag,
+            longname=basic.longname,
+            type_id=tid,
+            type_entity=trow.entity if trow else "",
+            type_name=trow.name if trow else "",
+            type_desc=trow.desc if trow else "",
+            type_gid=trow.gid if trow else "",
+            type_line_ref=ctx.line_map.get(tid, trow.line_ref if trow else "") if tid else "",
+            predefined=ctx.predefined.get(oid, ""),
+            layer=ctx.layers.get(oid, ""),
+            coords=ctx.coords.get(oid, ""),
+            containing_structure=getattr(structure, "Name", "") or "",
+            containing_structure_tag=getattr(structure, "Tag", "") or "",
+            containing_structure_entity=structure.is_a() if structure else "",
+            storey=_storey_name_from_map(ctx, sid),
+            group=ctx.assigns_group.get(oid, ""),
+        )
+
+
+def _csv_writer(path: Path, header: List[str]):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "w", newline="", encoding="utf-8")
+    writer = csv.writer(handle)
+    writer.writerow(header)
+    return handle, writer
+
+
+def _write_outputs(job_id: str, ctx: FileContext, out_root: Path, config: Dict[str, Any]) -> List[Any]:
+    source = ctx.source_file
+    codes = source.split("-")
+    short_codes = set(config.get("short_codes", []))
+    layers = set(config.get("layers", []))
+    entity_types = set(config.get("entity_types", []))
+    uniclass = set(config.get("uniclass_system_category", []))
+    pset_template = config.get("pset_template", {})
+
+    counts = {"write_objects_total": len(ctx.objects), "write_objects_processed": 0}
+    stage_done = {k: 1.0 for k in STAGE_WEIGHTS if k != "write"}
+    last_emit = {"t": 0.0}
+
+    facts = list(_object_facts(ctx))
+    type_names = [f.type_name for f in facts if f.type_name]
+    dupes = {n for n in type_names if type_names.count(n) > 1}
+
+    if ctx.include.get("project"):
+        h, w = _csv_writer(out_root / "IFC Project" / f"IFC PROJECT - {source}.csv", HEADERS["project"])
+        try:
+            for ifc_t in ["IfcProject", "IfcSite", "IfcBuilding", "IfcBuildingStorey"]:
+                for e in ctx.f.by_type(ifc_t):
+                    children = [ctx.line_map.get(cid, f"#{cid}=") for cid in ctx.aggregates_children.get(e.id(), [])]
+                    w.writerow([
+                        _line_ref(e),
+                        source,
+                        getattr(e, "Name", "") or "",
+                        getattr(e, "GlobalId", "") or "",
+                        e.is_a(),
+                        getattr(e, "Description", "") or "",
+                        getattr(e, "LongName", "") or "",
+                        "; ".join(children),
+                    ])
+        finally:
+            h.close()
+
+    if ctx.include.get("object"):
+        h, w = _csv_writer(out_root / "IFC Object Type" / f"IFC OBJECT TYPE - {source}.csv", HEADERS["object"])
+        try:
+            for i, fact in enumerate(facts, start=1):
+                type_tokens = fact.type_name.split("_") if fact.type_name else []
+                type_ok = bool(fact.type_name)
+                if len(type_tokens) >= 3:
+                    if len(codes) > 1:
+                        type_ok = type_ok and type_tokens[0] == codes[1]
+                    if len(codes) > 5:
+                        type_ok = type_ok and type_tokens[1] == codes[5]
+                    type_ok = type_ok and type_tokens[2] in entity_types
+                else:
+                    type_ok = False
+
+                stem = ""
+                if len(type_tokens) >= 3:
+                    stem = "_".join(type_tokens[2:])
+                    while stem and stem[-1].isdigit():
+                        stem = stem[:-1]
+
+                short = ""
+                if "-" in fact.name:
+                    toks = fact.name.split("-")
+                    if len(toks) > 1:
+                        short = toks[1] + "-"
+
+                name_ok = bool(fact.name)
+                if len(codes) > 1:
+                    name_ok = name_ok and fact.name.startswith(f"{codes[1]}-")
+                if short:
+                    name_ok = name_ok and short.rstrip("-") in short_codes
+
+                w.writerow([
+                    fact.line_ref,
+                    source,
+                    fact.name,
+                    fact.gid,
+                    fact.entity,
+                    fact.desc,
+                    fact.objecttype,
+                    fact.type_entity,
+                    fact.type_name,
+                    fact.predefined,
+                    fact.layer,
+                    fact.tag,
+                    str(bool(name_ok)),
+                    short,
+                    str(bool(type_ok)),
+                    stem,
+                    str(fact.layer in layers),
+                    str(fact.type_name in dupes if fact.type_name else False),
+                    fact.longname,
+                    fact.type_line_ref,
+                    fact.type_desc,
+                    fact.type_gid,
+                    fact.coords,
+                ])
+                counts["write_objects_processed"] = i
+                _update_stage_progress(job_id, source, "write", i, len(facts), stage_done, counts, last_emit)
+        finally:
+            h.close()
+
+    prop_index: Dict[int, Set[Tuple[str, str]]] = {}
+    if ctx.include.get("properties") or ctx.include.get("system") or ctx.include.get("pset_template"):
+        props_handle, props_writer = (None, None)
+        if ctx.include.get("properties"):
+            props_handle, props_writer = _csv_writer(out_root / "IFC Properties" / f"IFC PROPERTIES - {source}.csv", HEADERS["properties"])
+
+        system_handle, system_writer = (None, None)
+        if ctx.include.get("system"):
+            system_handle, system_writer = _csv_writer(out_root / "IFC System" / f"IFC SYSTEM - {source}.csv", HEADERS["system"])
+
+        try:
+            for fact in facts:
+                oid = fact.obj_id
+                prop_index.setdefault(oid, set())
+                for (pset_name, prop_name), value in ctx.psets_occ.get(oid, {}).items():
+                    row = [fact.line_ref, source, fact.name, fact.gid, fact.entity, fact.desc, fact.tag, "Occurrence", pset_name, prop_name, value]
+                    if props_writer:
+                        props_writer.writerow(row)
+                    prop_index[oid].add((pset_name, prop_name))
+                    if system_writer and pset_name == "COBie_System" and prop_name in {"SystemCategory", "SystemName", "SystemDescription"}:
+                        check, code = "", ""
+                        if prop_name == "SystemCategory":
+                            check = str(value in uniclass)
+                            lead = (value or "").split(":", 1)[0]
+                            parts = lead.split("_")
+                            code = "_".join(parts[:4]) if len(parts) >= 4 else lead
+                        elif prop_name == "SystemName":
+                            parts = (value or "").split("_")
+                            check = str(len(parts) >= 4)
+                            code = "_".join(parts[:4]) if len(parts) >= 4 else ""
+                        system_writer.writerow(row[:8] + [row[8], row[9], row[10], check, code])
+
+                type_props = ctx.psets_type.get(fact.type_id, {}) if fact.type_id else {}
+                for (pset_name, prop_name), value in type_props.items():
+                    row = [fact.line_ref, source, fact.name, fact.gid, fact.entity, fact.desc, fact.tag, "Type", pset_name, prop_name, value]
+                    if props_writer:
+                        props_writer.writerow(row)
+                    prop_index[oid].add((pset_name, prop_name))
+                    if system_writer and pset_name == "COBie_System" and prop_name in {"SystemCategory", "SystemName", "SystemDescription"}:
+                        check, code = "", ""
+                        if prop_name == "SystemCategory":
+                            check = str(value in uniclass)
+                            lead = (value or "").split(":", 1)[0]
+                            parts = lead.split("_")
+                            code = "_".join(parts[:4]) if len(parts) >= 4 else lead
+                        elif prop_name == "SystemName":
+                            parts = (value or "").split("_")
+                            check = str(len(parts) >= 4)
+                            code = "_".join(parts[:4]) if len(parts) >= 4 else ""
+                        system_writer.writerow(row[:8] + [row[8], row[9], row[10], check, code])
+        finally:
+            if props_handle:
+                props_handle.close()
+            if system_handle:
+                system_handle.close()
+
+        if ctx.include.get("pset_template"):
+            h, w = _csv_writer(out_root / "IFC Pset Template" / f"IFC PSET TEMPLATE - {source}.csv", HEADERS["pset_template"])
+            try:
+                for fact in facts:
+                    combo = f"{fact.entity}-{fact.type_entity}".rstrip("-")
+                    reqs = pset_template.get(combo, [])
+                    seen = prop_index.get(fact.obj_id, set())
+                    for req in reqs:
+                        pset_name = req.get("Property_Set_Template", "")
+                        prop_name = req.get("Property_Name_Template", "")
+                        ok = (pset_name, prop_name) in seen
+                        w.writerow([
+                            fact.line_ref,
+                            source,
+                            fact.name,
+                            fact.gid,
+                            combo,
+                            fact.tag,
+                            pset_name,
+                            prop_name,
+                            "Defined" if ok else "Not Defined",
+                        ])
+            finally:
+                h.close()
+
+    if ctx.include.get("classification"):
+        h, w = _csv_writer(out_root / "IFC Classification" / f"IFC CLASSIFICATION - {source}.csv", HEADERS["classification"])
+        try:
+            for row in ctx.classifications:
+                w.writerow(row)
+        finally:
+            h.close()
+
+    if ctx.include.get("spatial"):
+        h, w = _csv_writer(out_root / "IFC Spatial Structure" / f"IFC SPATIAL - {source}.csv", HEADERS["spatial"])
+        try:
+            for fact in facts:
+                w.writerow([
+                    fact.line_ref,
+                    source,
+                    fact.name,
+                    fact.gid,
+                    fact.entity,
+                    fact.desc,
+                    fact.tag,
+                    fact.containing_structure,
+                    fact.storey,
+                    fact.containing_structure_tag,
+                    fact.containing_structure_entity,
+                    fact.group,
+                ])
+        finally:
+            h.close()
+
+    _update_stage_progress(job_id, source, "write", len(facts), max(1, len(facts)), stage_done, counts, last_emit)
+    return [f"session://{job_id}/{source}", source, str(codes), ctx.schema, dt.datetime.utcnow().isoformat() + "Z"]
+
+
+def _process_file(job_id: str, ifc_path: Path, out_root: Path, config: Dict[str, Any], include: Dict[str, bool]) -> List[Any]:
+    source = ifc_path.name
+    t0 = time.perf_counter()
+    REGISTRY.append_log(job_id, f"Processing {source}")
+    REGISTRY.patch_file_progress(job_id, source, 0.0, "open", {})
+    ctx = _collect_context(job_id, ifc_path, source, include)
+    model_row = _write_outputs(job_id, ctx, out_root, config)
+    elapsed = time.perf_counter() - t0
+    REGISTRY.append_log(job_id, f"Completed {source} in {elapsed:.2f}s")
+    REGISTRY.patch_file_progress(job_id, source, 100.0, "complete", {"objects": len(ctx.objects)})
+    return model_row
+
+
 def _write_csv(path: Path, header: List[str], rows: List[List[Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -147,221 +823,58 @@ def _write_csv(path: Path, header: List[str], rows: List[List[Any]]) -> None:
             w.writerow([_str(x) for x in r])
 
 
-def _get_targets(model: ifcopenshell.file) -> List[Any]:
-    out: List[Any] = []
-    for p in model.by_type("IfcProduct"):
-        out.append(p)
-    for t in ["IfcSpace", "IfcBuildingStorey"]:
-        for p in model.by_type(t):
-            if p not in out:
-                out.append(p)
-    return out
-
-
-def _type_for_obj(obj: Any) -> Any:
-    try:
-        return ifcopenshell.util.element.get_type(obj)
-    except Exception:
-        return None
-
-
-def _extract_file(job_id: str, ifc_path: Path, out_root: Path, config: Dict[str, Any], include: Dict[str, bool], model_rows: List[List[Any]]) -> None:
-    source = ifc_path.name
-    model = ifcopenshell.open(str(ifc_path))
-    line_map = _step_line_map(ifc_path)
-    codes = source.split("-")
-    schema = getattr(model, "schema", "")
-    model_rows.append([f"session://{job_id}/{source}", source, str(codes), schema, dt.datetime.utcnow().isoformat() + "Z"])
-
-    targets = _get_targets(model)
-    types = [_type_for_obj(o) for o in targets]
-    tnames = [getattr(t, "Name", "") for t in types if t is not None and getattr(t, "Name", "")]
-    dupes = {n for n in tnames if tnames.count(n) > 1}
-
-    short_codes = set(config.get("short_codes", []))
-    layers = set(config.get("layers", []))
-    entity_types = set(config.get("entity_types", []))
-    uniclass = set(config.get("uniclass_system_category", []))
-    pset_template = config.get("pset_template", {})
-
-    if include.get("project"):
-        rows = []
-        for ifc_t in ["IfcProject", "IfcSite", "IfcBuilding", "IfcBuildingStorey"]:
-            for e in model.by_type(ifc_t):
-                children = []
-                for rel in getattr(e, "IsDecomposedBy", []) or []:
-                    for child in getattr(rel, "RelatedObjects", []) or []:
-                        children.append(line_map.get(child.id(), _line_ref(child)))
-                rows.append([_line_ref(e), source, getattr(e, "Name", "") or "", getattr(e, "GlobalId", "") or "", e.is_a(), getattr(e, "Description", "") or "", getattr(e, "LongName", "") or "", "; ".join(children)])
-        _write_csv(out_root / "IFC Project" / f"IFC PROJECT - {source}.csv", HEADERS["project"], rows)
-
-    prop_rows_all = []
-    if include.get("object"):
-        rows = []
-        for o in targets:
-            t = _type_for_obj(o)
-            tname = getattr(t, "Name", "") if t else ""
-            predefined = ""
-            if hasattr(o, "PredefinedType") and getattr(o, "PredefinedType", None):
-                predefined = str(o.PredefinedType)
-            elif t is not None and hasattr(t, "PredefinedType") and getattr(t, "PredefinedType", None):
-                predefined = str(t.PredefinedType)
-            name = getattr(o, "Name", "") or ""
-            type_tokens = tname.split("_") if tname else []
-            type_ok = bool(tname)
-            if len(type_tokens) >= 3:
-                if len(codes) > 1:
-                    type_ok = type_ok and type_tokens[0] == codes[1]
-                if len(codes) > 5:
-                    type_ok = type_ok and type_tokens[1] == codes[5]
-                type_ok = type_ok and type_tokens[2] in entity_types
-            else:
-                type_ok = False
-            stem = ""
-            if len(type_tokens) >= 3:
-                stem = "_".join(type_tokens[2:])
-                while stem and stem[-1].isdigit():
-                    stem = stem[:-1]
-            short = ""
-            if "-" in name:
-                toks = name.split("-")
-                if len(toks) > 1:
-                    short = toks[1] + "-"
-            name_ok = bool(name)
-            if len(codes) > 1:
-                name_ok = name_ok and name.startswith(f"{codes[1]}-")
-            if short:
-                name_ok = name_ok and short.rstrip("-") in short_codes
-            layer = _object_layer_name(o)
-            rows.append([_line_ref(o), source, name, getattr(o, "GlobalId", "") or "", o.is_a(), getattr(o, "Description", "") or "", getattr(o, "ObjectType", "") or "", t.is_a() if t else "", tname, predefined, layer, getattr(o, "Tag", "") or "", str(bool(name_ok)), short, str(bool(type_ok)), stem, str(layer in layers), str(tname in dupes if tname else False), getattr(o, "LongName", "") or "", line_map.get(t.id(), _line_ref(t)) if t else "", getattr(t, "Description", "") if t else "", getattr(t, "GlobalId", "") if t else "", _coords(o)])
-        _write_csv(out_root / "IFC Object Type" / f"IFC OBJECT TYPE - {source}.csv", HEADERS["object"], rows)
-
-    if include.get("classification"):
-        rows = []
-        for rel in model.by_type("IfcRelAssociatesClassification"):
-            c = getattr(rel, "RelatingClassification", None)
-            if not c:
-                continue
-            ctype = getattr(getattr(c, "ReferencedSource", None), "Name", "") or getattr(c, "Name", "") or ""
-            ident = getattr(c, "Identification", "") or getattr(c, "ItemReference", "") or ""
-            cname = getattr(c, "Name", "") or ""
-            cvalue = f"{ident}: {cname}" if ident and cname else (cname or ident or _str(c))
-            for o in getattr(rel, "RelatedObjects", []) or []:
-                t = _type_for_obj(o)
-                rows.append([_line_ref(o), source, getattr(o, "Name", "") or "", getattr(o, "GlobalId", "") or "", o.is_a(), t.is_a() if t else "", "Type" if o.is_a("IfcTypeObject") else "Occurrence", ctype, cvalue])
-        _write_csv(out_root / "IFC Classification" / f"IFC CLASSIFICATION - {source}.csv", HEADERS["classification"], rows)
-
-    if include.get("properties") or include.get("system") or include.get("pset_template"):
-        prop_rows, prop_index = [], set()
-        for o in targets:
-            for rel in getattr(o, "IsDefinedBy", []) or []:
-                pset = getattr(rel, "RelatingPropertyDefinition", None)
-                if not pset or not pset.is_a("IfcPropertySet"):
-                    continue
-                for p in getattr(pset, "HasProperties", []) or []:
-                    if not p.is_a("IfcPropertySingleValue"):
-                        continue
-                    val = getattr(getattr(p, "NominalValue", None), "wrappedValue", getattr(p, "NominalValue", ""))
-                    row = [_line_ref(o), source, getattr(o, "Name", "") or "", getattr(o, "GlobalId", "") or "", o.is_a(), getattr(o, "Description", "") or "", getattr(o, "Tag", "") or "", "Occurrence", getattr(pset, "Name", "") or "", getattr(p, "Name", "") or "", _str(val)]
-                    prop_rows.append(row)
-                    prop_rows_all.append(row)
-                    prop_index.add((o.id(), getattr(pset, "Name", "") or "", getattr(p, "Name", "") or ""))
-            t = _type_for_obj(o)
-            for pset in getattr(t, "HasPropertySets", []) or [] if t else []:
-                if not pset.is_a("IfcPropertySet"):
-                    continue
-                for p in getattr(pset, "HasProperties", []) or []:
-                    if not p.is_a("IfcPropertySingleValue"):
-                        continue
-                    val = getattr(getattr(p, "NominalValue", None), "wrappedValue", getattr(p, "NominalValue", ""))
-                    row = [_line_ref(o), source, getattr(o, "Name", "") or "", getattr(o, "GlobalId", "") or "", o.is_a(), getattr(o, "Description", "") or "", getattr(o, "Tag", "") or "", "Type", getattr(pset, "Name", "") or "", getattr(p, "Name", "") or "", _str(val)]
-                    prop_rows.append(row)
-                    prop_rows_all.append(row)
-                    prop_index.add((o.id(), getattr(pset, "Name", "") or "", getattr(p, "Name", "")))
-        if include.get("properties"):
-            _write_csv(out_root / "IFC Properties" / f"IFC PROPERTIES - {source}.csv", HEADERS["properties"], prop_rows)
-
-        if include.get("system"):
-            srows = []
-            for r in prop_rows:
-                if r[8] != "COBie_System" or r[9] not in {"SystemCategory", "SystemName", "SystemDescription"}:
-                    continue
-                check, code = "", ""
-                if r[9] == "SystemCategory":
-                    check = str(r[10] in uniclass)
-                    lead = (r[10] or "").split(":", 1)[0]
-                    parts = lead.split("_")
-                    code = "_".join(parts[:4]) if len(parts) >= 4 else lead
-                elif r[9] == "SystemName":
-                    parts = (r[10] or "").split("_")
-                    check = str(len(parts) >= 4)
-                    code = "_".join(parts[:4]) if len(parts) >= 4 else ""
-                srows.append(r[:8] + [r[8], r[9], r[10], check, code])
-            _write_csv(out_root / "IFC System" / f"IFC SYSTEM - {source}.csv", HEADERS["system"], srows)
-
-        if include.get("pset_template"):
-            rows = []
-            for o in targets:
-                t = _type_for_obj(o)
-                combo = f"{o.is_a()}-{t.is_a() if t else ''}".rstrip("-")
-                reqs = pset_template.get(combo, [])
-                for req in reqs:
-                    pset_name, prop_name = req.get("Property_Set_Template", ""), req.get("Property_Name_Template", "")
-                    ok = (o.id(), pset_name, prop_name) in prop_index
-                    rows.append([_line_ref(o), source, getattr(o, "Name", "") or "", getattr(o, "GlobalId", "") or "", combo, getattr(o, "Tag", "") or "", pset_name, prop_name, "Defined" if ok else "Not Defined"])
-            _write_csv(out_root / "IFC Pset Template" / f"IFC PSET TEMPLATE - {source}.csv", HEADERS["pset_template"], rows)
-
-    if include.get("spatial"):
-        rows = []
-        for o in targets:
-            container = ifcopenshell.util.element.get_container(o)
-            storey_name = ""
-            c_name = getattr(container, "Name", "") if container else ""
-            c_tag = getattr(container, "Tag", "") if container else ""
-            c_ent = container.is_a() if container else ""
-            cur = container
-            while cur:
-                if cur.is_a("IfcBuildingStorey"):
-                    storey_name = getattr(cur, "Name", "") or ""
-                    break
-                cur = ifcopenshell.util.element.get_container(cur)
-            group_name = ""
-            for rel in getattr(o, "HasAssignments", []) or []:
-                grp = getattr(rel, "RelatingGroup", None)
-                if grp:
-                    group_name = getattr(grp, "Name", "") or ""
-                    break
-            rows.append([_line_ref(o), source, getattr(o, "Name", "") or "", getattr(o, "GlobalId", "") or "", o.is_a(), getattr(o, "Description", "") or "", getattr(o, "Tag", "") or "", c_name or "", storey_name, c_tag or "", c_ent or "", group_name])
-        _write_csv(out_root / "IFC Spatial Structure" / f"IFC SPATIAL - {source}.csv", HEADERS["spatial"], rows)
-
-
 def run_job(job_id: str, file_records: List[Tuple[str, str]], options: Dict[str, Any], config: Dict[str, Any]) -> None:
     workdir = Path(tempfile.mkdtemp(prefix="ifc_qa_v2_"))
     out_root = workdir / "IFC Output"
     for d in BASE_OUTPUT:
         (out_root / d).mkdir(parents=True, exist_ok=True)
-    REGISTRY.update(job_id, status="running", currentStep="Starting", workdir=str(workdir), files=[{"name":n,"percent":0} for n,_ in file_records])
-    include = options.get("selected_sheets", {
-        "model": True, "project": True, "object": True, "properties": True, "classification": True, "spatial": True, "system": True, "pset_template": True
-    })
-    model_rows: List[List[Any]] = []
-    for i, (name, path) in enumerate(file_records, start=1):
-        REGISTRY.append_log(job_id, f"Processing {name}")
-        REGISTRY.update(job_id, currentFile=name, currentStep="Extracting", percent=int((i-1)/len(file_records)*90))
-        _extract_file(job_id, Path(path), out_root, config, include, model_rows)
-        job = REGISTRY.get(job_id) or {}
-        files = job.get("files", [])
-        for f in files:
-            if f.get("name") == name:
-                f["percent"] = 100
-        REGISTRY.update(job_id, files=files)
-    _write_csv(out_root / "IFC Models" / "IFC MODEL TABLE.csv", HEADERS["model"], model_rows)
 
-    zip_path = workdir / "IFC Output.zip"
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for p in out_root.rglob("*.csv"):
-            zf.write(p, p.relative_to(workdir).as_posix())
-    REGISTRY.update(job_id, status="complete", percent=100, currentStep="Complete", result_path=str(zip_path))
+    include = options.get(
+        "selected_sheets",
+        {
+            "model": True,
+            "project": True,
+            "object": True,
+            "properties": True,
+            "classification": True,
+            "spatial": True,
+            "system": True,
+            "pset_template": True,
+        },
+    )
+
+    max_workers = int(options.get("max_workers") or min(3, max(1, (os.cpu_count() or 2) // 2)))
+    max_workers = max(1, min(3, max_workers))
+
+    REGISTRY.update(
+        job_id,
+        status="running",
+        currentStep="Starting",
+        workdir=str(workdir),
+        files=[{"name": n, "percent": 0, "stage": "queued", "counts": {}} for n, _ in file_records],
+    )
+
+    model_rows: List[List[Any]] = []
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [
+                pool.submit(_process_file, job_id, Path(path), out_root, config, include)
+                for _, path in file_records
+            ]
+            for fut in as_completed(futures):
+                model_rows.append(fut.result())
+
+        _write_csv(out_root / "IFC Models" / "IFC MODEL TABLE.csv", HEADERS["model"], model_rows)
+
+        zip_path = workdir / "IFC Output.zip"
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for p in out_root.rglob("*.csv"):
+                zf.write(p, p.relative_to(workdir).as_posix())
+
+        REGISTRY.update(job_id, status="complete", percent=100, overall_percent=100, currentStep="Complete", result_path=str(zip_path))
+    except Exception as exc:
+        REGISTRY.append_log(job_id, f"Failed: {exc}")
+        REGISTRY.update(job_id, status="failed", currentStep="Failed", percent=100)
 
 
 def start_job(file_records: List[Tuple[str, str]], options: Dict[str, Any], config: Dict[str, Any]) -> str:
