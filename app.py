@@ -13,6 +13,7 @@ import tempfile
 import traceback
 import uuid
 import zipfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -71,6 +72,10 @@ RESOURCE_DIR = Path(__file__).resolve().parent / "resources"
 QA_RESOURCE_DIR = Path(__file__).resolve().parent / "app" / "resources" / "ifc_qa"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 IFC_QA_REFERENCE_DIR = Path(__file__).resolve().parent / "backend" / "ifc_qa" / "reference"
+UTC = datetime.timezone.utc
+
+def utc_now() -> datetime.datetime:
+    return datetime.datetime.now(UTC)
 
 
 # ----------------------------------------------------------------------------
@@ -101,7 +106,7 @@ class SessionStore:
     def create(self) -> str:
         session_id = uuid.uuid4().hex
         os.makedirs(self.session_path(session_id), exist_ok=True)
-        now = datetime.datetime.utcnow()
+        now = utc_now()
         self.sessions[session_id] = now
         return session_id
 
@@ -111,13 +116,13 @@ class SessionStore:
     def touch(self, session_id: str) -> None:
         if not self.exists(session_id):
             raise HTTPException(status_code=404, detail="Session not found")
-        self.sessions[session_id] = datetime.datetime.utcnow()
+        self.sessions[session_id] = utc_now()
 
     def exists(self, session_id: str) -> bool:
         return session_id in self.sessions and os.path.isdir(self.session_path(session_id))
 
     def cleanup_stale(self) -> None:
-        cutoff = datetime.datetime.utcnow() - datetime.timedelta(hours=self.ttl_hours)
+        cutoff = utc_now() - datetime.timedelta(hours=self.ttl_hours)
         stale = [sid for sid, ts in self.sessions.items() if ts < cutoff]
         for sid in stale:
             self.drop(sid)
@@ -2603,7 +2608,7 @@ def apply_layer_changes(
     updated_layers = set()
     updated_props = set()
     change_log = []
-    now = datetime.datetime.utcnow().isoformat() + "Z"
+    now = utc_now().isoformat() + "Z"
 
     for row in rows_to_apply:
         target = row.get("target_layer") or ""
@@ -2681,7 +2686,7 @@ def apply_layer_changes(
                 )
 
     base_dir = os.path.dirname(ifc_path)
-    ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    ts = utc_now().strftime("%Y%m%d_%H%M%S")
     base = os.path.splitext(os.path.basename(ifc_path))[0]
     out_path = os.path.join(base_dir, f"{base}_layer_purged_{ts}.ifc")
     model.write(out_path)
@@ -2858,7 +2863,7 @@ def apply_predefined_type_changes(
 ) -> Tuple[str, str, str]:
     model = ifcopenshell.open(ifc_path)
     change_log = []
-    now = datetime.datetime.utcnow().isoformat() + "Z"
+    now = utc_now().isoformat() + "Z"
     updated = 0
 
     def _ensure_pset_on_entity(entity, pset_name: str) -> bool:
@@ -2979,7 +2984,7 @@ def apply_predefined_type_changes(
         )
 
     base_dir = os.path.dirname(ifc_path)
-    ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    ts = utc_now().strftime("%Y%m%d_%H%M%S")
     base = os.path.splitext(os.path.basename(ifc_path))[0]
     out_path = os.path.join(base_dir, f"{base}_predefined_{ts}.ifc")
     model.write(out_path)
@@ -4134,11 +4139,11 @@ def apply_edits(session_id: str, in_path: str, edits: List[Dict[str, Any]]) -> T
                 "field": desc.path_label(),
                 "old": _to_serializable(old_val),
                 "new": _to_serializable(new_val),
-                "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+                "timestamp": utc_now().isoformat() + "Z",
             }
         )
     base, ext = os.path.splitext(os.path.basename(in_path))
-    ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    ts = utc_now().strftime("%Y%m%d_%H%M%S")
     out_name = f"{base}_checked_{ts}{ext or '.ifc'}"
     out_path = os.path.join(os.path.dirname(in_path), out_name)
     model.write(out_path)
@@ -4157,7 +4162,7 @@ def _run_cobieqc_job(job_id: str) -> None:
             job_id,
             status=STATUS_RUNNING,
             progress=0.1,
-            started_at=datetime.datetime.utcnow().isoformat() + "Z",
+            started_at=utc_now().isoformat() + "Z",
             message="Running COBieQC reporter",
         )
         job_dir = COBIEQC_JOB_STORE.get_job_dir(job_id)
@@ -4177,7 +4182,7 @@ def _run_cobieqc_job(job_id: str) -> None:
                 status=STATUS_DONE,
                 progress=1.0,
                 message="Report generated",
-                finished_at=datetime.datetime.utcnow().isoformat() + "Z",
+                finished_at=utc_now().isoformat() + "Z",
                 output_filename=result.get("output_filename", "report.html"),
             )
         else:
@@ -4186,7 +4191,7 @@ def _run_cobieqc_job(job_id: str) -> None:
                 status=STATUS_ERROR,
                 progress=1.0,
                 message=result.get("error") or "COBieQC failed",
-                finished_at=datetime.datetime.utcnow().isoformat() + "Z",
+                finished_at=utc_now().isoformat() + "Z",
             )
     except Exception as exc:
         COBIEQC_JOB_STORE.append_log(job_id, f"Unhandled error: {exc}")
@@ -4195,7 +4200,7 @@ def _run_cobieqc_job(job_id: str) -> None:
             status=STATUS_ERROR,
             progress=1.0,
             message=str(exc),
-            finished_at=datetime.datetime.utcnow().isoformat() + "Z",
+            finished_at=utc_now().isoformat() + "Z",
         )
 
 
@@ -4203,13 +4208,7 @@ def _run_cobieqc_job(job_id: str) -> None:
 # FastAPI app + routes
 # ----------------------------------------------------------------------------
 
-app = FastAPI(title="IFC Toolkit Hub")
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
-
-
-@app.on_event("startup")
-def startup_cleanup():
+def startup_cleanup() -> None:
     SESSION_STORE.cleanup_stale()
     COBIEQC_JOB_STORE.cleanup_old_jobs()
     try:
@@ -4222,10 +4221,23 @@ def startup_cleanup():
         APP_LOGGER.warning("COBieQC Java runtime unavailable: %s", exc)
 
 
-@app.on_event("shutdown")
-def shutdown_cleanup():
+def shutdown_cleanup() -> None:
     for sid in list(SESSION_STORE.sessions.keys()):
         SESSION_STORE.drop(sid)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    startup_cleanup()
+    try:
+        yield
+    finally:
+        shutdown_cleanup()
+
+
+app = FastAPI(title="IFC Toolkit Hub", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -4340,7 +4352,7 @@ def create_session(payload: Dict[str, Any] = Body(default=None)):
         session_id = incoming
     else:
         session_id = SESSION_STORE.create()
-    expiry = datetime.datetime.utcnow() + datetime.timedelta(hours=SESSION_STORE.ttl_hours)
+    expiry = utc_now() + datetime.timedelta(hours=SESSION_STORE.ttl_hours)
     return {"session_id": session_id, "expires_at": expiry.isoformat() + "Z"}
 
 
@@ -4613,6 +4625,7 @@ def ifc_qa_config_session(session_id: str):
 def ifc_qa_config_regex_compat(session_id: str):
     return {
         "regex": [],
+        "patterns": [],
         "overrides": {},
         "message": "Regex extractor deprecated; using IFCOpenShell config.",
     }
@@ -4798,7 +4811,7 @@ def run_cleaner(session_id: str, payload: Dict[str, Any] = Body(...)):
 
     reports = []
     outputs = []
-    ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    ts = utc_now().strftime("%Y%m%d_%H%M%S")
     for fname in files:
         in_path = os.path.join(root, sanitize_filename(fname))
         if not os.path.isfile(in_path):
