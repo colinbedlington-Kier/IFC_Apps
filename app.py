@@ -11,11 +11,12 @@ import subprocess
 import sys
 import tempfile
 import traceback
+import time
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import ifcopenshell
 import ifcopenshell.api
@@ -51,6 +52,7 @@ from cobieqc_service.security import sanitize_filename as sanitize_upload_filena
 from cobieqc_service.security import validate_upload
 from ifc_qa_service import REGISTRY as IFC_QA_V2_REGISTRY
 from ifc_qa_service import default_config_from_dir, start_job as start_ifc_qa_v2_job
+from backend.ifc_jobs import create_job as create_ifc_job, get_job as get_ifc_job, update_job as update_ifc_job
 
 STEP2IFC_ROOT = Path(__file__).resolve().parent / "step2ifc"
 if STEP2IFC_ROOT.exists():
@@ -3646,17 +3648,27 @@ def run_data_extractor_job(
     pset_template: Optional[str],
     tables: List[str],
     regexes: Dict[str, str],
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> None:
     session_root = Path(SESSION_STORE.ensure(session_id))
     work_dir = Path(tempfile.mkdtemp(prefix="data_extractor_", dir=session_root))
+    timeout_seconds = int(os.getenv("IFC_JOB_TIMEOUT_SECONDS", "1200"))
+    started_at = time.time()
     log_lines: List[str] = []
+
+    def emit(**payload: Any) -> None:
+        update_data_extract_job(job_id, **payload)
+        if progress_callback:
+            progress_callback(payload)
 
     def log(message: str) -> None:
         log_lines.append(message)
-        update_data_extract_job(job_id, logs=log_lines)
+        if len(log_lines) > 250:
+            del log_lines[:-250]
+        emit(logs=log_lines)
 
     total_tables = max(len(tables), 1)
-    update_data_extract_job(job_id, status="running", progress=2, message="Starting extraction", logs=log_lines)
+    emit(status="running", progress=2, message="Starting extraction", logs=log_lines)
 
     exclude_path = Path(exclude_filter) if exclude_filter else RESOURCE_DIR / "Exclude_Filter_Template.csv"
     pset_path = Path(pset_template) if pset_template else RESOURCE_DIR / "GPA_Pset_Template.csv"
@@ -3667,6 +3679,8 @@ def run_data_extractor_job(
     preview_payload: Optional[Dict[str, Any]] = None
 
     for file_index, file_name in enumerate(ifc_files, start=1):
+        if time.time() - started_at > timeout_seconds:
+            raise TimeoutError(f"IFC extraction exceeded {timeout_seconds}s timeout")
         safe_name = sanitize_filename(file_name)
         input_path = session_root / safe_name
         if not input_path.exists():
@@ -3693,8 +3707,7 @@ def run_data_extractor_job(
             object_type_counts[obj.is_a()] = object_type_counts.get(obj.is_a(), 0) + 1
 
         for table_index, table_name in enumerate(tables, start=1):
-            update_data_extract_job(
-                job_id,
+            emit(
                 progress=min(progress_base + int((table_index / total_tables) * per_file_step), 99),
                 message=f"{safe_name}: {table_name}",
             )
@@ -3723,8 +3736,6 @@ def run_data_extractor_job(
                 elif table_name == "Pset Template Data Table":
                     out_path = file_dir / f"IFC PSET TEMPLATE - {base_name}.csv"
                     _write_pset_template_table(out_path, safe_name, template_map, object_type_counts)
-                else:
-                    continue
             except Exception as exc:
                 log(f"[{safe_name}] ERROR writing {table_name}: {exc}")
 
@@ -3750,8 +3761,7 @@ def run_data_extractor_job(
             zipf.write(file_path, arcname.as_posix())
     outputs.append({"name": zip_name, "url": f"/api/session/{session_id}/download?name={zip_name}"})
 
-    update_data_extract_job(
-        job_id,
+    emit(
         status="done",
         progress=100,
         message="Extraction complete",
@@ -3760,7 +3770,6 @@ def run_data_extractor_job(
         outputs=outputs,
         preview=preview_payload,
     )
-
 
 def update_ifc_qa_job(job_id: str, **updates: Any) -> None:
     job = IFC_QA_JOBS.get(job_id)
@@ -4639,8 +4648,7 @@ def ifc_qa_config_regex_compat(session_id: str):
 async def ifc_qa_config_import(config_json: UploadFile = File(...)):
     payload = json.loads((await config_json.read()).decode("utf-8"))
     return {"config": payload}
-@app.post("/api/session/{session_id}/data-extractor/start")
-def start_data_extractor(session_id: str, payload: Dict[str, Any] = Body(...), background_tasks: BackgroundTasks = None):
+def _build_ifc_job_payload(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     root = Path(SESSION_STORE.ensure(session_id))
     ifc_files = payload.get("ifc_files") or []
     tables = payload.get("tables") or []
@@ -4648,6 +4656,26 @@ def start_data_extractor(session_id: str, payload: Dict[str, Any] = Body(...), b
         raise HTTPException(status_code=400, detail="IFC files are required")
     if not tables:
         raise HTTPException(status_code=400, detail="Select at least one table")
+
+    max_files = int(os.getenv("IFC_MAX_FILES_PER_JOB", "5"))
+    if len(ifc_files) > max_files:
+        raise HTTPException(status_code=400, detail=f"Max {max_files} IFC files per job")
+
+    input_files = []
+    total_bytes = 0
+    for name in ifc_files:
+        safe = sanitize_filename(name)
+        candidate = root / safe
+        if not candidate.exists():
+            raise HTTPException(status_code=400, detail=f"Missing upload: {safe}")
+        size = candidate.stat().st_size
+        total_bytes += size
+        input_files.append({"name": safe, "size": size})
+
+    max_bytes = int(os.getenv("IFC_MAX_TOTAL_BYTES", "500000000"))
+    if total_bytes > max_bytes:
+        raise HTTPException(status_code=400, detail=f"Total upload size exceeds limit ({max_bytes} bytes)")
+
     exclude_filter_name = payload.get("exclude_filter")
     pset_template_name = payload.get("pset_template")
     pset_template_default = payload.get("pset_template_default") or "GPA_Pset_Template.csv"
@@ -4674,39 +4702,115 @@ def start_data_extractor(session_id: str, payload: Dict[str, Any] = Body(...), b
         if default_candidate.exists():
             pset_path = str(default_candidate)
 
-    job_id = uuid.uuid4().hex
-    DATA_EXTRACT_JOBS[job_id] = {
-        "job_id": job_id,
-        "status": "queued",
-        "progress": 0,
-        "message": "Queued",
-        "done": False,
-        "error": False,
-        "outputs": [],
-        "logs": [],
-        "preview": None,
+    return {
+        "session_id": session_id,
+        "ifc_files": [f["name"] for f in input_files],
+        "input_files": input_files,
+        "tables": tables,
+        "exclude_path": exclude_path,
+        "pset_path": pset_path,
+        "regexes": defaults,
     }
-    if background_tasks is None:
-        background_tasks = BackgroundTasks()
-    background_tasks.add_task(
-        run_data_extractor_job,
-        job_id,
-        session_id,
-        ifc_files,
-        exclude_path,
-        pset_path,
-        tables,
-        defaults,
-    )
-    return {"job_id": job_id, "status_url": f"/api/session/{session_id}/data-extractor/{job_id}"}
+
+
+@app.post("/api/ifc/jobs")
+def create_ifc_extraction_job(payload: Dict[str, Any] = Body(...), request: Request = None):
+    session_id = payload.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    job_payload = _build_ifc_job_payload(session_id, payload)
+    user = None
+    if request is not None:
+        user = request.headers.get("x-user") or request.headers.get("x-user-email")
+    job = create_ifc_job(requested_by=user, input_files=job_payload["input_files"], options={
+        "session_id": session_id,
+        "tables": job_payload["tables"],
+        "exclude_path": job_payload["exclude_path"],
+        "pset_path": job_payload["pset_path"],
+        "regexes": job_payload["regexes"],
+    })
+    return {"jobId": str(job["id"]), "status": job["status"], "progress": job["progress"], "message": job["message"]}
+
+
+@app.get("/api/ifc/jobs/{job_id}")
+def get_ifc_extraction_job(job_id: str):
+    job = get_ifc_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "jobId": str(job["id"]),
+        "status": job["status"],
+        "progress": job.get("progress", 0),
+        "message": job.get("message") or "",
+        "error": job.get("error"),
+    }
+
+
+@app.get("/api/ifc/jobs/{job_id}/result")
+def get_ifc_extraction_result(job_id: str):
+    job = get_ifc_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail="Result not ready")
+    return job.get("result") or {}
+
+
+@app.post("/api/ifc/jobs/{job_id}/cancel")
+def cancel_ifc_extraction_job(job_id: str):
+    job = get_ifc_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") in {"done", "failed", "canceled"}:
+        return {"jobId": str(job["id"]), "status": job.get("status")}
+    update_ifc_job(job_id, status="canceled", message="Canceled by user")
+    return {"jobId": str(job["id"]), "status": "canceled"}
+
+
+@app.post("/api/session/{session_id}/data-extractor/start")
+def start_data_extractor(session_id: str, payload: Dict[str, Any] = Body(...)):
+    payload = dict(payload)
+    payload["session_id"] = session_id
+    job = create_ifc_extraction_job(payload)
+    job_id = job["jobId"]
+    return {
+        "job_id": job_id,
+        "jobId": job_id,
+        "status": job["status"],
+        "progress": job["progress"],
+        "message": job["message"],
+        "status_url": f"/api/ifc/jobs/{job_id}",
+        "result_url": f"/api/ifc/jobs/{job_id}/result",
+        "deprecated": True,
+        "deprecation_note": "Use POST /api/ifc/jobs and GET /api/ifc/jobs/{id}",
+    }
 
 
 @app.get("/api/session/{session_id}/data-extractor/{job_id}")
 def get_data_extractor_status(session_id: str, job_id: str):
     SESSION_STORE.ensure(session_id)
-    job = DATA_EXTRACT_JOBS.get(job_id)
+    job = get_ifc_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    result = job.get("result") or {}
+    return {
+        "job_id": str(job["id"]),
+        "status": job["status"],
+        "progress": job.get("progress", 0),
+        "message": job.get("message") or "",
+        "done": job.get("status") in {"done", "failed", "canceled"},
+        "error": bool(job.get("error")) or job.get("status") == "failed",
+        "outputs": result.get("outputs", []),
+        "preview": result.get("preview"),
+        "logs": [],
+    }
+
+
+@app.post("/api/extract")
+def api_extract_compat(payload: Dict[str, Any] = Body(...)):
+    job = create_ifc_extraction_job(payload)
+    job["deprecated"] = True
+    job["deprecation_note"] = "Use /api/ifc/jobs"
     return job
 
 
