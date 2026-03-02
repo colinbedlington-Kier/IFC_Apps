@@ -11,11 +11,12 @@ import subprocess
 import sys
 import tempfile
 import traceback
+import time
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import ifcopenshell
 import ifcopenshell.api
@@ -51,6 +52,7 @@ from cobieqc_service.security import sanitize_filename as sanitize_upload_filena
 from cobieqc_service.security import validate_upload
 from ifc_qa_service import REGISTRY as IFC_QA_V2_REGISTRY
 from ifc_qa_service import default_config_from_dir, start_job as start_ifc_qa_v2_job
+from backend.ifc_jobs import create_job as create_ifc_job, get_job as get_ifc_job, update_job as update_ifc_job
 
 STEP2IFC_ROOT = Path(__file__).resolve().parent / "step2ifc"
 if STEP2IFC_ROOT.exists():
@@ -301,6 +303,114 @@ def _safe_get_psets(entity: Any) -> Dict[str, Dict[str, Any]]:
         return ifcopenshell.util.element.get_psets(entity, psets_only=True, include_inherited=True) or {}
     except TypeError:
         return ifcopenshell.util.element.get_psets(entity, psets_only=True) or {}
+
+
+def _extract_property_single_value(prop: Any) -> Tuple[str, str]:
+    if not prop:
+        return "", ""
+    if prop.is_a("IfcPropertySingleValue"):
+        value = getattr(prop, "NominalValue", None)
+        return _clean_value(getattr(value, "wrappedValue", value)), "IfcPropertySingleValue"
+    if prop.is_a("IfcPropertyEnumeratedValue"):
+        values = getattr(prop, "EnumerationValues", None) or []
+        clean = [_clean_value(getattr(v, "wrappedValue", v)) for v in values]
+        return ", ".join([v for v in clean if v]), "IfcPropertyEnumeratedValue"
+    if prop.is_a("IfcPropertyListValue"):
+        values = getattr(prop, "ListValues", None) or []
+        clean = [_clean_value(getattr(v, "wrappedValue", v)) for v in values]
+        return ", ".join([v for v in clean if v]), "IfcPropertyListValue"
+    if prop.is_a("IfcPropertyBoundedValue"):
+        lower = getattr(getattr(prop, "LowerBoundValue", None), "wrappedValue", getattr(prop, "LowerBoundValue", None))
+        upper = getattr(getattr(prop, "UpperBoundValue", None), "wrappedValue", getattr(prop, "UpperBoundValue", None))
+        return f"{_clean_value(lower)}..{_clean_value(upper)}", "IfcPropertyBoundedValue"
+    if prop.is_a("IfcPropertyReferenceValue"):
+        value = getattr(prop, "PropertyReference", None)
+        return _clean_value(value), "IfcPropertyReferenceValue"
+    if prop.is_a("IfcComplexProperty"):
+        return _clean_value(getattr(prop, "UsageName", "")), "IfcComplexProperty"
+    return "", prop.is_a()
+
+
+def _extract_quantity_value(quantity: Any) -> Tuple[str, str]:
+    for attr in (
+        "LengthValue",
+        "AreaValue",
+        "VolumeValue",
+        "CountValue",
+        "WeightValue",
+        "TimeValue",
+    ):
+        if hasattr(quantity, attr):
+            value = getattr(quantity, attr, None)
+            if value is not None:
+                return _clean_value(value), quantity.is_a()
+    if hasattr(quantity, "NominalValue"):
+        value = getattr(quantity, "NominalValue", None)
+        return _clean_value(getattr(value, "wrappedValue", value)), quantity.is_a()
+    return "", quantity.is_a()
+
+
+def _iter_occurrence_property_rows(obj: Any, allowed_psets: Optional[List[str]]) -> List[Tuple[str, str, str, str]]:
+    rows: List[Tuple[str, str, str, str]] = []
+    for rel in getattr(obj, "IsDefinedBy", None) or []:
+        if not rel or not rel.is_a("IfcRelDefinesByProperties"):
+            continue
+        pdef = getattr(rel, "RelatingPropertyDefinition", None)
+        if not pdef:
+            continue
+        if pdef.is_a("IfcPropertySet"):
+            pset_name = getattr(pdef, "Name", "") or ""
+            if allowed_psets is not None and allowed_psets and pset_name not in allowed_psets:
+                continue
+            for prop in getattr(pdef, "HasProperties", None) or []:
+                value, value_type = _extract_property_single_value(prop)
+                rows.append((pset_name, getattr(prop, "Name", "") or "", value, value_type))
+        elif pdef.is_a("IfcElementQuantity"):
+            for quantity in getattr(pdef, "Quantities", None) or []:
+                value, value_type = _extract_quantity_value(quantity)
+                rows.append(("BaseQuantities", getattr(quantity, "Name", "") or "", value, value_type))
+    return rows
+
+
+def _iter_type_property_rows(type_obj: Any, allowed_psets: Optional[List[str]]) -> List[Tuple[str, str, str, str]]:
+    if not type_obj:
+        return []
+    rows: List[Tuple[str, str, str, str]] = []
+    for pdef in getattr(type_obj, "HasPropertySets", None) or []:
+        if not pdef:
+            continue
+        if pdef.is_a("IfcPropertySet"):
+            pset_name = getattr(pdef, "Name", "") or ""
+            if allowed_psets is not None and allowed_psets and pset_name not in allowed_psets:
+                continue
+            for prop in getattr(pdef, "HasProperties", None) or []:
+                value, value_type = _extract_property_single_value(prop)
+                rows.append((pset_name, getattr(prop, "Name", "") or "", value, value_type))
+        elif pdef.is_a("IfcElementQuantity"):
+            for quantity in getattr(pdef, "Quantities", None) or []:
+                value, value_type = _extract_quantity_value(quantity)
+                rows.append(("BaseQuantities", getattr(quantity, "Name", "") or "", value, value_type))
+    return rows
+
+
+def _iter_entity_classifications(entity: Any) -> List[Tuple[str, str, str, str]]:
+    rows: List[Tuple[str, str, str, str]] = []
+    for rel in getattr(entity, "HasAssociations", None) or []:
+        if not rel or not rel.is_a("IfcRelAssociatesClassification"):
+            continue
+        classification = getattr(rel, "RelatingClassification", None)
+        if not classification:
+            continue
+        sys_name = getattr(classification, "Name", "") or ""
+        code = getattr(classification, "Identification", "") or ""
+        desc = getattr(classification, "Description", "") or ""
+        name = getattr(classification, "Name", "") or ""
+        if classification.is_a("IfcClassificationReference"):
+            source = getattr(classification, "ReferencedSource", None)
+            sys_name = (getattr(source, "Name", "") if source else "") or name
+            code = getattr(classification, "Identification", "") or getattr(classification, "ItemReference", "") or ""
+        rows.append((sys_name, name, code, desc))
+    return rows
 
 
 def _qa_override_dir(session_id: str) -> Path:
@@ -3444,6 +3554,7 @@ def _write_classification_table(
     path: Path,
     source_file: str,
     include_ids: Optional[set] = None,
+    objects: Optional[List[Any]] = None,
 ) -> None:
     header = [
         "Source_File",
@@ -3455,35 +3566,31 @@ def _write_classification_table(
         "Classification_Description",
     ]
     rows: List[List[Any]] = []
-    for rel in model.by_type("IfcRelAssociatesClassification"):
-        related = getattr(rel, "RelatedObjects", []) or []
-        classification = getattr(rel, "RelatingClassification", None)
-        if not classification:
+
+    target_objects = objects or []
+    if not target_objects:
+        target_objects = [obj for obj in model.by_type("IfcProduct") if include_ids is None or obj.id() in include_ids]
+
+    for obj in target_objects:
+        if include_ids is not None and obj.id() not in include_ids:
             continue
-        sys_name = getattr(classification, "Name", "") or ""
-        code = getattr(classification, "Identification", "") or ""
-        desc = getattr(classification, "Description", "") or ""
-        if classification.is_a("IfcClassificationReference"):
-            sys_name = getattr(classification, "ReferencedSource", None) and getattr(
-                classification.ReferencedSource, "Name", ""
-            )
-            sys_name = sys_name or getattr(classification, "Name", "") or ""
-            code = getattr(classification, "Identification", "") or getattr(classification, "ItemReference", "") or ""
-            desc = getattr(classification, "Description", "") or ""
-        for obj in related:
-            if include_ids is not None and obj.id() not in include_ids:
+        seen = set()
+        for sys_name, name, code, desc in _iter_entity_classifications(obj):
+            key = (getattr(obj, "GlobalId", "") or "", obj.is_a(), sys_name, name, code, desc)
+            if key in seen:
                 continue
-            rows.append(
-                [
-                    source_file,
-                    getattr(obj, "GlobalId", "") or "",
-                    obj.is_a(),
-                    sys_name or "",
-                    getattr(classification, "Name", "") or "",
-                    code or "",
-                    desc or "",
-                ]
-            )
+            seen.add(key)
+            rows.append([source_file, key[0], key[1], key[2], key[3], key[4], key[5]])
+
+        type_obj = ifcopenshell.util.element.get_type(obj)
+        if type_obj:
+            for sys_name, name, code, desc in _iter_entity_classifications(type_obj):
+                key = (getattr(type_obj, "GlobalId", "") or "", type_obj.is_a(), sys_name, name, code, desc)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append([source_file, key[0], key[1], key[2], key[3], key[4], key[5]])
+
     _write_csv_rows(path, header, rows)
 
 
@@ -3605,36 +3712,64 @@ def _write_property_table(
         "IFC_TypeId",
     ]
     rows: List[List[Any]] = []
+    type_cache: Dict[int, Any] = {}
+    occ_cache: Dict[int, List[Tuple[str, str, str, str]]] = {}
+    type_prop_cache: Dict[int, List[Tuple[str, str, str, str]]] = {}
+
     for obj in objects:
-        type_obj = ifcopenshell.util.element.get_type(obj)
+        obj_id = obj.id()
+        type_obj = type_cache.get(obj_id)
+        if obj_id not in type_cache:
+            type_obj = ifcopenshell.util.element.get_type(obj)
+            type_cache[obj_id] = type_obj
         obj_type = obj.is_a()
         type_name = type_obj.is_a() if type_obj else ""
+
         allowed = None
         if obj_type in template_map:
             allowed = template_map[obj_type]
         elif type_name in template_map:
             allowed = template_map[type_name]
-        psets = _safe_get_psets(obj)
         if allowed is None:
             continue
-        if not allowed:
-            allowed = list(psets.keys())
-        for pset_name in allowed:
-            props = psets.get(pset_name) or {}
-            for prop_name, value in props.items():
-                rows.append(
-                    [
-                        source_file,
-                        getattr(obj, "GlobalId", "") or "",
-                        obj.is_a(),
-                        pset_name,
-                        prop_name,
-                        _clean_value(value),
-                        type(value).__name__,
-                        "",
-                        getattr(type_obj, "GlobalId", "") if type_obj else "",
-                    ]
-                )
+
+        occ_rows = occ_cache.get(obj_id)
+        if occ_rows is None:
+            occ_rows = _iter_occurrence_property_rows(obj, allowed)
+            occ_cache[obj_id] = occ_rows
+
+        for pset_name, prop_name, prop_value, prop_type in occ_rows:
+            rows.append([
+                source_file,
+                getattr(obj, "GlobalId", "") or "",
+                obj.is_a(),
+                pset_name,
+                prop_name,
+                prop_value,
+                prop_type,
+                "",
+                getattr(type_obj, "GlobalId", "") if type_obj else "",
+            ])
+
+        if type_obj:
+            type_id = type_obj.id()
+            t_rows = type_prop_cache.get(type_id)
+            if t_rows is None:
+                t_rows = _iter_type_property_rows(type_obj, allowed)
+                type_prop_cache[type_id] = t_rows
+            for pset_name, prop_name, prop_value, prop_type in t_rows:
+                rows.append([
+                    source_file,
+                    getattr(type_obj, "GlobalId", "") or "",
+                    type_obj.is_a(),
+                    pset_name,
+                    prop_name,
+                    prop_value,
+                    prop_type,
+                    "",
+                    getattr(type_obj, "GlobalId", "") or "",
+                ])
+
     _write_csv_rows(path, header, rows)
 
 
@@ -3646,17 +3781,27 @@ def run_data_extractor_job(
     pset_template: Optional[str],
     tables: List[str],
     regexes: Dict[str, str],
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> None:
     session_root = Path(SESSION_STORE.ensure(session_id))
     work_dir = Path(tempfile.mkdtemp(prefix="data_extractor_", dir=session_root))
+    timeout_seconds = int(os.getenv("IFC_JOB_TIMEOUT_SECONDS", "1200"))
+    started_at = time.time()
     log_lines: List[str] = []
+
+    def emit(**payload: Any) -> None:
+        update_data_extract_job(job_id, **payload)
+        if progress_callback:
+            progress_callback(payload)
 
     def log(message: str) -> None:
         log_lines.append(message)
-        update_data_extract_job(job_id, logs=log_lines)
+        if len(log_lines) > 250:
+            del log_lines[:-250]
+        emit(logs=log_lines)
 
     total_tables = max(len(tables), 1)
-    update_data_extract_job(job_id, status="running", progress=2, message="Starting extraction", logs=log_lines)
+    emit(status="running", progress=2, message="Starting extraction", logs=log_lines)
 
     exclude_path = Path(exclude_filter) if exclude_filter else RESOURCE_DIR / "Exclude_Filter_Template.csv"
     pset_path = Path(pset_template) if pset_template else RESOURCE_DIR / "GPA_Pset_Template.csv"
@@ -3667,6 +3812,8 @@ def run_data_extractor_job(
     preview_payload: Optional[Dict[str, Any]] = None
 
     for file_index, file_name in enumerate(ifc_files, start=1):
+        if time.time() - started_at > timeout_seconds:
+            raise TimeoutError(f"IFC extraction exceeded {timeout_seconds}s timeout")
         safe_name = sanitize_filename(file_name)
         input_path = session_root / safe_name
         if not input_path.exists():
@@ -3693,8 +3840,7 @@ def run_data_extractor_job(
             object_type_counts[obj.is_a()] = object_type_counts.get(obj.is_a(), 0) + 1
 
         for table_index, table_name in enumerate(tables, start=1):
-            update_data_extract_job(
-                job_id,
+            emit(
                 progress=min(progress_base + int((table_index / total_tables) * per_file_step), 99),
                 message=f"{safe_name}: {table_name}",
             )
@@ -3713,7 +3859,7 @@ def run_data_extractor_job(
                     _write_property_table(model, out_path, safe_name, objects, template_map)
                 elif table_name == "Classification Data Table":
                     out_path = file_dir / f"IFC CLASSIFICATION - {base_name}.csv"
-                    _write_classification_table(model, out_path, safe_name, include_ids if include_ids else None)
+                    _write_classification_table(model, out_path, safe_name, include_ids if include_ids else None, objects)
                 elif table_name == "Spatial Structure Data Table":
                     out_path = file_dir / f"IFC SPATIAL STRUCTURE - {base_name}.csv"
                     _write_spatial_table(model, out_path, safe_name, objects)
@@ -3723,8 +3869,6 @@ def run_data_extractor_job(
                 elif table_name == "Pset Template Data Table":
                     out_path = file_dir / f"IFC PSET TEMPLATE - {base_name}.csv"
                     _write_pset_template_table(out_path, safe_name, template_map, object_type_counts)
-                else:
-                    continue
             except Exception as exc:
                 log(f"[{safe_name}] ERROR writing {table_name}: {exc}")
 
@@ -3750,8 +3894,7 @@ def run_data_extractor_job(
             zipf.write(file_path, arcname.as_posix())
     outputs.append({"name": zip_name, "url": f"/api/session/{session_id}/download?name={zip_name}"})
 
-    update_data_extract_job(
-        job_id,
+    emit(
         status="done",
         progress=100,
         message="Extraction complete",
@@ -3760,7 +3903,6 @@ def run_data_extractor_job(
         outputs=outputs,
         preview=preview_payload,
     )
-
 
 def update_ifc_qa_job(job_id: str, **updates: Any) -> None:
     job = IFC_QA_JOBS.get(job_id)
@@ -4639,8 +4781,7 @@ def ifc_qa_config_regex_compat(session_id: str):
 async def ifc_qa_config_import(config_json: UploadFile = File(...)):
     payload = json.loads((await config_json.read()).decode("utf-8"))
     return {"config": payload}
-@app.post("/api/session/{session_id}/data-extractor/start")
-def start_data_extractor(session_id: str, payload: Dict[str, Any] = Body(...), background_tasks: BackgroundTasks = None):
+def _build_ifc_job_payload(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     root = Path(SESSION_STORE.ensure(session_id))
     ifc_files = payload.get("ifc_files") or []
     tables = payload.get("tables") or []
@@ -4648,6 +4789,26 @@ def start_data_extractor(session_id: str, payload: Dict[str, Any] = Body(...), b
         raise HTTPException(status_code=400, detail="IFC files are required")
     if not tables:
         raise HTTPException(status_code=400, detail="Select at least one table")
+
+    max_files = int(os.getenv("IFC_MAX_FILES_PER_JOB", "5"))
+    if len(ifc_files) > max_files:
+        raise HTTPException(status_code=400, detail=f"Max {max_files} IFC files per job")
+
+    input_files = []
+    total_bytes = 0
+    for name in ifc_files:
+        safe = sanitize_filename(name)
+        candidate = root / safe
+        if not candidate.exists():
+            raise HTTPException(status_code=400, detail=f"Missing upload: {safe}")
+        size = candidate.stat().st_size
+        total_bytes += size
+        input_files.append({"name": safe, "size": size})
+
+    max_bytes = int(os.getenv("IFC_MAX_TOTAL_BYTES", "500000000"))
+    if total_bytes > max_bytes:
+        raise HTTPException(status_code=400, detail=f"Total upload size exceeds limit ({max_bytes} bytes)")
+
     exclude_filter_name = payload.get("exclude_filter")
     pset_template_name = payload.get("pset_template")
     pset_template_default = payload.get("pset_template_default") or "GPA_Pset_Template.csv"
@@ -4674,39 +4835,115 @@ def start_data_extractor(session_id: str, payload: Dict[str, Any] = Body(...), b
         if default_candidate.exists():
             pset_path = str(default_candidate)
 
-    job_id = uuid.uuid4().hex
-    DATA_EXTRACT_JOBS[job_id] = {
-        "job_id": job_id,
-        "status": "queued",
-        "progress": 0,
-        "message": "Queued",
-        "done": False,
-        "error": False,
-        "outputs": [],
-        "logs": [],
-        "preview": None,
+    return {
+        "session_id": session_id,
+        "ifc_files": [f["name"] for f in input_files],
+        "input_files": input_files,
+        "tables": tables,
+        "exclude_path": exclude_path,
+        "pset_path": pset_path,
+        "regexes": defaults,
     }
-    if background_tasks is None:
-        background_tasks = BackgroundTasks()
-    background_tasks.add_task(
-        run_data_extractor_job,
-        job_id,
-        session_id,
-        ifc_files,
-        exclude_path,
-        pset_path,
-        tables,
-        defaults,
-    )
-    return {"job_id": job_id, "status_url": f"/api/session/{session_id}/data-extractor/{job_id}"}
+
+
+@app.post("/api/ifc/jobs")
+def create_ifc_extraction_job(payload: Dict[str, Any] = Body(...), request: Request = None):
+    session_id = payload.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    job_payload = _build_ifc_job_payload(session_id, payload)
+    user = None
+    if request is not None:
+        user = request.headers.get("x-user") or request.headers.get("x-user-email")
+    job = create_ifc_job(requested_by=user, input_files=job_payload["input_files"], options={
+        "session_id": session_id,
+        "tables": job_payload["tables"],
+        "exclude_path": job_payload["exclude_path"],
+        "pset_path": job_payload["pset_path"],
+        "regexes": job_payload["regexes"],
+    })
+    return {"jobId": str(job["id"]), "status": job["status"], "progress": job["progress"], "message": job["message"]}
+
+
+@app.get("/api/ifc/jobs/{job_id}")
+def get_ifc_extraction_job(job_id: str):
+    job = get_ifc_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "jobId": str(job["id"]),
+        "status": job["status"],
+        "progress": job.get("progress", 0),
+        "message": job.get("message") or "",
+        "error": job.get("error"),
+    }
+
+
+@app.get("/api/ifc/jobs/{job_id}/result")
+def get_ifc_extraction_result(job_id: str):
+    job = get_ifc_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail="Result not ready")
+    return job.get("result") or {}
+
+
+@app.post("/api/ifc/jobs/{job_id}/cancel")
+def cancel_ifc_extraction_job(job_id: str):
+    job = get_ifc_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") in {"done", "failed", "canceled"}:
+        return {"jobId": str(job["id"]), "status": job.get("status")}
+    update_ifc_job(job_id, status="canceled", message="Canceled by user")
+    return {"jobId": str(job["id"]), "status": "canceled"}
+
+
+@app.post("/api/session/{session_id}/data-extractor/start")
+def start_data_extractor(session_id: str, payload: Dict[str, Any] = Body(...)):
+    payload = dict(payload)
+    payload["session_id"] = session_id
+    job = create_ifc_extraction_job(payload)
+    job_id = job["jobId"]
+    return {
+        "job_id": job_id,
+        "jobId": job_id,
+        "status": job["status"],
+        "progress": job["progress"],
+        "message": job["message"],
+        "status_url": f"/api/ifc/jobs/{job_id}",
+        "result_url": f"/api/ifc/jobs/{job_id}/result",
+        "deprecated": True,
+        "deprecation_note": "Use POST /api/ifc/jobs and GET /api/ifc/jobs/{id}",
+    }
 
 
 @app.get("/api/session/{session_id}/data-extractor/{job_id}")
 def get_data_extractor_status(session_id: str, job_id: str):
     SESSION_STORE.ensure(session_id)
-    job = DATA_EXTRACT_JOBS.get(job_id)
+    job = get_ifc_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    result = job.get("result") or {}
+    return {
+        "job_id": str(job["id"]),
+        "status": job["status"],
+        "progress": job.get("progress", 0),
+        "message": job.get("message") or "",
+        "done": job.get("status") in {"done", "failed", "canceled"},
+        "error": bool(job.get("error")) or job.get("status") == "failed",
+        "outputs": result.get("outputs", []),
+        "preview": result.get("preview"),
+        "logs": [],
+    }
+
+
+@app.post("/api/extract")
+def api_extract_compat(payload: Dict[str, Any] = Body(...)):
+    job = create_ifc_extraction_job(payload)
+    job["deprecated"] = True
+    job["deprecation_note"] = "Use /api/ifc/jobs"
     return job
 
 

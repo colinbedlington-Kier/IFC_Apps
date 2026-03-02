@@ -92,3 +92,32 @@ COBie QC is now a built-in IFC Toolkit page available at **/tools/cobieqc** (no 
 ```bash
 uvicorn app:app --reload
 ```
+
+## IFC extractor async jobs
+
+The IFC Data Extractor now uses database-backed queued jobs to keep heavy extraction off the web request path.
+
+### New endpoints
+
+- `POST /api/ifc/jobs`
+- `GET /api/ifc/jobs/{id}`
+- `GET /api/ifc/jobs/{id}/result`
+- `POST /api/ifc/jobs/{id}/cancel`
+
+Backwards-compatible endpoint retained:
+
+- `POST /api/session/{session_id}/data-extractor/start` (returns `jobId` and deprecation note)
+
+### Environment variables
+
+- `DATABASE_URL` (required for queue)
+- `IFC_MAX_TOTAL_BYTES` (default `500000000`)
+- `IFC_MAX_FILES_PER_JOB` (default `5`)
+- `IFC_JOB_TIMEOUT_SECONDS` (default `1200`)
+- `IFC_WORKER_CONCURRENCY` (default `1`)
+- `IFC_OUTPUT_BUCKET` (default `ifc-outputs`)
+
+### Railway process commands
+
+- Web: `uvicorn app:app --host 0.0.0.0 --port $PORT`
+- Worker: `python -m backend.ifc_worker`
