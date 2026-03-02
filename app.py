@@ -305,6 +305,114 @@ def _safe_get_psets(entity: Any) -> Dict[str, Dict[str, Any]]:
         return ifcopenshell.util.element.get_psets(entity, psets_only=True) or {}
 
 
+def _extract_property_single_value(prop: Any) -> Tuple[str, str]:
+    if not prop:
+        return "", ""
+    if prop.is_a("IfcPropertySingleValue"):
+        value = getattr(prop, "NominalValue", None)
+        return _clean_value(getattr(value, "wrappedValue", value)), "IfcPropertySingleValue"
+    if prop.is_a("IfcPropertyEnumeratedValue"):
+        values = getattr(prop, "EnumerationValues", None) or []
+        clean = [_clean_value(getattr(v, "wrappedValue", v)) for v in values]
+        return ", ".join([v for v in clean if v]), "IfcPropertyEnumeratedValue"
+    if prop.is_a("IfcPropertyListValue"):
+        values = getattr(prop, "ListValues", None) or []
+        clean = [_clean_value(getattr(v, "wrappedValue", v)) for v in values]
+        return ", ".join([v for v in clean if v]), "IfcPropertyListValue"
+    if prop.is_a("IfcPropertyBoundedValue"):
+        lower = getattr(getattr(prop, "LowerBoundValue", None), "wrappedValue", getattr(prop, "LowerBoundValue", None))
+        upper = getattr(getattr(prop, "UpperBoundValue", None), "wrappedValue", getattr(prop, "UpperBoundValue", None))
+        return f"{_clean_value(lower)}..{_clean_value(upper)}", "IfcPropertyBoundedValue"
+    if prop.is_a("IfcPropertyReferenceValue"):
+        value = getattr(prop, "PropertyReference", None)
+        return _clean_value(value), "IfcPropertyReferenceValue"
+    if prop.is_a("IfcComplexProperty"):
+        return _clean_value(getattr(prop, "UsageName", "")), "IfcComplexProperty"
+    return "", prop.is_a()
+
+
+def _extract_quantity_value(quantity: Any) -> Tuple[str, str]:
+    for attr in (
+        "LengthValue",
+        "AreaValue",
+        "VolumeValue",
+        "CountValue",
+        "WeightValue",
+        "TimeValue",
+    ):
+        if hasattr(quantity, attr):
+            value = getattr(quantity, attr, None)
+            if value is not None:
+                return _clean_value(value), quantity.is_a()
+    if hasattr(quantity, "NominalValue"):
+        value = getattr(quantity, "NominalValue", None)
+        return _clean_value(getattr(value, "wrappedValue", value)), quantity.is_a()
+    return "", quantity.is_a()
+
+
+def _iter_occurrence_property_rows(obj: Any, allowed_psets: Optional[List[str]]) -> List[Tuple[str, str, str, str]]:
+    rows: List[Tuple[str, str, str, str]] = []
+    for rel in getattr(obj, "IsDefinedBy", None) or []:
+        if not rel or not rel.is_a("IfcRelDefinesByProperties"):
+            continue
+        pdef = getattr(rel, "RelatingPropertyDefinition", None)
+        if not pdef:
+            continue
+        if pdef.is_a("IfcPropertySet"):
+            pset_name = getattr(pdef, "Name", "") or ""
+            if allowed_psets is not None and allowed_psets and pset_name not in allowed_psets:
+                continue
+            for prop in getattr(pdef, "HasProperties", None) or []:
+                value, value_type = _extract_property_single_value(prop)
+                rows.append((pset_name, getattr(prop, "Name", "") or "", value, value_type))
+        elif pdef.is_a("IfcElementQuantity"):
+            for quantity in getattr(pdef, "Quantities", None) or []:
+                value, value_type = _extract_quantity_value(quantity)
+                rows.append(("BaseQuantities", getattr(quantity, "Name", "") or "", value, value_type))
+    return rows
+
+
+def _iter_type_property_rows(type_obj: Any, allowed_psets: Optional[List[str]]) -> List[Tuple[str, str, str, str]]:
+    if not type_obj:
+        return []
+    rows: List[Tuple[str, str, str, str]] = []
+    for pdef in getattr(type_obj, "HasPropertySets", None) or []:
+        if not pdef:
+            continue
+        if pdef.is_a("IfcPropertySet"):
+            pset_name = getattr(pdef, "Name", "") or ""
+            if allowed_psets is not None and allowed_psets and pset_name not in allowed_psets:
+                continue
+            for prop in getattr(pdef, "HasProperties", None) or []:
+                value, value_type = _extract_property_single_value(prop)
+                rows.append((pset_name, getattr(prop, "Name", "") or "", value, value_type))
+        elif pdef.is_a("IfcElementQuantity"):
+            for quantity in getattr(pdef, "Quantities", None) or []:
+                value, value_type = _extract_quantity_value(quantity)
+                rows.append(("BaseQuantities", getattr(quantity, "Name", "") or "", value, value_type))
+    return rows
+
+
+def _iter_entity_classifications(entity: Any) -> List[Tuple[str, str, str, str]]:
+    rows: List[Tuple[str, str, str, str]] = []
+    for rel in getattr(entity, "HasAssociations", None) or []:
+        if not rel or not rel.is_a("IfcRelAssociatesClassification"):
+            continue
+        classification = getattr(rel, "RelatingClassification", None)
+        if not classification:
+            continue
+        sys_name = getattr(classification, "Name", "") or ""
+        code = getattr(classification, "Identification", "") or ""
+        desc = getattr(classification, "Description", "") or ""
+        name = getattr(classification, "Name", "") or ""
+        if classification.is_a("IfcClassificationReference"):
+            source = getattr(classification, "ReferencedSource", None)
+            sys_name = (getattr(source, "Name", "") if source else "") or name
+            code = getattr(classification, "Identification", "") or getattr(classification, "ItemReference", "") or ""
+        rows.append((sys_name, name, code, desc))
+    return rows
+
+
 def _qa_override_dir(session_id: str) -> Path:
     root = Path(SESSION_STORE.ensure(session_id))
     override_dir = root / "ifc_qa_overrides"
@@ -3446,6 +3554,7 @@ def _write_classification_table(
     path: Path,
     source_file: str,
     include_ids: Optional[set] = None,
+    objects: Optional[List[Any]] = None,
 ) -> None:
     header = [
         "Source_File",
@@ -3457,35 +3566,31 @@ def _write_classification_table(
         "Classification_Description",
     ]
     rows: List[List[Any]] = []
-    for rel in model.by_type("IfcRelAssociatesClassification"):
-        related = getattr(rel, "RelatedObjects", []) or []
-        classification = getattr(rel, "RelatingClassification", None)
-        if not classification:
+
+    target_objects = objects or []
+    if not target_objects:
+        target_objects = [obj for obj in model.by_type("IfcProduct") if include_ids is None or obj.id() in include_ids]
+
+    for obj in target_objects:
+        if include_ids is not None and obj.id() not in include_ids:
             continue
-        sys_name = getattr(classification, "Name", "") or ""
-        code = getattr(classification, "Identification", "") or ""
-        desc = getattr(classification, "Description", "") or ""
-        if classification.is_a("IfcClassificationReference"):
-            sys_name = getattr(classification, "ReferencedSource", None) and getattr(
-                classification.ReferencedSource, "Name", ""
-            )
-            sys_name = sys_name or getattr(classification, "Name", "") or ""
-            code = getattr(classification, "Identification", "") or getattr(classification, "ItemReference", "") or ""
-            desc = getattr(classification, "Description", "") or ""
-        for obj in related:
-            if include_ids is not None and obj.id() not in include_ids:
+        seen = set()
+        for sys_name, name, code, desc in _iter_entity_classifications(obj):
+            key = (getattr(obj, "GlobalId", "") or "", obj.is_a(), sys_name, name, code, desc)
+            if key in seen:
                 continue
-            rows.append(
-                [
-                    source_file,
-                    getattr(obj, "GlobalId", "") or "",
-                    obj.is_a(),
-                    sys_name or "",
-                    getattr(classification, "Name", "") or "",
-                    code or "",
-                    desc or "",
-                ]
-            )
+            seen.add(key)
+            rows.append([source_file, key[0], key[1], key[2], key[3], key[4], key[5]])
+
+        type_obj = ifcopenshell.util.element.get_type(obj)
+        if type_obj:
+            for sys_name, name, code, desc in _iter_entity_classifications(type_obj):
+                key = (getattr(type_obj, "GlobalId", "") or "", type_obj.is_a(), sys_name, name, code, desc)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append([source_file, key[0], key[1], key[2], key[3], key[4], key[5]])
+
     _write_csv_rows(path, header, rows)
 
 
@@ -3607,36 +3712,64 @@ def _write_property_table(
         "IFC_TypeId",
     ]
     rows: List[List[Any]] = []
+    type_cache: Dict[int, Any] = {}
+    occ_cache: Dict[int, List[Tuple[str, str, str, str]]] = {}
+    type_prop_cache: Dict[int, List[Tuple[str, str, str, str]]] = {}
+
     for obj in objects:
-        type_obj = ifcopenshell.util.element.get_type(obj)
+        obj_id = obj.id()
+        type_obj = type_cache.get(obj_id)
+        if obj_id not in type_cache:
+            type_obj = ifcopenshell.util.element.get_type(obj)
+            type_cache[obj_id] = type_obj
         obj_type = obj.is_a()
         type_name = type_obj.is_a() if type_obj else ""
+
         allowed = None
         if obj_type in template_map:
             allowed = template_map[obj_type]
         elif type_name in template_map:
             allowed = template_map[type_name]
-        psets = _safe_get_psets(obj)
         if allowed is None:
             continue
-        if not allowed:
-            allowed = list(psets.keys())
-        for pset_name in allowed:
-            props = psets.get(pset_name) or {}
-            for prop_name, value in props.items():
-                rows.append(
-                    [
-                        source_file,
-                        getattr(obj, "GlobalId", "") or "",
-                        obj.is_a(),
-                        pset_name,
-                        prop_name,
-                        _clean_value(value),
-                        type(value).__name__,
-                        "",
-                        getattr(type_obj, "GlobalId", "") if type_obj else "",
-                    ]
-                )
+
+        occ_rows = occ_cache.get(obj_id)
+        if occ_rows is None:
+            occ_rows = _iter_occurrence_property_rows(obj, allowed)
+            occ_cache[obj_id] = occ_rows
+
+        for pset_name, prop_name, prop_value, prop_type in occ_rows:
+            rows.append([
+                source_file,
+                getattr(obj, "GlobalId", "") or "",
+                obj.is_a(),
+                pset_name,
+                prop_name,
+                prop_value,
+                prop_type,
+                "",
+                getattr(type_obj, "GlobalId", "") if type_obj else "",
+            ])
+
+        if type_obj:
+            type_id = type_obj.id()
+            t_rows = type_prop_cache.get(type_id)
+            if t_rows is None:
+                t_rows = _iter_type_property_rows(type_obj, allowed)
+                type_prop_cache[type_id] = t_rows
+            for pset_name, prop_name, prop_value, prop_type in t_rows:
+                rows.append([
+                    source_file,
+                    getattr(type_obj, "GlobalId", "") or "",
+                    type_obj.is_a(),
+                    pset_name,
+                    prop_name,
+                    prop_value,
+                    prop_type,
+                    "",
+                    getattr(type_obj, "GlobalId", "") or "",
+                ])
+
     _write_csv_rows(path, header, rows)
 
 
@@ -3726,7 +3859,7 @@ def run_data_extractor_job(
                     _write_property_table(model, out_path, safe_name, objects, template_map)
                 elif table_name == "Classification Data Table":
                     out_path = file_dir / f"IFC CLASSIFICATION - {base_name}.csv"
-                    _write_classification_table(model, out_path, safe_name, include_ids if include_ids else None)
+                    _write_classification_table(model, out_path, safe_name, include_ids if include_ids else None, objects)
                 elif table_name == "Spatial Structure Data Table":
                     out_path = file_dir / f"IFC SPATIAL STRUCTURE - {base_name}.csv"
                     _write_spatial_table(model, out_path, safe_name, objects)
