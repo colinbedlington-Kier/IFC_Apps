@@ -1313,7 +1313,7 @@ async function startDataExtraction() {
     return;
   }
   const data = await resp.json();
-  pollDataExtraction(data.status_url);
+  pollDataExtraction(data.status_url, data.result_url);
 }
 
 function renderPreviewTable(preview) {
@@ -1346,7 +1346,7 @@ function renderPreviewTable(preview) {
   table.appendChild(tbody);
 }
 
-function pollDataExtraction(statusUrl) {
+function pollDataExtraction(statusUrl, resultUrl = null) {
   if (!statusUrl) return;
   const progressBar = el("dataExtractorProgress");
   const statusEl = el("dataExtractorStatus");
@@ -1362,12 +1362,23 @@ function pollDataExtraction(statusUrl) {
     if (progressBar) progressBar.style.width = `${data.progress || 0}%`;
     statusEl.textContent = data.message || "Processing…";
     if (logEl && data.logs) logEl.value = data.logs.join("\n");
-    if (data.done) {
-      if (downloadEl && data.outputs && data.outputs.length) {
-        const link = data.outputs[0];
-        downloadEl.innerHTML = `<a href=\"${link.url}\">Download ZIP (${link.name})</a>`;
+
+    const terminal = data.done || ["done", "failed", "canceled"].includes(data.status);
+    if (terminal) {
+      if (data.error || data.status === "failed") {
+        statusEl.textContent = data.error || data.message || "Extraction failed.";
+        return;
       }
-      if (data.preview) renderPreviewTable(data.preview);
+      const finalResultUrl = resultUrl || statusUrl.replace(/\/jobs\/([^/]+)$/, "/jobs/$1/result");
+      const resultResp = await fetch(finalResultUrl);
+      if (resultResp.ok) {
+        const result = await resultResp.json();
+        if (downloadEl && result.outputs && result.outputs.length) {
+          const link = result.outputs[0];
+          downloadEl.innerHTML = `<a href="${link.url}">Download ZIP (${link.name})</a>`;
+        }
+        if (result.preview) renderPreviewTable(result.preview);
+      }
       return;
     }
     setTimeout(poll, 1200);
