@@ -1169,15 +1169,18 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
         return reference, name
 
     is_ifc2x3 = ifc.schema == "IFC2X3"
-    pr_rows, ss_rows = [], []
+    pr_rows, ss_rows, en_rows = [], [], []
     for elem in ifc.by_type("IfcElement"):
         pr_ref, pr_name = extract_uniclass(elem, "Uniclass Pr Products", is_ifc2x3)
         ss_ref, ss_name = extract_uniclass(elem, "Uniclass Ss Systems", is_ifc2x3)
+        en_ref, en_name = extract_uniclass(elem, "Uniclass En Entities", is_ifc2x3)
         pr_rows.append({"GlobalId": elem.GlobalId, "Reference": pr_ref, "Name": pr_name})
         ss_rows.append({"GlobalId": elem.GlobalId, "Reference": ss_ref, "Name": ss_name})
+        en_rows.append({"GlobalId": elem.GlobalId, "Reference": en_ref, "Name": en_name})
 
     uniclass_pr_df = pd.DataFrame(pr_rows)
     uniclass_ss_df = pd.DataFrame(ss_rows)
+    uniclass_en_df = pd.DataFrame(en_rows)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         project_df.to_excel(writer, sheet_name="ProjectData", index=False)
@@ -1186,6 +1189,7 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
         cobie_df.to_excel(writer, sheet_name="COBieMapping", index=False)
         uniclass_pr_df.to_excel(writer, sheet_name="Uniclass_Pr", index=False)
         uniclass_ss_df.to_excel(writer, sheet_name="Uniclass_Ss", index=False)
+        uniclass_en_df.to_excel(writer, sheet_name="Uniclass_En", index=False)
     return output_path
 
 
@@ -1242,6 +1246,10 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
         uniclass_ss_df = pd.read_excel(xls, "Uniclass_Ss")
     except Exception:
         uniclass_ss_df = None
+    try:
+        uniclass_en_df = pd.read_excel(xls, "Uniclass_En")
+    except Exception:
+        uniclass_en_df = None
 
     project = ifc.by_type("IfcProject")[0]
     site = ifc.by_type("IfcSite")[0] if ifc.by_type("IfcSite") else None
@@ -1428,6 +1436,7 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
 
     set_uniclass(uniclass_pr_df, "Uniclass Pr Products")
     set_uniclass(uniclass_ss_df, "Uniclass Ss Systems")
+    set_uniclass(uniclass_en_df, "Uniclass En Entities")
 
     ifc.write(output_path)
     return output_path
