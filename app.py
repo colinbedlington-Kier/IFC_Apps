@@ -811,6 +811,61 @@ def get_pset_value(elem, pset_name, prop_name):
 def extract_to_excel(ifc_path: str, output_path: str) -> str:
     ifc = ifcopenshell.open(ifc_path)
 
+    def _first_non_empty(*values):
+        for val in values:
+            if val not in (None, ""):
+                return val
+        return ""
+
+    def _spatial_context(elem):
+        container = ifcopenshell.util.element.get_container(elem)
+        space = storey = building = site = None
+        current = container
+        while current:
+            if current.is_a("IfcSpace"):
+                space = space or getattr(current, "Name", "")
+            elif current.is_a("IfcBuildingStorey"):
+                storey = storey or getattr(current, "Name", "")
+            elif current.is_a("IfcBuilding"):
+                building = building or getattr(current, "Name", "")
+            elif current.is_a("IfcSite"):
+                site = site or getattr(current, "Name", "")
+            current = ifcopenshell.util.element.get_container(current)
+        return space or "", storey or "", building or "", site or ""
+
+    def _shape_label(elem):
+        reps = []
+        representation = getattr(elem, "Representation", None)
+        for rep in getattr(representation, "Representations", []) or []:
+            rep_type = getattr(rep, "RepresentationType", "") or ""
+            rep_id = getattr(rep, "RepresentationIdentifier", "") or ""
+            token = " / ".join([p for p in (rep_id, rep_type) if p])
+            if token:
+                reps.append(token)
+        return " | ".join(reps)
+
+    def _dimensions(elem):
+        height = _first_non_empty(
+            getattr(elem, "OverallHeight", None),
+            get_pset_value(elem, "BaseQuantities", "Height"),
+            get_pset_value(elem, "BaseQuantities", "GrossHeight"),
+            get_pset_value(elem, "BaseQuantities", "NetHeight"),
+            get_pset_value(elem, "Qto_ColumnBaseQuantities", "Length"),
+        )
+        width = _first_non_empty(
+            getattr(elem, "OverallWidth", None),
+            get_pset_value(elem, "BaseQuantities", "Width"),
+            get_pset_value(elem, "BaseQuantities", "GrossWidth"),
+            get_pset_value(elem, "BaseQuantities", "NetWidth"),
+        )
+        length = _first_non_empty(
+            getattr(elem, "OverallLength", None),
+            get_pset_value(elem, "BaseQuantities", "Length"),
+            get_pset_value(elem, "BaseQuantities", "GrossLength"),
+            get_pset_value(elem, "BaseQuantities", "NetLength"),
+        )
+        return height, width, length
+
     project_data = []
     project = ifc.by_type("IfcProject")[0]
     site = ifc.by_type("IfcSite")[0] if ifc.by_type("IfcSite") else None
@@ -865,6 +920,9 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
 
     prop_data = []
     for elem in ifc.by_type("IfcElement"):
+        space_name, storey_name, building_name, site_name = _spatial_context(elem)
+        shape = _shape_label(elem)
+        height, width, length = _dimensions(elem)
         for definition in elem.IsDefinedBy or []:
             if definition.is_a("IfcRelDefinesByProperties"):
                 pset = definition.RelatingPropertyDefinition
@@ -880,11 +938,40 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
                         prop_data.append([
                             elem.GlobalId,
                             elem.is_a(),
+                            getattr(elem, "Name", ""),
+                            getattr(elem, "ObjectType", ""),
+                            space_name,
+                            storey_name,
+                            building_name,
+                            site_name,
+                            shape,
+                            height,
+                            width,
+                            length,
                             pset.Name,
                             prop.Name,
                             val,
                         ])
-    props_df = pd.DataFrame(prop_data, columns=["GlobalId", "Class", "PropertySet", "Property", "Value"])
+    props_df = pd.DataFrame(
+        prop_data,
+        columns=[
+            "GlobalId",
+            "Class",
+            "ObjectName",
+            "ObjectType",
+            "ContainerSpace",
+            "ContainerStorey",
+            "ContainerBuilding",
+            "ContainerSite",
+            "Shape",
+            "Height",
+            "Width",
+            "Length",
+            "PropertySet",
+            "Property",
+            "Value",
+        ],
+    )
 
     cobie_cols = ["GlobalId", "IFCElement.Name", "IFCElementType.Name"]
 
