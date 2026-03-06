@@ -833,35 +833,6 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
             current = ifcopenshell.util.element.get_container(current)
         return space or "", storey or "", building or "", site or ""
 
-    def _format_dim(value):
-        if value in (None, ""):
-            return ""
-        if isinstance(value, float) and value.is_integer():
-            return int(value)
-        return value
-
-    def _dimensions(elem):
-        height = _first_non_empty(
-            _format_dim(getattr(elem, "OverallHeight", None)),
-            get_pset_value(elem, "BaseQuantities", "Height"),
-            get_pset_value(elem, "BaseQuantities", "GrossHeight"),
-            get_pset_value(elem, "BaseQuantities", "NetHeight"),
-            get_pset_value(elem, "Qto_ColumnBaseQuantities", "Length"),
-        )
-        width = _first_non_empty(
-            _format_dim(getattr(elem, "OverallWidth", None)),
-            get_pset_value(elem, "BaseQuantities", "Width"),
-            get_pset_value(elem, "BaseQuantities", "GrossWidth"),
-            get_pset_value(elem, "BaseQuantities", "NetWidth"),
-        )
-        length = _first_non_empty(
-            _format_dim(getattr(elem, "OverallLength", None)),
-            get_pset_value(elem, "BaseQuantities", "Length"),
-            get_pset_value(elem, "BaseQuantities", "GrossLength"),
-            get_pset_value(elem, "BaseQuantities", "NetLength"),
-        )
-        return height, width, length
-
     project_data = []
     project = ifc.by_type("IfcProject")[0]
     site = ifc.by_type("IfcSite")[0] if ifc.by_type("IfcSite") else None
@@ -919,7 +890,6 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
     prop_data = []
     for elem in ifc.by_type("IfcElement"):
         space_name, storey_name, building_name, site_name = _spatial_context(elem)
-        height, width, length = _dimensions(elem)
         for definition in elem.IsDefinedBy or []:
             if definition.is_a("IfcRelDefinesByProperties"):
                 pset = definition.RelatingPropertyDefinition
@@ -941,9 +911,6 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
                             storey_name,
                             building_name,
                             site_name,
-                            height,
-                            width,
-                            length,
                             pset.Name,
                             prop.Name,
                             val,
@@ -959,9 +926,6 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
             "ContainerStorey",
             "ContainerBuilding",
             "ContainerSite",
-            "Height",
-            "Width",
-            "Length",
             "PropertySet",
             "Property",
             "Value",
