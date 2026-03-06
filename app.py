@@ -849,6 +849,9 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
             return int(value)
         return value
 
+    _type_items_cache = {}
+    _shape_cache = {}
+
     def _representation_tokens(elem):
         reps = []
         representation = getattr(elem, "Representation", None)
@@ -860,35 +863,59 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
                 reps.append(token)
         return reps
 
-    def _expand_item(item):
+    def _expand_item(item, visited=None):
         if not item:
             return []
+        if visited is None:
+            visited = set()
+        key = item.id() if hasattr(item, "id") else id(item)
+        if key in visited:
+            return []
+        visited.add(key)
+
         expanded = [item]
         if item.is_a("IfcMappedItem"):
             source = getattr(item, "MappingSource", None)
             mapped = getattr(source, "MappedRepresentation", None) if source else None
             for child in getattr(mapped, "Items", []) or []:
-                expanded.extend(_expand_item(child))
+                expanded.extend(_expand_item(child, visited))
         elif item.is_a("IfcBooleanResult") or item.is_a("IfcBooleanClippingResult"):
-            expanded.extend(_expand_item(getattr(item, "FirstOperand", None)))
-            expanded.extend(_expand_item(getattr(item, "SecondOperand", None)))
+            expanded.extend(_expand_item(getattr(item, "FirstOperand", None), visited))
+            expanded.extend(_expand_item(getattr(item, "SecondOperand", None), visited))
         elif item.is_a("IfcCsgSolid"):
-            expanded.extend(_expand_item(getattr(item, "TreeExpression", None)))
+            expanded.extend(_expand_item(getattr(item, "TreeExpression", None), visited))
         return expanded
 
-    def _iter_representation_items(elem):
+    def _collect_representation_items(representation):
         items = []
-        representation = getattr(elem, "Representation", None)
         for rep in getattr(representation, "Representations", []) or []:
             for item in getattr(rep, "Items", []) or []:
-                items.extend(_expand_item(item))
+                items.extend(_expand_item(item, set()))
+        return items
+
+    def _iter_representation_items(elem):
+        items = _collect_representation_items(getattr(elem, "Representation", None))
 
         if not items:
             type_obj = ifcopenshell.util.element.get_type(elem)
-            for rep_map in getattr(type_obj, "RepresentationMaps", []) or []:
-                mapped = getattr(rep_map, "MappedRepresentation", None)
-                for item in getattr(mapped, "Items", []) or []:
-                    items.extend(_expand_item(item))
+            type_id = type_obj.id() if type_obj else None
+            if type_id:
+                if type_id not in _type_items_cache:
+                    type_items = []
+                    for rep_map in getattr(type_obj, "RepresentationMaps", []) or []:
+                        mapped = getattr(rep_map, "MappedRepresentation", None)
+                        for item in getattr(mapped, "Items", []) or []:
+                            type_items.extend(_expand_item(item, set()))
+                    dedup = []
+                    seen_local = set()
+                    for t_item in type_items:
+                        t_key = t_item.id() if hasattr(t_item, "id") else id(t_item)
+                        if t_key in seen_local:
+                            continue
+                        seen_local.add(t_key)
+                        dedup.append(t_item)
+                    _type_items_cache[type_id] = dedup
+                items = _type_items_cache.get(type_id, [])
 
         seen = set()
         deduped = []
@@ -954,6 +981,10 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
         return None, None, None, None, 0
 
     def _shape_and_dimensions(elem):
+        elem_key = elem.id() if hasattr(elem, "id") else id(elem)
+        if elem_key in _shape_cache:
+            return _shape_cache[elem_key]
+
         best_shape = ""
         best_h = best_w = best_l = None
         best_priority = 0
@@ -989,7 +1020,9 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
             get_pset_value(elem, "BaseQuantities", "GrossLength"),
             get_pset_value(elem, "BaseQuantities", "NetLength"),
         )
-        return best_shape, height, width, length
+        result = (best_shape, height, width, length)
+        _shape_cache[elem_key] = result
+        return result
 
     project_data = []
     project = ifc.by_type("IfcProject")[0]
