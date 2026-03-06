@@ -811,6 +811,186 @@ def get_pset_value(elem, pset_name, prop_name):
 def extract_to_excel(ifc_path: str, output_path: str) -> str:
     ifc = ifcopenshell.open(ifc_path)
 
+    def _first_non_empty(*values):
+        for val in values:
+            if val not in (None, ""):
+                return val
+        return ""
+
+    def _spatial_context(elem):
+        container = ifcopenshell.util.element.get_container(elem)
+        space = storey = building = site = None
+        current = container
+        while current:
+            if current.is_a("IfcSpace"):
+                space = space or getattr(current, "Name", "")
+            elif current.is_a("IfcBuildingStorey"):
+                storey = storey or getattr(current, "Name", "")
+            elif current.is_a("IfcBuilding"):
+                building = building or getattr(current, "Name", "")
+            elif current.is_a("IfcSite"):
+                site = site or getattr(current, "Name", "")
+            current = ifcopenshell.util.element.get_container(current)
+        return space or "", storey or "", building or "", site or ""
+
+    def _num(value):
+        raw = getattr(value, "wrappedValue", value)
+        if raw in (None, ""):
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _format_dim(value):
+        if value in (None, ""):
+            return ""
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        return value
+
+    def _representation_tokens(elem):
+        reps = []
+        representation = getattr(elem, "Representation", None)
+        for rep in getattr(representation, "Representations", []) or []:
+            rep_type = getattr(rep, "RepresentationType", "") or ""
+            rep_id = getattr(rep, "RepresentationIdentifier", "") or ""
+            token = " / ".join([p for p in (rep_id, rep_type) if p])
+            if token:
+                reps.append(token)
+        return reps
+
+    def _expand_item(item):
+        if not item:
+            return []
+        expanded = [item]
+        if item.is_a("IfcMappedItem"):
+            source = getattr(item, "MappingSource", None)
+            mapped = getattr(source, "MappedRepresentation", None) if source else None
+            for child in getattr(mapped, "Items", []) or []:
+                expanded.extend(_expand_item(child))
+        elif item.is_a("IfcBooleanResult") or item.is_a("IfcBooleanClippingResult"):
+            expanded.extend(_expand_item(getattr(item, "FirstOperand", None)))
+            expanded.extend(_expand_item(getattr(item, "SecondOperand", None)))
+        elif item.is_a("IfcCsgSolid"):
+            expanded.extend(_expand_item(getattr(item, "TreeExpression", None)))
+        return expanded
+
+    def _iter_representation_items(elem):
+        items = []
+        representation = getattr(elem, "Representation", None)
+        for rep in getattr(representation, "Representations", []) or []:
+            for item in getattr(rep, "Items", []) or []:
+                items.extend(_expand_item(item))
+
+        if not items:
+            type_obj = ifcopenshell.util.element.get_type(elem)
+            for rep_map in getattr(type_obj, "RepresentationMaps", []) or []:
+                mapped = getattr(rep_map, "MappedRepresentation", None)
+                for item in getattr(mapped, "Items", []) or []:
+                    items.extend(_expand_item(item))
+
+        seen = set()
+        deduped = []
+        for item in items:
+            key = item.id() if hasattr(item, "id") else id(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+
+    def _item_shape_bbox(item):
+        if item.is_a("IfcSphere"):
+            radius = _num(getattr(item, "Radius", None))
+            if radius is not None:
+                d = 2 * radius
+                return "Spherical", d, d, d, 100
+        if item.is_a("IfcRightCircularCylinder"):
+            radius = _num(getattr(item, "Radius", None))
+            height = _num(getattr(item, "Height", None))
+            if radius is not None and height is not None:
+                d = 2 * radius
+                return "Cylindrical", height, d, d, 95
+        if item.is_a("IfcBlock"):
+            x = _num(getattr(item, "XLength", None))
+            y = _num(getattr(item, "YLength", None))
+            z = _num(getattr(item, "ZLength", None))
+            if x is not None and y is not None and z is not None:
+                length = max(x, y)
+                width = min(x, y)
+                return "Cuboid", z, width, length, 90
+        if item.is_a("IfcBoundingBox"):
+            x = _num(getattr(item, "XDim", None))
+            y = _num(getattr(item, "YDim", None))
+            z = _num(getattr(item, "ZDim", None))
+            if x is not None and y is not None and z is not None:
+                length = max(x, y)
+                width = min(x, y)
+                return "Bounding Box", z, width, length, 80
+        if item.is_a("IfcExtrudedAreaSolid"):
+            depth = _num(getattr(item, "Depth", None))
+            profile = getattr(item, "SweptArea", None)
+            if profile and profile.is_a("IfcRectangleProfileDef"):
+                x = _num(getattr(profile, "XDim", None))
+                y = _num(getattr(profile, "YDim", None))
+                if x is not None and y is not None and depth is not None:
+                    length = max(x, y)
+                    width = min(x, y)
+                    shape = "Square Prism" if abs(x - y) < 1e-9 else "Cuboid"
+                    return shape, depth, width, length, 85
+            if profile and (profile.is_a("IfcCircleProfileDef") or profile.is_a("IfcCircleHollowProfileDef")):
+                radius = _num(getattr(profile, "Radius", None))
+                if radius is not None and depth is not None:
+                    d = 2 * radius
+                    return "Cylindrical", depth, d, d, 85
+            if profile and profile.is_a("IfcEllipseProfileDef"):
+                a = _num(getattr(profile, "SemiAxis1", None))
+                b = _num(getattr(profile, "SemiAxis2", None))
+                if a is not None and b is not None and depth is not None:
+                    length = max(2 * a, 2 * b)
+                    width = min(2 * a, 2 * b)
+                    return "Elliptical Cylinder", depth, width, length, 84
+        return None, None, None, None, 0
+
+    def _shape_and_dimensions(elem):
+        best_shape = ""
+        best_h = best_w = best_l = None
+        best_priority = 0
+        for item in _iter_representation_items(elem):
+            shape, h, w, l, priority = _item_shape_bbox(item)
+            if priority > best_priority and shape:
+                best_priority = priority
+                best_shape, best_h, best_w, best_l = shape, h, w, l
+
+        if not best_shape:
+            tokens = _representation_tokens(elem)
+            best_shape = tokens[0] if tokens else ""
+
+        height = _first_non_empty(
+            _format_dim(best_h),
+            getattr(elem, "OverallHeight", None),
+            get_pset_value(elem, "BaseQuantities", "Height"),
+            get_pset_value(elem, "BaseQuantities", "GrossHeight"),
+            get_pset_value(elem, "BaseQuantities", "NetHeight"),
+            get_pset_value(elem, "Qto_ColumnBaseQuantities", "Length"),
+        )
+        width = _first_non_empty(
+            _format_dim(best_w),
+            getattr(elem, "OverallWidth", None),
+            get_pset_value(elem, "BaseQuantities", "Width"),
+            get_pset_value(elem, "BaseQuantities", "GrossWidth"),
+            get_pset_value(elem, "BaseQuantities", "NetWidth"),
+        )
+        length = _first_non_empty(
+            _format_dim(best_l),
+            getattr(elem, "OverallLength", None),
+            get_pset_value(elem, "BaseQuantities", "Length"),
+            get_pset_value(elem, "BaseQuantities", "GrossLength"),
+            get_pset_value(elem, "BaseQuantities", "NetLength"),
+        )
+        return best_shape, height, width, length
+
     project_data = []
     project = ifc.by_type("IfcProject")[0]
     site = ifc.by_type("IfcSite")[0] if ifc.by_type("IfcSite") else None
@@ -845,6 +1025,7 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
         elem_name = getattr(elem, "Name", "")
         elem_type = getattr(elem, "ObjectType", "")
         elem_desc = getattr(elem, "Description", "")
+        elem_layer = _get_layers_name(elem)
         type_obj = None
         for rel in ifc.get_inverse(elem):
             if rel.is_a("IfcRelDefinesByType"):
@@ -856,15 +1037,18 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
             elem_name,
             elem_type,
             type_name,
-            elem_desc
+            elem_desc,
+            elem_layer,
         ])
     elements_df = pd.DataFrame(
         element_data,
-        columns=["GlobalId", "Class", "OccurrenceName", "OccurrenceType", "TypeName", "TypeDescription"]
+        columns=["GlobalId", "Class", "OccurrenceName", "OccurrenceType", "TypeName", "TypeDescription", "IFCPresentationLayer"]
     )
 
     prop_data = []
     for elem in ifc.by_type("IfcElement"):
+        space_name, storey_name, building_name, site_name = _spatial_context(elem)
+        shape, height, width, length = _shape_and_dimensions(elem)
         for definition in elem.IsDefinedBy or []:
             if definition.is_a("IfcRelDefinesByProperties"):
                 pset = definition.RelatingPropertyDefinition
@@ -880,11 +1064,40 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
                         prop_data.append([
                             elem.GlobalId,
                             elem.is_a(),
+                            getattr(elem, "Name", ""),
+                            getattr(elem, "ObjectType", ""),
+                            space_name,
+                            storey_name,
+                            building_name,
+                            site_name,
+                            shape,
+                            height,
+                            width,
+                            length,
                             pset.Name,
                             prop.Name,
                             val,
                         ])
-    props_df = pd.DataFrame(prop_data, columns=["GlobalId", "Class", "PropertySet", "Property", "Value"])
+    props_df = pd.DataFrame(
+        prop_data,
+        columns=[
+            "GlobalId",
+            "Class",
+            "ObjectName",
+            "ObjectType",
+            "ContainerSpace",
+            "ContainerStorey",
+            "ContainerBuilding",
+            "ContainerSite",
+            "Shape",
+            "Height",
+            "Width",
+            "Length",
+            "PropertySet",
+            "Property",
+            "Value",
+        ],
+    )
 
     cobie_cols = ["GlobalId", "IFCElement.Name", "IFCElementType.Name"]
 
@@ -976,6 +1189,42 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
     return output_path
 
 
+def _set_element_presentation_layer(ifc, elem, target_layer_name: str):
+    target = clean_value(target_layer_name)
+    representation = getattr(elem, "Representation", None)
+    items = []
+    for rep in getattr(representation, "Representations", []) or []:
+        items.extend(list(getattr(rep, "Items", []) or []))
+    if not items:
+        return
+
+    for item in items:
+        for inv in ifc.get_inverse(item) or []:
+            if not inv or not inv.is_a("IfcPresentationLayerAssignment"):
+                continue
+            assigned = list(getattr(inv, "AssignedItems", []) or [])
+            if item in assigned:
+                assigned = [a for a in assigned if a != item]
+                inv.AssignedItems = assigned
+
+    if not target:
+        return
+
+    layer = None
+    for candidate in ifc.by_type("IfcPresentationLayerAssignment"):
+        if (getattr(candidate, "Name", "") or "") == target:
+            layer = candidate
+            break
+    if layer is None:
+        layer = ifc.create_entity("IfcPresentationLayerAssignment", Name=target, AssignedItems=[])
+
+    assigned = list(getattr(layer, "AssignedItems", []) or [])
+    for item in items:
+        if item not in assigned:
+            assigned.append(item)
+    layer.AssignedItems = assigned
+
+
 def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="update", add_new="no"):
     ifc_path = path_of(ifc_file)
     xls_path = path_of(excel_file)
@@ -1047,6 +1296,8 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
             elem.ObjectType = clean_value(row["OccurrenceType"]) or elem.ObjectType
         if pd.notna(row.get("TypeDescription")):
             elem.Description = clean_value(row["TypeDescription"]) or elem.Description
+        if "IFCPresentationLayer" in elements_df.columns and pd.notna(row.get("IFCPresentationLayer")):
+            _set_element_presentation_layer(ifc, elem, row.get("IFCPresentationLayer"))
         if pd.notna(row.get("TypeName")):
             type_name = str(clean_value(row["TypeName"]))
             type_obj = None
