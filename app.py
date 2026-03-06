@@ -900,6 +900,7 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
         elem_name = getattr(elem, "Name", "")
         elem_type = getattr(elem, "ObjectType", "")
         elem_desc = getattr(elem, "Description", "")
+        elem_layer = _get_layers_name(elem)
         type_obj = None
         for rel in ifc.get_inverse(elem):
             if rel.is_a("IfcRelDefinesByType"):
@@ -911,11 +912,12 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
             elem_name,
             elem_type,
             type_name,
-            elem_desc
+            elem_desc,
+            elem_layer,
         ])
     elements_df = pd.DataFrame(
         element_data,
-        columns=["GlobalId", "Class", "OccurrenceName", "OccurrenceType", "TypeName", "TypeDescription"]
+        columns=["GlobalId", "Class", "OccurrenceName", "OccurrenceType", "TypeName", "TypeDescription", "IFCPresentationLayer"]
     )
 
     prop_data = []
@@ -1063,6 +1065,42 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
     return output_path
 
 
+def _set_element_presentation_layer(ifc, elem, target_layer_name: str):
+    target = clean_value(target_layer_name)
+    representation = getattr(elem, "Representation", None)
+    items = []
+    for rep in getattr(representation, "Representations", []) or []:
+        items.extend(list(getattr(rep, "Items", []) or []))
+    if not items:
+        return
+
+    for item in items:
+        for inv in ifc.get_inverse(item) or []:
+            if not inv or not inv.is_a("IfcPresentationLayerAssignment"):
+                continue
+            assigned = list(getattr(inv, "AssignedItems", []) or [])
+            if item in assigned:
+                assigned = [a for a in assigned if a != item]
+                inv.AssignedItems = assigned
+
+    if not target:
+        return
+
+    layer = None
+    for candidate in ifc.by_type("IfcPresentationLayerAssignment"):
+        if (getattr(candidate, "Name", "") or "") == target:
+            layer = candidate
+            break
+    if layer is None:
+        layer = ifc.create_entity("IfcPresentationLayerAssignment", Name=target, AssignedItems=[])
+
+    assigned = list(getattr(layer, "AssignedItems", []) or [])
+    for item in items:
+        if item not in assigned:
+            assigned.append(item)
+    layer.AssignedItems = assigned
+
+
 def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="update", add_new="no"):
     ifc_path = path_of(ifc_file)
     xls_path = path_of(excel_file)
@@ -1134,6 +1172,8 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
             elem.ObjectType = clean_value(row["OccurrenceType"]) or elem.ObjectType
         if pd.notna(row.get("TypeDescription")):
             elem.Description = clean_value(row["TypeDescription"]) or elem.Description
+        if "IFCPresentationLayer" in elements_df.columns and pd.notna(row.get("IFCPresentationLayer")):
+            _set_element_presentation_layer(ifc, elem, row.get("IFCPresentationLayer"))
         if pd.notna(row.get("TypeName")):
             type_name = str(clean_value(row["TypeName"]))
             type_obj = None
