@@ -53,6 +53,7 @@ from cobieqc_service.security import validate_upload
 from ifc_qa_service import REGISTRY as IFC_QA_V2_REGISTRY
 from ifc_qa_service import default_config_from_dir, start_job as start_ifc_qa_v2_job
 from backend.ifc_jobs import create_job as create_ifc_job, get_job as get_ifc_job, update_job as update_ifc_job
+from backend.project_tables import get_tables_for_project_slug
 
 STEP2IFC_ROOT = Path(__file__).resolve().parent / "step2ifc"
 if STEP2IFC_ROOT.exists():
@@ -4991,10 +4992,24 @@ def _build_ifc_job_payload(session_id: str, payload: Dict[str, Any]) -> Dict[str
     root = Path(SESSION_STORE.ensure(session_id))
     ifc_files = payload.get("ifc_files") or []
     tables = payload.get("tables") or []
+    project_slug = (payload.get("project_slug") or payload.get("slug") or "").strip() or None
+    if not project_slug and isinstance(payload.get("project"), dict):
+        project_slug = str(payload["project"].get("slug") or "").strip() or None
+
+    if not tables and project_slug:
+        resolved_tables = get_tables_for_project_slug(project_slug)
+        if resolved_tables:
+            tables = resolved_tables
+
     if not ifc_files:
         raise HTTPException(status_code=400, detail="IFC files are required")
     if not tables:
-        raise HTTPException(status_code=400, detail="Select at least one table")
+        hint = (
+            f" No table mapping found for project slug '{project_slug}' in PROJECT_DATABASES_JSON."
+            if project_slug
+            else ""
+        )
+        raise HTTPException(status_code=400, detail=f"Select at least one table.{hint}")
 
     max_files = int(os.getenv("IFC_MAX_FILES_PER_JOB", "5"))
     if len(ifc_files) > max_files:
@@ -5046,6 +5061,7 @@ def _build_ifc_job_payload(session_id: str, payload: Dict[str, Any]) -> Dict[str
         "ifc_files": [f["name"] for f in input_files],
         "input_files": input_files,
         "tables": tables,
+        "project_slug": project_slug,
         "exclude_path": exclude_path,
         "pset_path": pset_path,
         "regexes": defaults,
@@ -5064,6 +5080,7 @@ def create_ifc_extraction_job(payload: Dict[str, Any] = Body(...), request: Requ
     job = create_ifc_job(requested_by=user, input_files=job_payload["input_files"], options={
         "session_id": session_id,
         "tables": job_payload["tables"],
+        "project_slug": job_payload.get("project_slug"),
         "exclude_path": job_payload["exclude_path"],
         "pset_path": job_payload["pset_path"],
         "regexes": job_payload["regexes"],
