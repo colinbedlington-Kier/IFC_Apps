@@ -1032,13 +1032,57 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
 
 def _set_element_presentation_layer(ifc, elem, target_layer_name: str):
     target = clean_value(target_layer_name)
-    representation = getattr(elem, "Representation", None)
+
+    def _expand_item(item, visited):
+        if not item:
+            return []
+        key = item.id() if hasattr(item, "id") else id(item)
+        if key in visited:
+            return []
+        visited.add(key)
+        out = [item]
+        if item.is_a("IfcMappedItem"):
+            source = getattr(item, "MappingSource", None)
+            mapped = getattr(source, "MappedRepresentation", None) if source else None
+            for child in getattr(mapped, "Items", []) or []:
+                out.extend(_expand_item(child, visited))
+        elif item.is_a("IfcBooleanResult") or item.is_a("IfcBooleanClippingResult"):
+            out.extend(_expand_item(getattr(item, "FirstOperand", None), visited))
+            out.extend(_expand_item(getattr(item, "SecondOperand", None), visited))
+        elif item.is_a("IfcCsgSolid"):
+            out.extend(_expand_item(getattr(item, "TreeExpression", None), visited))
+        return out
+
+    def _collect_items_from_representation(rep_holder):
+        collected = []
+        for rep in getattr(rep_holder, "Representations", []) or []:
+            for item in getattr(rep, "Items", []) or []:
+                collected.extend(_expand_item(item, set()))
+        return collected
+
     items = []
-    for rep in getattr(representation, "Representations", []) or []:
-        items.extend(list(getattr(rep, "Items", []) or []))
+    representation = getattr(elem, "Representation", None)
+    items.extend(_collect_items_from_representation(representation))
+
+    type_obj = ifcopenshell.util.element.get_type(elem)
+    for rep_map in getattr(type_obj, "RepresentationMaps", []) or []:
+        mapped = getattr(rep_map, "MappedRepresentation", None)
+        items.extend(_collect_items_from_representation(mapped))
+
+    deduped = []
+    seen = set()
+    for item in items:
+        key = item.id() if hasattr(item, "id") else id(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    items = deduped
+
     if not items:
         return
 
+    empty_layers = set()
     for item in items:
         for inv in ifc.get_inverse(item) or []:
             if not inv or not inv.is_a("IfcPresentationLayerAssignment"):
@@ -1047,6 +1091,14 @@ def _set_element_presentation_layer(ifc, elem, target_layer_name: str):
             if item in assigned:
                 assigned = [a for a in assigned if a != item]
                 inv.AssignedItems = assigned
+                if len(assigned) == 0:
+                    empty_layers.add(inv)
+
+    for layer in empty_layers:
+        try:
+            ifc.remove(layer)
+        except Exception:
+            pass
 
     if not target:
         return
