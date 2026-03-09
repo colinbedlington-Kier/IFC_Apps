@@ -811,12 +811,6 @@ def get_pset_value(elem, pset_name, prop_name):
 def extract_to_excel(ifc_path: str, output_path: str) -> str:
     ifc = ifcopenshell.open(ifc_path)
 
-    def _first_non_empty(*values):
-        for val in values:
-            if val not in (None, ""):
-                return val
-        return ""
-
     def _spatial_context(elem):
         container = ifcopenshell.util.element.get_container(elem)
         space = storey = building = site = None
@@ -833,16 +827,46 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
             current = ifcopenshell.util.element.get_container(current)
         return space or "", storey or "", building or "", site or ""
 
+    def _element_type_obj(elem):
+        for rel in elem.IsDefinedBy or []:
+            if rel.is_a("IfcRelDefinesByType"):
+                return rel.RelatingType
+        return None
+
     project_data = []
     project = ifc.by_type("IfcProject")[0]
     site = ifc.by_type("IfcSite")[0] if ifc.by_type("IfcSite") else None
     building = ifc.by_type("IfcBuilding")[0] if ifc.by_type("IfcBuilding") else None
+    elements = list(ifc.by_type("IfcElement"))
+
+    def extract_uniclass(entity, target_name, is_ifc2x3):
+        reference = ""
+        name = ""
+        for rel in getattr(entity, "HasAssociations", []) or []:
+            if rel.is_a("IfcRelAssociatesClassification"):
+                classification_ref = rel.RelatingClassification
+                if classification_ref and classification_ref.is_a("IfcClassificationReference"):
+                    if is_ifc2x3:
+                        if getattr(classification_ref, "Name", "") == target_name:
+                            return getattr(classification_ref, "ItemReference", ""), getattr(classification_ref, "Name", "")
+                    else:
+                        src = getattr(classification_ref, "ReferencedSource", None)
+                        if src and getattr(src, "Name", "") == target_name:
+                            return getattr(classification_ref, "ItemReference", ""), getattr(classification_ref, "Name", "")
+        return reference, name
+
+    is_ifc2x3 = ifc.schema == "IFC2X3"
+    b_en_ref, b_en_name = ("", "")
+    if building is not None:
+        b_en_ref, b_en_name = extract_uniclass(building, "Uniclass En Entities", is_ifc2x3)
 
     project_data.append({
         "DataType": "Project",
         "Name": getattr(project, "Name", ""),
         "Description": getattr(project, "Description", ""),
         "Phase": getattr(project, "Phase", ""),
+        "UniclassEnReference": "",
+        "UniclassEnName": "",
     })
     if site:
         project_data.append({
@@ -850,28 +874,29 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
             "Name": getattr(site, "Name", ""),
             "Description": getattr(site, "Description", ""),
             "Phase": "",
+            "UniclassEnReference": "",
+            "UniclassEnName": "",
         })
     else:
-        project_data.append({"DataType": "Site", "Name": "", "Description": "", "Phase": ""})
+        project_data.append({"DataType": "Site", "Name": "", "Description": "", "Phase": "", "UniclassEnReference": "", "UniclassEnName": ""})
     if building:
         project_data.append({
             "DataType": "Building",
             "Name": getattr(building, "Name", ""),
             "Description": getattr(building, "Description", ""),
             "Phase": "",
+            "UniclassEnReference": b_en_ref,
+            "UniclassEnName": b_en_name,
         })
     project_df = pd.DataFrame(project_data)
 
     element_data = []
-    for elem in ifc.by_type("IfcElement"):
+    for elem in elements:
         elem_name = getattr(elem, "Name", "")
         elem_type = getattr(elem, "ObjectType", "")
         elem_desc = getattr(elem, "Description", "")
         elem_layer = _get_layers_name(elem)
-        type_obj = None
-        for rel in ifc.get_inverse(elem):
-            if rel.is_a("IfcRelDefinesByType"):
-                type_obj = rel.RelatingType
+        type_obj = _element_type_obj(elem)
         type_name = type_obj.Name if type_obj else ""
         element_data.append([
             elem.GlobalId,
@@ -888,7 +913,7 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
     )
 
     prop_data = []
-    for elem in ifc.by_type("IfcElement"):
+    for elem in elements:
         space_name, storey_name, building_name, site_name = _spatial_context(elem)
         for definition in elem.IsDefinedBy or []:
             if definition.is_a("IfcRelDefinesByProperties"):
@@ -935,7 +960,7 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
     cobie_cols = ["GlobalId", "IFCElement.Name", "IFCElementType.Name"]
 
     dynamic_pairs = set()
-    for elem in ifc.by_type("IfcElement"):
+    for elem in elements:
         psets_elem = ifcopenshell.util.element.get_psets(elem)
         add_pset = psets_elem.get("Additional_Pset_GeneralCommon", {})
         dynamic_pairs.update(parse_required_pairs(add_pset.get("RequiredForCOBie", "")))
@@ -963,13 +988,9 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
         cobie_cols.append(f"{pset}.{pname}")
 
     cobie_rows = []
-    for elem in ifc.by_type("IfcElement"):
-        type_name = ""
-        for rel in ifc.get_inverse(elem):
-            if rel.is_a("IfcRelDefinesByType"):
-                if rel.RelatingType:
-                    type_name = getattr(rel.RelatingType, "Name", "")
-                    break
+    for elem in elements:
+        type_obj = _element_type_obj(elem)
+        type_name = getattr(type_obj, "Name", "") if type_obj else ""
 
         row = {
             "GlobalId": elem.GlobalId,
@@ -985,35 +1006,18 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
 
     cobie_df = pd.DataFrame(cobie_rows, columns=cobie_cols)
 
-    def extract_uniclass(elem, target_name, is_ifc2x3):
-        reference = ""
-        name = ""
-        for rel in getattr(elem, "HasAssociations", []) or []:
-            if rel.is_a("IfcRelAssociatesClassification"):
-                classification_ref = rel.RelatingClassification
-                if classification_ref and classification_ref.is_a("IfcClassificationReference"):
-                    if is_ifc2x3:
-                        if getattr(classification_ref, "Name", "") == target_name:
-                            return getattr(classification_ref, "ItemReference", ""), getattr(classification_ref, "Name", "")
-                    else:
-                        src = getattr(classification_ref, "ReferencedSource", None)
-                        if src and getattr(src, "Name", "") == target_name:
-                            return getattr(classification_ref, "ItemReference", ""), getattr(classification_ref, "Name", "")
-        return reference, name
-
-    is_ifc2x3 = ifc.schema == "IFC2X3"
-    pr_rows, ss_rows, en_rows = [], [], []
-    for elem in ifc.by_type("IfcElement"):
+    pr_rows, ss_rows, ef_rows = [], [], []
+    for elem in elements:
         pr_ref, pr_name = extract_uniclass(elem, "Uniclass Pr Products", is_ifc2x3)
         ss_ref, ss_name = extract_uniclass(elem, "Uniclass Ss Systems", is_ifc2x3)
-        en_ref, en_name = extract_uniclass(elem, "Uniclass En Entities", is_ifc2x3)
+        ef_ref, ef_name = extract_uniclass(elem, "Uniclass EF Elements Functions", is_ifc2x3)
         pr_rows.append({"GlobalId": elem.GlobalId, "Reference": pr_ref, "Name": pr_name})
         ss_rows.append({"GlobalId": elem.GlobalId, "Reference": ss_ref, "Name": ss_name})
-        en_rows.append({"GlobalId": elem.GlobalId, "Reference": en_ref, "Name": en_name})
+        ef_rows.append({"GlobalId": elem.GlobalId, "Reference": ef_ref, "Name": ef_name})
 
     uniclass_pr_df = pd.DataFrame(pr_rows)
     uniclass_ss_df = pd.DataFrame(ss_rows)
-    uniclass_en_df = pd.DataFrame(en_rows)
+    uniclass_ef_df = pd.DataFrame(ef_rows)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         project_df.to_excel(writer, sheet_name="ProjectData", index=False)
@@ -1022,7 +1026,7 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
         cobie_df.to_excel(writer, sheet_name="COBieMapping", index=False)
         uniclass_pr_df.to_excel(writer, sheet_name="Uniclass_Pr", index=False)
         uniclass_ss_df.to_excel(writer, sheet_name="Uniclass_Ss", index=False)
-        uniclass_en_df.to_excel(writer, sheet_name="Uniclass_En", index=False)
+        uniclass_ef_df.to_excel(writer, sheet_name="Uniclass_EF", index=False)
     return output_path
 
 
@@ -1080,13 +1084,64 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
     except Exception:
         uniclass_ss_df = None
     try:
-        uniclass_en_df = pd.read_excel(xls, "Uniclass_En")
+        uniclass_ef_df = pd.read_excel(xls, "Uniclass_EF")
     except Exception:
-        uniclass_en_df = None
+        try:
+            uniclass_ef_df = pd.read_excel(xls, "Uniclass_En")
+        except Exception:
+            uniclass_ef_df = None
 
     project = ifc.by_type("IfcProject")[0]
     site = ifc.by_type("IfcSite")[0] if ifc.by_type("IfcSite") else None
     building = ifc.by_type("IfcBuilding")[0] if ifc.by_type("IfcBuilding") else None
+
+    def set_entity_uniclass(entity, source_name, ref_value, name_value):
+        if entity is None:
+            return
+        ref = clean_value(ref_value)
+        nm = clean_value(name_value)
+        if ref is None and nm is None:
+            return
+        cls_src = None
+        for c in ifc.by_type("IfcClassification"):
+            if getattr(c, "Name", "") == source_name:
+                cls_src = c
+                break
+        if cls_src is None and add_new == "yes":
+            cls_src = ifc.create_entity(
+                "IfcClassification",
+                Name=source_name,
+                Source="https://www.thenbs.com/our-tools/uniclass-2015",
+                Edition="2015",
+            )
+
+        existing_ref = None
+        for rel in getattr(entity, "HasAssociations", []) or []:
+            if rel.is_a("IfcRelAssociatesClassification"):
+                cref = rel.RelatingClassification
+                if cref and cref.is_a("IfcClassificationReference"):
+                    src = getattr(cref, "ReferencedSource", None)
+                    if src and getattr(src, "Name", "") == source_name:
+                        existing_ref = cref
+                        break
+        if existing_ref:
+            if ref is not None:
+                existing_ref.ItemReference = str(ref)
+            if nm is not None:
+                existing_ref.Name = str(nm)
+        elif add_new == "yes" and (ref is not None or nm is not None) and cls_src is not None:
+            cref = ifc.create_entity(
+                "IfcClassificationReference",
+                ItemReference=str(ref) if ref is not None else None,
+                Name=str(nm) if nm is not None else None,
+            )
+            cref.ReferencedSource = cls_src
+            ifc.create_entity(
+                "IfcRelAssociatesClassification",
+                GlobalId=new_guid(),
+                RelatedObjects=[entity],
+                RelatingClassification=cref,
+            )
 
     for _, row in project_df.iterrows():
         dt = row["DataType"]
@@ -1126,6 +1181,12 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
                     reassign_aggregate(site, building, ifc)
                 else:
                     ensure_aggregates(project, building, ifc)
+                set_entity_uniclass(
+                    building,
+                    "Uniclass En Entities",
+                    row.get("UniclassEnReference"),
+                    row.get("UniclassEnName"),
+                )
 
     for _, row in elements_df.iterrows():
         elem = ifc.by_guid(row["GlobalId"]) if pd.notna(row.get("GlobalId")) else None
@@ -1269,7 +1330,7 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
 
     set_uniclass(uniclass_pr_df, "Uniclass Pr Products")
     set_uniclass(uniclass_ss_df, "Uniclass Ss Systems")
-    set_uniclass(uniclass_en_df, "Uniclass En Entities")
+    set_uniclass(uniclass_ef_df, "Uniclass EF Elements Functions")
 
     ifc.write(output_path)
     return output_path
