@@ -54,23 +54,34 @@ function setSessionBadge(text, ok = true) {
   });
 }
 
-function updateProcessingBar(active, message) {
+function updateProcessingBar(active, message, percent = null) {
   const wrap = document.querySelector("[data-processing-bar]");
   const label = document.querySelector("[data-processing-label]");
+  const percentEl = document.querySelector("[data-processing-percent]");
   if (!wrap || !label) return;
   wrap.classList.toggle("active", active);
   if (message) label.textContent = message;
+  if (percentEl) {
+    if (typeof percent === "number" && Number.isFinite(percent)) {
+      const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+      percentEl.textContent = `${clamped}%`;
+    } else if (!active) {
+      percentEl.textContent = "0%";
+    }
+  }
 }
 
 function startProcessing(message) {
   state.processingCount += 1;
-  updateProcessingBar(true, message || "Processing files…");
+  updateProcessingBar(true, message || "Processing files…", 15);
 }
 
 function stopProcessing() {
   state.processingCount = Math.max(0, state.processingCount - 1);
   if (state.processingCount === 0) {
-    updateProcessingBar(false, "Processing files…");
+    updateProcessingBar(false, "Processing files…", 0);
+  } else {
+    updateProcessingBar(true, "Processing files…", 80);
   }
 }
 
@@ -489,7 +500,6 @@ async function applyExcel() {
   const payload = {
     ifc_file: ifcFile,
     excel_file: xlsFile,
-    update_mode: document.querySelector('input[name="updateMode"]:checked')?.value || "update",
     add_new: document.querySelector('input[name="addNew"]:checked')?.value || "no",
   };
   return withProcessing("Applying Excel updates…", async () => {
@@ -875,6 +885,31 @@ async function applyProxyPredefined() {
       downloads.appendChild(row);
     });
   });
+}
+
+
+async function uploadExcelSource() {
+  const input = el("excelUploadInput");
+  if (!input || !input.files?.length) return;
+  if (!state.sessionId) return alert("Session not ready yet.");
+  const form = new FormData();
+  for (const f of input.files) form.append("files", f);
+  const resp = await fetch(`/api/session/${state.sessionId}/upload`, { method: "POST", body: form });
+  if (!resp.ok) {
+    el("excelStatus").textContent = "Excel upload failed.";
+    return;
+  }
+  await refreshFiles();
+  const first = input.files[0]?.name;
+  if (first && el("excelFileUpdate")) el("excelFileUpdate").value = first;
+  el("excelStatus").textContent = "Excel uploaded to session files.";
+  input.value = "";
+}
+
+async function downloadSelectedExcel() {
+  const name = el("excelFileUpdate")?.value;
+  if (!name) return alert("Select an Excel source file first.");
+  await downloadFile(name);
 }
 
 async function downloadFile(name) {
@@ -1415,6 +1450,12 @@ function wireEvents() {
 
   const applyExcelBtn = el("applyExcel");
   if (applyExcelBtn) applyExcelBtn.addEventListener("click", applyExcel);
+
+  const excelUploadInput = el("excelUploadInput");
+  if (excelUploadInput) excelUploadInput.addEventListener("change", uploadExcelSource);
+
+  const downloadExcelBtn = el("downloadExcelFile");
+  if (downloadExcelBtn) downloadExcelBtn.addEventListener("click", downloadSelectedExcel);
 
   const parseStoreysBtn = el("parseStoreys");
   if (parseStoreysBtn) parseStoreysBtn.addEventListener("click", parseStoreyInfo);
