@@ -6,26 +6,33 @@
     <h2>Excel Extract / Update</h2>
     <span class="badge">COBie + Uniclass aware</span>
   </div>
-  <div class="two-col">
-    <div>
+  <div class="two-col excel-layout">
+    <div class="excel-extract-col">
       <label for="excelIfc">IFC for extract</label>
-      <select id="excelIfc" data-files-select></select>
-      <button class="btn" id="extractExcel" style="margin-top: 8px">Extract to Excel</button>
+      <div class="inline excel-inline-controls">
+        <select id="excelIfc" data-files-select></select>
+        <button class="btn" id="extractExcel">Extract to Excel</button>
+      </div>
     </div>
-    <div>
+    <div class="excel-update-col">
       <label for="excelIfcUpdate">IFC to update</label>
-      <select id="excelIfcUpdate" data-files-select></select>
-      <label for="excelFileUpdate" style="margin-top: 10px">Excel source</label>
-      <select id="excelFileUpdate" data-files-select></select>
+      <div class="inline excel-inline-controls">
+        <select id="excelIfcUpdate" data-files-select></select>
+        <span class="excel-source-label">Excel source</span>
+      </div>
+      <div class="inline excel-inline-controls" style="margin-top: 8px">
+        <select id="excelFileUpdate" data-files-select data-files-filter=".xlsx,.xlsm,.xls"></select>
+        <button class="btn" id="downloadExcelFile" type="button">Download Excel</button>
+        <label class="btn secondary" for="excelUploadInput">Upload Excel</label>
+        <input id="excelUploadInput" type="file" accept=".xlsx,.xlsm,.xls" class="hidden" />
+      </div>
       <div class="inline" style="margin-top: 8px">
-        <label><input type="radio" name="updateMode" value="update" checked /> Update</label>
-        <label><input type="radio" name="updateMode" value="refresh" /> Refresh</label>
-        <label><input type="radio" name="addNew" value="no" checked /> No new</label>
-        <label><input type="radio" name="addNew" value="yes" /> Add new</label>
+        <label><input type="radio" name="addNew" value="no" checked /> No new (update existing rows only)</label>
+        <label><input type="radio" name="addNew" value="yes" /> Add new (create missing rows)</label>
       </div>
       <button class="btn" id="applyExcel" style="margin-top: 8px">Apply Excel → IFC</button>
     </div>
   </div>
-  <div class="status" id="excelStatus"></div>
+  <div class="status" id="excelStatus">Select IFC and Excel files to start.</div>
 </div>
 {% endblock %}
