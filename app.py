@@ -53,6 +53,7 @@ from cobieqc_service.security import validate_upload
 from ifc_qa_service import REGISTRY as IFC_QA_V2_REGISTRY
 from ifc_qa_service import default_config_from_dir, start_job as start_ifc_qa_v2_job
 from backend.ifc_jobs import create_job as create_ifc_job, get_job as get_ifc_job, update_job as update_ifc_job
+from backend.ifc_move_rotate import TransformRequest, transform_ifc_file
 from backend.project_tables import get_tables_for_project_slug
 
 STEP2IFC_ROOT = Path(__file__).resolve().parent / "step2ifc"
@@ -4692,6 +4693,11 @@ def admin_mappings_page(request: Request):
     return templates.TemplateResponse("mappings.html", {"request": request, "active": "mappings"})
 
 
+@app.get("/wip/ifc-move-rotate", response_class=HTMLResponse)
+def ifc_move_rotate_page(request: Request):
+    return templates.TemplateResponse("ifc_move_rotate.html", {"request": request, "active": "ifc-move-rotate"})
+
+
 @app.post("/api/session")
 def create_session(payload: Dict[str, Any] = Body(default=None)):
     SESSION_STORE.cleanup_stale()
@@ -5178,6 +5184,74 @@ def download_file(session_id: str, name: str):
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path, filename=safe)
+
+
+@app.post("/api/session/{session_id}/ifc-move-rotate")
+async def api_ifc_move_rotate(
+    session_id: str,
+    source_file: Optional[str] = Form(None),
+    upload_file: Optional[UploadFile] = File(None),
+    current_x: float = Form(...),
+    current_y: float = Form(...),
+    current_z: float = Form(...),
+    target_x: float = Form(...),
+    target_y: float = Form(...),
+    target_z: float = Form(...),
+    rotation_deg: float = Form(...),
+    tolerance: float = Form(0.001),
+    rotate_about_global_z: bool = Form(True),
+    preserve_metadata: bool = Form(True),
+    output_suffix: str = Form("_moved_rotated"),
+):
+    root = Path(SESSION_STORE.ensure(session_id))
+    if tolerance <= 0:
+        raise HTTPException(status_code=400, detail="Tolerance must be > 0")
+
+    input_path: Optional[Path] = None
+    source_name: Optional[str] = None
+    if upload_file and upload_file.filename:
+        source_name = sanitize_filename(os.path.basename(upload_file.filename))
+        input_path = root / source_name
+        input_path.write_bytes(await upload_file.read())
+    elif source_file:
+        source_name = sanitize_filename(os.path.basename(source_file))
+        candidate = root / source_name
+        if not candidate.exists():
+            raise HTTPException(status_code=404, detail="Selected source file not found in session")
+        input_path = candidate
+    else:
+        raise HTTPException(status_code=400, detail="Provide either a session source file or upload_file")
+
+    if not source_name.lower().endswith((".ifc", ".ifczip")):
+        raise HTTPException(status_code=400, detail="Input must be an IFC file (.ifc or .ifczip)")
+
+    out_stem, out_ext = os.path.splitext(source_name)
+    cleaned_suffix = re.sub(r"[^A-Za-z0-9_-]", "_", output_suffix or "_moved_rotated")
+    output_name = f"{out_stem}{cleaned_suffix}{out_ext}"
+    if (root / output_name).exists():
+        output_name = f"{out_stem}{cleaned_suffix}_{int(time.time())}{out_ext}"
+
+    req = TransformRequest(
+        current_xyz=(current_x, current_y, current_z),
+        target_xyz=(target_x, target_y, target_z),
+        rotation_deg=rotation_deg,
+        tolerance=tolerance,
+        output_suffix=cleaned_suffix,
+        rotate_about_global_z=rotate_about_global_z,
+        preserve_metadata=preserve_metadata,
+    )
+
+    try:
+        summary = transform_ifc_file(str(input_path), str(root / output_name), req, APP_LOGGER)
+    except Exception as exc:
+        APP_LOGGER.exception("IFC Move/Rotate failed")
+        raise HTTPException(status_code=500, detail=f"IFC Move/Rotate failed: {exc}") from exc
+
+    return {
+        "status": "ok",
+        "ifc": {"name": output_name, "url": f"/api/session/{session_id}/download?name={output_name}"},
+        "summary": summary,
+    }
 
 
 @app.get("/api/checks/definitions")
