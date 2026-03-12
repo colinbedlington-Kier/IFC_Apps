@@ -19,6 +19,29 @@ class TransformRequest:
     preserve_metadata: bool = True
 
 
+def _get_model_schema(model: ifcopenshell.file) -> str:
+    schema = getattr(model, "schema", None)
+    if callable(schema):
+        schema = schema()
+    if not schema:
+        wrapped = getattr(model, "wrapped_data", None)
+        schema = getattr(wrapped, "schema_name", "") if wrapped is not None else ""
+    return str(schema or "").upper()
+
+
+def _safe_by_type(model: ifcopenshell.file, entity_name: str) -> List[Any]:
+    try:
+        return model.by_type(entity_name)
+    except RuntimeError as exc:
+        if "not found in schema" in str(exc).lower():
+            return []
+        raise
+
+
+def _schema_supports_map_conversion(schema: str) -> bool:
+    return schema.startswith("IFC4")
+
+
 def _translation_matrix(x: float, y: float, z: float) -> np.ndarray:
     return np.array(
         [
@@ -68,7 +91,7 @@ def _matrix_to_axis2placement3d(model: ifcopenshell.file, matrix: np.ndarray):
 
 def _top_level_local_placements(model: ifcopenshell.file) -> List[Any]:
     placements = []
-    for lp in model.by_type("IfcLocalPlacement"):
+    for lp in _safe_by_type(model, "IfcLocalPlacement"):
         if getattr(lp, "PlacementRelTo", None) is None:
             placements.append(lp)
     return placements
@@ -85,7 +108,7 @@ def _placement_location(lp: Any) -> Optional[Tuple[float, float, float]]:
 
 
 def _first_spatial_snapshot(model: ifcopenshell.file, cls: str) -> Optional[Dict[str, Any]]:
-    items = model.by_type(cls)
+    items = _safe_by_type(model, cls)
     if not items:
         return None
     ent = items[0]
@@ -97,8 +120,28 @@ def _first_spatial_snapshot(model: ifcopenshell.file, cls: str) -> Optional[Dict
     }
 
 
-def _map_conversion_summary(model: ifcopenshell.file) -> Dict[str, Any]:
-    mcs = model.by_type("IfcMapConversion")
+def _map_conversion_summary(model: ifcopenshell.file, logger) -> Dict[str, Any]:
+    schema = _get_model_schema(model)
+    supported = _schema_supports_map_conversion(schema)
+    if not supported:
+        logger.info("IFC Move/Rotate: schema=%s, IfcMapConversion support=no", schema or "UNKNOWN")
+        unsupported_msg = (
+            "IfcMapConversion is not available in IFC2X3"
+            if schema == "IFC2X3"
+            else f"IfcMapConversion is not available in schema {schema or 'UNKNOWN'}"
+        )
+        return {
+            "schema": schema,
+            "supported": False,
+            "present": False,
+            "count": 0,
+            "metadata_updated": False,
+            "message": unsupported_msg,
+            "note": "MapConversion / georeferencing metadata was inspected and left unchanged in v1.",
+            "entries": [],
+        }
+
+    mcs = _safe_by_type(model, "IfcMapConversion")
     details: List[Dict[str, Any]] = []
     for mc in mcs:
         details.append(
@@ -111,9 +154,18 @@ def _map_conversion_summary(model: ifcopenshell.file) -> Dict[str, Any]:
                 "x_axis_ordinate": getattr(mc, "XAxisOrdinate", None),
             }
         )
+    logger.info(
+        "IFC Move/Rotate: schema=%s, IfcMapConversion support=yes, found=%s",
+        schema or "UNKNOWN",
+        len(mcs),
+    )
     return {
+        "schema": schema,
+        "supported": True,
+        "present": bool(mcs),
         "count": len(mcs),
         "metadata_updated": False,
+        "message": "IfcMapConversion metadata detected" if mcs else "IfcMapConversion metadata not found",
         "note": "MapConversion / georeferencing metadata was inspected and left unchanged in v1.",
         "entries": details,
     }
@@ -124,12 +176,15 @@ def transform_ifc_file(input_path: str, output_path: str, req: TransformRequest,
         raise ValueError("This v1 endpoint only supports rotation about global Z")
 
     model = ifcopenshell.open(input_path)
+    schema = _get_model_schema(model)
     transform_matrix = build_transform_matrix(req.current_xyz, req.target_xyz, req.rotation_deg)
-    logger.info("IFC Move/Rotate: detected %s total IfcLocalPlacement entities", len(model.by_type("IfcLocalPlacement")))
+    local_placements = _safe_by_type(model, "IfcLocalPlacement")
+    logger.info("IFC Move/Rotate: detected schema=%s", schema or "UNKNOWN")
+    logger.info("IFC Move/Rotate: detected %s total IfcLocalPlacement entities", len(local_placements))
 
     site_before = _first_spatial_snapshot(model, "IfcSite")
     building_before = _first_spatial_snapshot(model, "IfcBuilding")
-    map_conversion = _map_conversion_summary(model)
+    map_conversion = _map_conversion_summary(model, logger)
 
     updated = 0
     skipped = 0
@@ -186,6 +241,7 @@ def transform_ifc_file(input_path: str, output_path: str, req: TransformRequest,
             "building_before": building_before,
             "building_after": building_after,
         },
+        "schema": schema,
         "georeferencing": map_conversion,
         "notes": [
             "Placements updated at top-level IfcLocalPlacement roots to preserve relative child placement chains.",
