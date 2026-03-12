@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title">
+    <h2>IFC Move / Rotate</h2>
+    <span class="badge">WIP · Whole-model transform</span>
+  </div>
+  <p class="helper">
+    Reposition and rotate an entire IFC model when shared coordinates are wrong. This applies one global transform:
+    <code>T = T2 * Rz * T1</code> where T1 translates the current point to origin, Rz rotates about global Z,
+    and T2 translates to the target point.
+  </p>
+  <div class="card" style="margin-top:10px; border-left:4px solid #c08b2c;">
+    <strong>Warning:</strong>
+    This tool transforms model placements. If the IFC already contains valid georeferencing / map conversion data,
+    verify whether that metadata also needs updating outside this tool.
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>IFC source</h3></div>
+  <div class="grid-2">
+    <div class="field">
+      <label for="mrSourceFile">Use session IFC file</label>
+      <select id="mrSourceFile" data-files-select data-files-filter=".ifc,.ifczip" data-allow-empty="1" data-empty-label="Select IFC file"></select>
+      <div class="hint">Pick an uploaded session IFC, or upload a file below.</div>
+    </div>
+    <div class="field">
+      <label for="mrUploadFile">Or upload IFC now</label>
+      <input id="mrUploadFile" type="file" accept=".ifc,.ifczip" />
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Current reference point</h3></div>
+  <div class="grid-3">
+    <div class="field"><label for="mrCurrentX">Current X</label><input id="mrCurrentX" type="number" step="any" value="416338150" /></div>
+    <div class="field"><label for="mrCurrentY">Current Y</label><input id="mrCurrentY" type="number" step="any" value="432650723" /></div>
+    <div class="field"><label for="mrCurrentZ">Current Z</label><input id="mrCurrentZ" type="number" step="any" value="106100" /></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Target reference point</h3></div>
+  <div class="grid-3">
+    <div class="field"><label for="mrTargetX">Target X</label><input id="mrTargetX" type="number" step="any" /></div>
+    <div class="field"><label for="mrTargetY">Target Y</label><input id="mrTargetY" type="number" step="any" /></div>
+    <div class="field"><label for="mrTargetZ">Target Z</label><input id="mrTargetZ" type="number" step="any" /></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Rotation</h3></div>
+  <div class="grid-2">
+    <div class="field">
+      <label for="mrRotationMode">Rotation mode</label>
+      <select id="mrRotationMode">
+        <option value="explicit" selected>Apply explicit rotation</option>
+        <option value="current-target">Calculate rotation from current and target angles</option>
+      </select>
+      <div class="hint">Positive rotation is counter-clockwise when looking down +Z toward origin.</div>
+    </div>
+    <div class="field">
+      <label for="mrComputedRotation">Rotation applied (deg)</label>
+      <input id="mrComputedRotation" type="number" step="any" value="0" readonly />
+    </div>
+  </div>
+  <div class="grid-3" id="mrExplicitWrap">
+    <div class="field"><label for="mrRotationExplicit">Rotation (deg)</label><input id="mrRotationExplicit" type="number" step="any" value="0.0" /></div>
+  </div>
+  <div class="grid-3" id="mrCurrentTargetWrap" style="display:none;">
+    <div class="field"><label for="mrCurrentAngle">Current angle (deg)</label><input id="mrCurrentAngle" type="number" step="any" value="0" /></div>
+    <div class="field"><label for="mrTargetAngle">Target angle (deg)</label><input id="mrTargetAngle" type="number" step="any" value="0" /></div>
+    <div class="field"><label for="mrDeltaAngle">Calculated delta (deg)</label><input id="mrDeltaAngle" type="number" step="any" readonly /></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Options</h3></div>
+  <div class="grid-3">
+    <label class="toggle"><input id="mrRotateGlobalZ" type="checkbox" checked /><span>Rotate about global Z axis only (v1)</span></label>
+    <label class="toggle"><input id="mrPreserveMetadata" type="checkbox" checked /><span>Preserve original metadata where possible</span></label>
+    <div class="field"><label for="mrOutputSuffix">Output file suffix</label><input id="mrOutputSuffix" value="_moved_rotated" /></div>
+    <div class="field"><label for="mrTolerance">Validation tolerance</label><input id="mrTolerance" type="number" step="any" value="0.001" /></div>
+    <div class="field"><label>Units</label><div class="helper">Numeric values are interpreted in IFC project units.</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Transform summary</h3></div>
+  <pre id="mrPreview" class="log-box">No transform calculated yet.</pre>
+  <div class="inline-actions">
+    <button class="btn secondary" id="mrCalculate">Calculate transform</button>
+    <button class="btn" id="mrApply" disabled>Apply transform</button>
+    <button class="btn secondary" id="mrReset">Reset</button>
+  </div>
+  <div class="status muted" id="mrStatus">Complete required inputs to enable Apply transform.</div>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Result / validation</h3></div>
+  <pre id="mrResult" class="log-box">No output yet.</pre>
+  <div class="inline-actions">
+    <a id="mrDownload" class="btn secondary" href="#" download style="display:none;">Download transformed IFC</a>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/ifc_move_rotate.js"></script>
+{% endblock %}
