@@ -2,6 +2,7 @@ import argparse
 import configparser
 import csv
 import datetime
+import difflib
 import json
 import logging
 import os
@@ -2686,76 +2687,78 @@ def rewrite_proxy_types(in_path: str, out_path: str) -> Tuple[str, str]:
 # Presentation layer purge
 # ----------------------------------------------------------------------------
 
-DEEP_LAYER_RE = re.compile(r"^[A-Z]-Ss\d{6,}--")
-SHALLOW_BASE_RE = re.compile(r"^[A-Z]-Ss\d{4}0--")
-ALLOWED_LAYER_RE = re.compile(r"[A-Z]-Ss\d{4}0--[A-Za-z0-9-]*")
-DEFAULT_ALLOWED_LAYERS = {
-    "I-Ss4015--GeneralFittingsFurnishingsAndEquipment(FF&E)Systems",
-    "L-SL0000--HabitatSupervisedAreas",
-    "L-SL0000--HardInformalAndSocialArea",
-    "L-SL0000--HardOutdoorPE",
-    "L-SL0000--NonNetSiteArea",
-    "L-SL0000--SoftInformalAndSocialArea",
-    "L-SL0000--SoftOutdoorPE",
-    "L-Ss2514--GeneralPatternWireMeshFencingSystems",
-    "L-Ss2514--WoodCloseBoardedFencingSystems",
-    "L-Ss2532--GateSystems",
-    "L-Ss3014--AcrylicAndResinBoundAggregatePavingSystems",
-    "L-Ss3014--AsphaltConcretePavingSystems",
-    "L-Ss3014--ConcreteRoadAndPavingSystems",
-    "L-Ss3014--HogginPavingSystems",
-    "L-Ss3014--PermeableSmallUnitPavingSystems",
-    "L-Ss3014--PorousAsphaltConcreteSportsPavingSystems",
-    "L-Ss4535--AmenityAndOrnamentalPlantingSystems",
-    "L-Ss4535--BiodiversityAndEnvironmentalConservationSystems",
-    "L-Ss4535--GrassSeedingSystems",
-    "L-Ss4535--PitPlantedLargeTreeSystems",
-    "L-Ss4535--PitPlantedSmallTreeAndShrubSystems",
-    "O-Ss2530--RollerShutterDoorsetSystems",
-    "O-Ss4015--CommercialCateringFF&ESystems",
-    "O-Ss4015--JanitorialUnitSystems",
-    "O-Ss4015--Shelving,StorageAndEnclosuresSystems",
-    "O-Ss4015--SinkSystems",
-    "O-Ss4510--InsectControlSystems",
-    "O-Ss5040--WasteCollectionSystems",
-    "O-Ss5515--WaterTreatmentFiltrationSystems",
-    "O-Ss6060--RefrigerationSystems",
-    "O-Ss6540--KitchenExtractVentilationSystems",
-    "S-EF2005--Substructure",
-    "S-EF2510--Walls",
-    "S-EF3020--Floors",
-    "Z-Ss4070--Equipment",
-    "Z-Ss5035--SurfaceAndWastewaterDrainageCollectionSystems",
-    "Z-Ss6050--WaterTanksAndCisterns",
-    "Z-Ss6070--DistributionBoxesAndSwitchboards",
-    "Z-Ss6070--LowVoltageSwitchgear",
-    "Z-Ss6070--PowerSupplyProducts",
-    "Z-Ss6075--CommunicationsSourceProducts",
-    "Z-Ss6552--PipesAndFittings",
-    "Z-Ss6553--PumpProducts",
-    "Z-Ss6554--ValveProducts",
-    "Z-Ss6565--DuctDampers",
-    "Z-Ss6565--DuctworkAndFittings",
-    "Z-Ss6567--Fans",
-    "Z-Ss6567--SoundAttenuators",
-    "Z-Ss6570--CablesConductorsAndFittingsProducts",
-    "Z-Ss6572--ElectricalProtectiveDevices",
-    "Z-Ss7060--HeatEmitters",
-    "Z-Ss7065--AirTerminalsAndDiffusers",
-    "Z-Ss7080--LightingSystems",
-    "Z-Ss7550--MechanicalAndElectricalServicesControlProducts",
-    "Z-Ss8010--CableTransportSystems",
-    "Z-Ss8077--EquipmentEnclosuresCabinetsBoxesAndHousings",
-}
+DEFAULT_ALLOWED_LAYERS_CSV = Path(__file__).resolve().parent / "config" / "presentation_layers" / "default_allowed_layers.csv"
+
+
+def _normalize_layer(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip()).lower()
+
+
+def _score_layer_similarity(existing: str, candidate: str) -> float:
+    simplified_existing = re.sub(r"[^a-z0-9]", "", _normalize_layer(existing))
+    simplified_candidate = re.sub(r"[^a-z0-9]", "", _normalize_layer(candidate))
+    return difflib.SequenceMatcher(a=simplified_existing, b=simplified_candidate).ratio()
+
+
+def _combine_layer(code: str, description: str) -> str:
+    return f"{(code or '').strip()}--{(description or '').strip()}"
+
+
+def parse_allowed_layers_csv_text(csv_text: str) -> Dict[str, Any]:
+    rows: List[Dict[str, str]] = []
+    errors: List[Dict[str, Any]] = []
+    if not csv_text or not csv_text.strip():
+        return {"rows": rows, "errors": errors}
+    reader = csv.DictReader(csv_text.splitlines())
+    required = {"layer_code", "layer_description"}
+    field_names = {f.strip() for f in (reader.fieldnames or []) if f}
+    if not required.issubset(field_names):
+        return {
+            "rows": [],
+            "errors": [{"row": 0, "message": "CSV requires columns: layer_code, layer_description"}],
+        }
+    dedupe = set()
+    for idx, row in enumerate(reader, start=2):
+        code = (row.get("layer_code") or "").strip()
+        description = (row.get("layer_description") or "").strip()
+        if not code and not description:
+            continue
+        if not code or not description:
+            errors.append({"row": idx, "message": "layer_code and layer_description are required"})
+            continue
+        combined = _combine_layer(code, description)
+        dedupe_key = _normalize_layer(combined)
+        if dedupe_key in dedupe:
+            continue
+        dedupe.add(dedupe_key)
+        rows.append({"layer_code": code, "layer_description": description, "full_layer": combined})
+    return {"rows": rows, "errors": errors}
+
+
+def get_default_allowed_layers() -> List[Dict[str, str]]:
+    parsed = parse_allowed_layers_csv_text(DEFAULT_ALLOWED_LAYERS_CSV.read_text(encoding="utf-8"))
+    return parsed["rows"]
+
+
+def build_allowed_layers(uploaded_csv_text: str = "", use_uploaded_only: bool = False) -> Dict[str, Any]:
+    default_rows = [] if use_uploaded_only else get_default_allowed_layers()
+    uploaded_parse = parse_allowed_layers_csv_text(uploaded_csv_text)
+    merged: Dict[str, Dict[str, str]] = {}
+    for row in default_rows + uploaded_parse["rows"]:
+        merged[_normalize_layer(row["full_layer"])] = row
+    merged_rows = sorted(merged.values(), key=lambda row: row["full_layer"])
+    return {
+        "rows": merged_rows,
+        "full_values": [row["full_layer"] for row in merged_rows],
+        "errors": uploaded_parse["errors"],
+    }
 
 
 def parse_allowed_layers(text_or_file: Optional[str]) -> set:
     if not text_or_file:
         return set()
-    tokens = set()
-    for token in ALLOWED_LAYER_RE.findall(text_or_file):
-        tokens.add(token.strip())
-    return tokens
+    parsed = parse_allowed_layers_csv_text(text_or_file)
+    return {row["full_layer"] for row in parsed["rows"]}
 
 
 def compute_shallow_layer(layer_value: str) -> Optional[str]:
@@ -2778,23 +2781,107 @@ def propose_layer_mapping(
         return None
     if current_value in explicit_map:
         target = explicit_map[current_value]
-        allowed_status = "unknown"
-        if allowed_set:
-            allowed_status = "yes" if target in allowed_set else "no"
-        return {"target": target, "reason": "Explicit", "allowed": allowed_status}
-    if not DEEP_LAYER_RE.match(current_value):
-        return None
-    if not auto_shallow:
-        allowed_status = "unknown" if not allowed_set else "no"
-        return {"target": "", "reason": "Manual", "allowed": allowed_status}
-    base = compute_shallow_layer(current_value)
-    if not base:
-        return None
-    if allowed_set:
-        if base in allowed_set:
-            return {"target": base, "reason": "Shallow", "allowed": "yes"}
-        return {"target": base, "reason": "Manual", "allowed": "no"}
-    return {"target": base, "reason": "Shallow", "allowed": "unknown"}
+        return {"target": target, "reason": "Explicit", "allowed": "yes" if target in allowed_set else "no"}
+    if current_value in allowed_set:
+        return {"target": current_value, "reason": "Exact", "allowed": "yes", "confidence": 1.0}
+    if not allowed_set:
+        return {"target": "", "reason": "Manual", "allowed": "unknown", "confidence": 0.0}
+    best = max(allowed_set, key=lambda a: _score_layer_similarity(current_value, a))
+    confidence = _score_layer_similarity(current_value, best)
+    if confidence < 0.55:
+        return {"target": "", "reason": "Unmatched", "allowed": "no", "confidence": confidence}
+    return {"target": best, "reason": "Suggested", "allowed": "yes", "confidence": confidence}
+
+
+def extract_presentation_layers(ifc_path: str) -> List[Dict[str, Any]]:
+    model = ifcopenshell.open(ifc_path)
+    counts: Dict[str, int] = {}
+    layer_ids: Dict[str, List[int]] = {}
+    for layer in model.by_type("IfcPresentationLayerAssignment"):
+        name = (getattr(layer, "Name", "") or "").strip()
+        if not name:
+            continue
+        counts[name] = counts.get(name, 0) + len(getattr(layer, "AssignedItems", []) or [])
+        layer_ids.setdefault(name, []).append(layer.id())
+    return [
+        {"existing_layer": name, "count": counts[name], "layer_ids": layer_ids.get(name, [])}
+        for name in sorted(counts.keys())
+    ]
+
+
+def extract_uniclass_ss_classifications(ifc_path: str) -> List[Dict[str, Any]]:
+    model = ifcopenshell.open(ifc_path)
+    counts: Dict[str, int] = {}
+
+    def classification_parts(classification_ref) -> Tuple[str, str, str]:
+        code = (getattr(classification_ref, "Identification", "") or getattr(classification_ref, "ItemReference", "") or "").strip()
+        name = (getattr(classification_ref, "Name", "") or "").strip()
+        source = getattr(classification_ref, "ReferencedSource", None)
+        source_name = (getattr(source, "Name", "") or "").strip()
+        return code, name, source_name
+
+    for rel in model.by_type("IfcRelAssociatesClassification"):
+        classification_ref = getattr(rel, "RelatingClassification", None)
+        if not classification_ref:
+            continue
+        code, name, source_name = classification_parts(classification_ref)
+        code_lower = code.lower()
+        source_lower = source_name.lower()
+        looks_like_ss = bool(re.search(r"(^|[^a-z])ss[-_ ]?\d", code_lower)) or code_lower.startswith("ss")
+        if not looks_like_ss and "uniclass" not in source_lower:
+            continue
+        existing = f"{code}--{name}" if code and name else (code or name)
+        if not existing:
+            continue
+        related = getattr(rel, "RelatedObjects", None) or []
+        counts[existing] = counts.get(existing, 0) + len(related)
+
+    return [{"existing_layer": key, "count": counts[key], "layer_ids": []} for key in sorted(counts.keys())]
+
+
+def build_layer_review(ifc_path: str, allowed_values: List[str], confidence_threshold: float = 0.7) -> Dict[str, Any]:
+    allowed_set = set(allowed_values)
+    rows = []
+    extracted = extract_presentation_layers(ifc_path)
+    source_mode = "presentation_layers"
+    if not extracted:
+        extracted = extract_uniclass_ss_classifications(ifc_path)
+        source_mode = "uniclass_ss_fallback" if extracted else "none"
+    for item in extracted:
+        mapping = propose_layer_mapping(item["existing_layer"], allowed_set, {}, True) or {}
+        suggestion = mapping.get("target", "")
+        confidence = float(mapping.get("confidence", 1.0 if mapping.get("reason") == "Exact" else 0.0))
+        exact = item["existing_layer"] in allowed_set
+        if source_mode == "uniclass_ss_fallback":
+            status = "classification_candidate"
+            final_value = suggestion if confidence >= confidence_threshold else ""
+        else:
+            status = "exact" if exact else ("suggested" if suggestion else "unmatched")
+            final_value = suggestion if (exact or confidence >= confidence_threshold) else ""
+        rows.append(
+            {
+                "existing_layer": item["existing_layer"],
+                "normalized_existing_layer": re.sub(r"[^a-z0-9]", "", _normalize_layer(item["existing_layer"])),
+                "count": item["count"],
+                "layer_ids": item["layer_ids"],
+                "exact_match": exact,
+                "suggested_layer": suggestion,
+                "suggested_confidence": round(confidence, 4),
+                "final_layer": final_value,
+                "status": status,
+                "source_type": source_mode,
+                "apply_change": bool(final_value and final_value != item["existing_layer"]),
+            }
+        )
+    summary = {
+        "layers_found": len(rows),
+        "exact_matches": sum(1 for r in rows if r["status"] == "exact"),
+        "suggested": sum(1 for r in rows if r["status"] == "suggested"),
+        "unmatched": sum(1 for r in rows if r["status"] == "unmatched"),
+        "classification_candidates": sum(1 for r in rows if r["status"] == "classification_candidate"),
+        "source_mode": source_mode,
+    }
+    return {"rows": rows, "summary": summary}
 
 
 def _extract_property_value(prop: ifcopenshell.entity_instance) -> Optional[str]:
@@ -2920,88 +3007,55 @@ def apply_layer_changes(
     ifc_path: str,
     rows_to_apply: List[Dict[str, Any]],
     options: Dict[str, Any],
-) -> Tuple[str, str, str]:
+) -> Tuple[str, str, str, Dict[str, Any]]:
     model = ifcopenshell.open(ifc_path)
     update_both = bool(options.get("update_both", False))
+    remove_orphans = bool(options.get("remove_orphans", True))
     updated_layers = set()
-    updated_props = set()
     change_log = []
     now = utc_now().isoformat() + "Z"
-
+    mapping = {}
     for row in rows_to_apply:
-        target = row.get("target_layer") or ""
-        if not target:
+        existing = (row.get("existing_layer") or "").strip()
+        target = (row.get("final_layer") or "").strip()
+        applied = bool(row.get("apply_change", False))
+        if not existing:
             continue
-        mapping_reason = row.get("mapping_reason", "")
-        allowed_status = row.get("allowed_status", "")
-        if row.get("source") == "presentation" or update_both:
-            presentation_layers = row.get("presentation_layers", [])
-            if row.get("source") == "presentation" and not update_both:
-                presentation_layers = [
-                    info
-                    for info in presentation_layers
-                    if info.get("id") == row.get("presentation_layer_id")
-                ]
-            for layer_info in presentation_layers:
-                layer_id = layer_info.get("id")
-                if layer_id in updated_layers:
-                    continue
-                layer = model.by_id(layer_id) if layer_id else None
-                if not layer or not layer.is_a("IfcPresentationLayerAssignment"):
-                    continue
-                old_value = getattr(layer, "Name", None)
-                if old_value != layer_info.get("name"):
-                    continue
-                if old_value == target:
-                    updated_layers.add(layer_id)
-                    continue
-                layer.Name = target
-                updated_layers.add(layer_id)
-                change_log.append(
-                    {
-                        "globalid": row.get("globalid"),
-                        "ifc_class": row.get("ifc_class"),
-                        "target": "presentation_layer",
-                        "old_value": old_value,
-                        "new_value": target,
-                        "mapping_reason": mapping_reason,
-                        "allowed_status": allowed_status,
-                        "timestamp": now,
-                    }
-                )
-        if row.get("source") == "property" or update_both:
-            property_layers = row.get("property_layers", [])
-            if row.get("source") == "property" and not update_both:
-                property_layers = [
-                    info for info in property_layers if info.get("id") == row.get("property_layer_id")
-                ]
-            for prop_info in property_layers:
-                prop_id = prop_info.get("id")
-                if prop_id in updated_props:
-                    continue
-                prop = model.by_id(prop_id) if prop_id else None
-                if not prop or not prop.is_a("IfcPropertySingleValue"):
-                    continue
-                old_value = _extract_property_value(prop)
-                if old_value != prop_info.get("value"):
-                    continue
-                if old_value == target:
-                    updated_props.add(prop_id)
-                    continue
-                _update_property_value(model, prop, target)
-                updated_props.add(prop_id)
-                change_log.append(
-                    {
-                        "globalid": row.get("globalid"),
-                        "ifc_class": row.get("ifc_class"),
-                        "target": "property_layer",
-                        "old_value": old_value,
-                        "new_value": target,
-                        "mapping_reason": mapping_reason,
-                        "allowed_status": allowed_status,
-                        "timestamp": now,
-                    }
-                )
+        mapping[existing] = {"target": target, "applied": applied, "suggested_layer": (row.get("suggested_layer") or "").strip()}
+
+    for layer in model.by_type("IfcPresentationLayerAssignment"):
+        old_value = (getattr(layer, "Name", "") or "").strip()
+        map_row = mapping.get(old_value)
+        if not map_row or not map_row["applied"] or not map_row["target"]:
+            continue
+        target = map_row["target"]
+        if old_value == target:
+            continue
+        layer.Name = target
+        updated_layers.add(layer.id())
+        change_log.append({
+            "existing_layer": old_value,
+            "suggested_layer": map_row.get("suggested_layer", ""),
+            "final_layer": target,
+            "applied": True,
+            "status": "changed",
+            "timestamp": now,
+        })
+
+    if update_both:
+        for prop in model.by_type("IfcPropertySingleValue"):
+            if (getattr(prop, "Name", "") or "").lower() != "layer":
+                continue
+            old_value = (_extract_property_value(prop) or "").strip()
+            map_row = mapping.get(old_value)
+            if not map_row or not map_row["applied"] or not map_row["target"] or old_value == map_row["target"]:
+                continue
+            _update_property_value(model, prop, map_row["target"])
+
+    if remove_orphans:
+        for layer in model.by_type("IfcPresentationLayerAssignment"):
+            if not (getattr(layer, "AssignedItems", []) or []):
+                model.remove(layer)
 
     base_dir = os.path.dirname(ifc_path)
     ts = utc_now().strftime("%Y%m%d_%H%M%S")
@@ -3016,25 +3070,19 @@ def apply_layer_changes(
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=[
-                "globalid",
-                "ifc_class",
-                "target",
-                "target_source",
-                "target_globalid",
-                "target_ifc_id",
-                "old_value",
-                "new_value",
-                "mapping_reason",
-                "target_class",
-                "allowed_status",
-                "timestamp",
-            ],
+            fieldnames=["existing_layer", "suggested_layer", "final_layer", "applied", "status", "timestamp"],
         )
         writer.writeheader()
         writer.writerows(change_log)
 
-    return out_path, json_path, csv_path
+    summary = {
+        "layers_found": len(mapping),
+        "changed": len(change_log),
+        "unchanged": max(0, len(mapping) - len(change_log)),
+        "unmatched": sum(1 for row in rows_to_apply if not (row.get("final_layer") or "").strip()),
+    }
+
+    return out_path, json_path, csv_path, summary
 
 
 def match_type_name_for_proxy(type_name: str) -> bool:
@@ -5522,26 +5570,57 @@ def proxy_predefined_apply(session_id: str, payload: Dict[str, Any] = Body(...))
     }
 
 
-@app.post("/api/session/{session_id}/presentation-layer/scan")
-def presentation_layer_scan(session_id: str, payload: Dict[str, Any] = Body(...)):
+@app.get("/api/presentation-layers/template")
+def presentation_layers_template():
+    if not DEFAULT_ALLOWED_LAYERS_CSV.exists():
+        raise HTTPException(status_code=404, detail="Template CSV not found")
+    return FileResponse(str(DEFAULT_ALLOWED_LAYERS_CSV), media_type="text/csv", filename="default_allowed_layers.csv")
+
+
+@app.post("/api/presentation-layers/allowed-layers/parse")
+def parse_allowed_layers_api(payload: Dict[str, Any] = Body(...)):
+    csv_text = payload.get("csv_text") or ""
+    use_uploaded_only = bool(payload.get("use_uploaded_only", False))
+    parsed = build_allowed_layers(csv_text, use_uploaded_only=use_uploaded_only)
+    return {
+        "allowed_layers": parsed["rows"],
+        "allowed_full_values": parsed["full_values"],
+        "errors": parsed["errors"],
+        "count": len(parsed["rows"]),
+    }
+
+
+@app.post("/api/session/{session_id}/presentation-layer/extract")
+def presentation_layer_extract(session_id: str, payload: Dict[str, Any] = Body(...)):
     root = SESSION_STORE.ensure(session_id)
+    APP_LOGGER.info("Presentation layer extraction requested for session %s", session_id)
     src = payload.get("ifc_file")
     if not src:
         raise HTTPException(status_code=400, detail="No IFC file provided")
     in_path = os.path.join(root, sanitize_filename(src))
     if not os.path.isfile(in_path):
         raise HTTPException(status_code=404, detail="IFC file not found")
-    allowed_text = payload.get("allowed_text") or ""
-    allowed_set = set(DEFAULT_ALLOWED_LAYERS)
-    allowed_set.update(parse_allowed_layers(allowed_text))
-    explicit_map = payload.get("explicit_map") or {}
-    options = payload.get("options") or {}
-    stats, rows = scan_layers(in_path, allowed_set, explicit_map, options)
-    samples = sorted(list(allowed_set))[:5]
-    return {"stats": stats, "rows": rows, "allowed_count": len(allowed_set), "allowed_samples": samples}
+    csv_text = payload.get("allowed_csv_text") or ""
+    use_uploaded_only = bool(payload.get("use_uploaded_only", False))
+    threshold = float(payload.get("confidence_threshold", 0.7))
+    allowed = build_allowed_layers(csv_text, use_uploaded_only=use_uploaded_only)
+    review = build_layer_review(in_path, allowed["full_values"], confidence_threshold=threshold)
+    APP_LOGGER.info(
+        "Presentation layer extraction complete for %s: mode=%s rows=%s",
+        src,
+        review.get("summary", {}).get("source_mode"),
+        len(review.get("rows", [])),
+    )
+    return {
+        "rows": review["rows"],
+        "summary": review["summary"],
+        "allowed_layers": allowed["rows"],
+        "allowed_full_values": allowed["full_values"],
+        "allowed_errors": allowed["errors"],
+    }
 
 
-@app.post("/api/session/{session_id}/presentation-layer/apply")
+@app.post("/api/session/{session_id}/presentation-layer/purge/apply")
 def presentation_layer_apply(session_id: str, payload: Dict[str, Any] = Body(...)):
     root = SESSION_STORE.ensure(session_id)
     src = payload.get("ifc_file")
@@ -5552,8 +5631,9 @@ def presentation_layer_apply(session_id: str, payload: Dict[str, Any] = Body(...
     in_path = os.path.join(root, sanitize_filename(src))
     if not os.path.isfile(in_path):
         raise HTTPException(status_code=404, detail="IFC file not found")
-    out_path, json_path, csv_path = apply_layer_changes(in_path, rows, options)
+    out_path, json_path, csv_path, summary = apply_layer_changes(in_path, rows, options)
     return {
+        "summary": summary,
         "ifc": {"name": os.path.basename(out_path), "url": f"/api/session/{session_id}/download?name={os.path.basename(out_path)}"},
         "log_json": {"name": os.path.basename(json_path), "url": f"/api/session/{session_id}/download?name={os.path.basename(json_path)}"},
         "log_csv": {"name": os.path.basename(csv_path), "url": f"/api/session/{session_id}/download?name={os.path.basename(csv_path)}"},
