@@ -41,6 +41,37 @@ def build_layer_model(layer_value: str) -> ifcopenshell.file:
 
 
 
+
+
+def build_unassigned_model() -> ifcopenshell.file:
+    model = ifcopenshell.file(schema="IFC4")
+    model.create_entity("IfcProject", GlobalId=new_guid(), Name="Proj")
+
+    def make_unassigned_wall(name: str):
+        wall = model.create_entity("IfcWall", GlobalId=new_guid(), Name=name)
+        point = model.create_entity("IfcCartesianPoint", Coordinates=(0.0, 0.0, 0.0))
+        axis = model.create_entity("IfcAxis2Placement3D", Location=point)
+        context = model.create_entity(
+            "IfcGeometricRepresentationContext",
+            ContextIdentifier="Body",
+            ContextType="Model",
+            CoordinateSpaceDimension=3,
+            Precision=1e-5,
+            WorldCoordinateSystem=axis,
+        )
+        item = model.create_entity("IfcPolyline", Points=[])
+        shape = model.create_entity(
+            "IfcShapeRepresentation",
+            ContextOfItems=context,
+            RepresentationIdentifier="Body",
+            RepresentationType="Curve2D",
+            Items=[item],
+        )
+        wall.Representation = model.create_entity("IfcProductDefinitionShape", Representations=[shape])
+
+    make_unassigned_wall("Wall-1")
+    make_unassigned_wall("Wall-2")
+    return model
 def build_classified_model(uniclass_code: str, name: str) -> ifcopenshell.file:
     model = ifcopenshell.file(schema="IFC4")
     model.create_entity("IfcProject", GlobalId=new_guid(), Name="Proj")
@@ -105,3 +136,37 @@ def test_extract_uses_uniclass_ss_fallback_when_no_layers(tmp_path):
     assert review["summary"]["classification_candidates"] == 1
     assert review["rows"][0]["status"] == "classification_candidate"
     assert review["rows"][0]["existing_layer"].startswith("Ss_25_10")
+
+
+def test_extract_includes_unassigned_ifcclass_candidates(tmp_path):
+    model = build_unassigned_model()
+    in_path = tmp_path / "unassigned.ifc"
+    model.write(str(in_path))
+
+    review = build_layer_review(str(in_path), ["A-GA-6100--ExternalWallSystems"])
+
+    assert review["summary"]["source_mode"] == "ifcclass_unassigned_fallback"
+    assert review["summary"]["unassigned_ifcclass"] == 1
+    row = next(r for r in review["rows"] if r["status"] == "unassigned_ifcclass")
+    assert row["ifc_class"] == "IfcWall"
+    assert row["count"] == 2
+
+
+def test_apply_assigns_layer_to_unassigned_ifcclass_group(tmp_path):
+    model = build_unassigned_model()
+    in_path = tmp_path / "unassigned_apply.ifc"
+    model.write(str(in_path))
+
+    review = build_layer_review(str(in_path), ["A-GA-6100--ExternalWallSystems"])
+    row = next(r for r in review["rows"] if r["status"] == "unassigned_ifcclass")
+    row["final_layer"] = "A-GA-6100--ExternalWallSystems"
+    row["apply_change"] = True
+
+    out_path, _, _, summary = apply_layer_changes(str(in_path), [row], {"update_both": False})
+    assert summary["changed"] == 1
+
+    updated = ifcopenshell.open(out_path)
+    walls = updated.by_type("IfcWall")
+    for wall in walls:
+        layers = ifcopenshell.util.element.get_layers(updated, wall)
+        assert any(layer.Name == "A-GA-6100--ExternalWallSystems" for layer in layers)
