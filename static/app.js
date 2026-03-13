@@ -711,8 +711,10 @@ async function extractPresentationLayers() {
         const s = data.summary || {};
         const mode = s.source_mode === "uniclass_ss_fallback"
           ? "Uniclass Ss fallback"
-          : (s.source_mode === "presentation_layers" ? "Presentation layers" : "No source");
-        el("plpStats").textContent = `Mode: ${mode} · Found: ${s.layers_found || 0} · Exact: ${s.exact_matches || 0} · Suggested: ${s.suggested || 0} · Unmatched: ${s.unmatched || 0} · Classification candidates: ${s.classification_candidates || 0}`;
+          : (s.source_mode === "ifcclass_unassigned_fallback"
+            ? "IfcClass unassigned fallback"
+            : (s.source_mode === "presentation_layers" ? "Presentation layers" : "No source"));
+        el("plpStats").textContent = `Mode: ${mode} · Found: ${s.layers_found || 0} · Exact: ${s.exact_matches || 0} · Suggested: ${s.suggested || 0} · Unmatched: ${s.unmatched || 0} · Classification candidates: ${s.classification_candidates || 0} · Unassigned groups: ${s.unassigned_ifcclass || 0}`;
       }
       renderPresentationRows();
     } catch (err) {

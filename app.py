@@ -2839,14 +2839,58 @@ def extract_uniclass_ss_classifications(ifc_path: str) -> List[Dict[str, Any]]:
     return [{"existing_layer": key, "count": counts[key], "layer_ids": []} for key in sorted(counts.keys())]
 
 
+def extract_unassigned_elements_by_ifcclass(ifc_path: str) -> List[Dict[str, Any]]:
+    model = ifcopenshell.open(ifc_path)
+    grouped: Dict[str, Dict[str, Any]] = {}
+
+    for element in model.by_type("IfcProduct"):
+        global_id = getattr(element, "GlobalId", None)
+        if not global_id:
+            continue
+
+        presentation_layers = [
+            layer
+            for layer in ifcopenshell.util.element.get_layers(model, element)
+            if (getattr(layer, "Name", "") or "").strip()
+        ]
+        if presentation_layers:
+            continue
+
+        has_layer_property = any((prop.get("value") or "").strip() for prop in find_layer_properties(element))
+        if has_layer_property:
+            continue
+
+        has_classification = any(rel.is_a("IfcRelAssociatesClassification") for rel in (getattr(element, "HasAssociations", None) or []))
+        if has_classification:
+            continue
+
+        ifc_class = element.is_a()
+        bucket = grouped.setdefault(
+            ifc_class,
+            {
+                "existing_layer": f"{ifc_class} (unassigned)",
+                "count": 0,
+                "layer_ids": [],
+                "ifc_class": ifc_class,
+                "globalids": [],
+            },
+        )
+        bucket["count"] += 1
+        bucket["globalids"].append(global_id)
+
+    return [grouped[key] for key in sorted(grouped.keys())]
+
+
 def build_layer_review(ifc_path: str, allowed_values: List[str], confidence_threshold: float = 0.7) -> Dict[str, Any]:
     allowed_set = set(allowed_values)
     rows = []
+
     extracted = extract_presentation_layers(ifc_path)
     source_mode = "presentation_layers"
     if not extracted:
         extracted = extract_uniclass_ss_classifications(ifc_path)
         source_mode = "uniclass_ss_fallback" if extracted else "none"
+
     for item in extracted:
         mapping = propose_layer_mapping(item["existing_layer"], allowed_set, {}, True) or {}
         suggestion = mapping.get("target", "")
@@ -2873,12 +2917,37 @@ def build_layer_review(ifc_path: str, allowed_values: List[str], confidence_thre
                 "apply_change": bool(final_value and final_value != item["existing_layer"]),
             }
         )
+
+    unassigned = extract_unassigned_elements_by_ifcclass(ifc_path)
+    for item in unassigned:
+        rows.append(
+            {
+                "existing_layer": item["existing_layer"],
+                "normalized_existing_layer": re.sub(r"[^a-z0-9]", "", _normalize_layer(item["existing_layer"])),
+                "count": item["count"],
+                "layer_ids": [],
+                "exact_match": False,
+                "suggested_layer": "",
+                "suggested_confidence": 0.0,
+                "final_layer": "",
+                "status": "unassigned_ifcclass",
+                "source_type": "unassigned_ifcclass",
+                "ifc_class": item["ifc_class"],
+                "globalids": item["globalids"],
+                "apply_change": False,
+            }
+        )
+
+    if source_mode == "none" and unassigned:
+        source_mode = "ifcclass_unassigned_fallback"
+
     summary = {
         "layers_found": len(rows),
         "exact_matches": sum(1 for r in rows if r["status"] == "exact"),
         "suggested": sum(1 for r in rows if r["status"] == "suggested"),
         "unmatched": sum(1 for r in rows if r["status"] == "unmatched"),
         "classification_candidates": sum(1 for r in rows if r["status"] == "classification_candidate"),
+        "unassigned_ifcclass": sum(1 for r in rows if r["status"] == "unassigned_ifcclass"),
         "source_mode": source_mode,
     }
     return {"rows": rows, "summary": summary}
@@ -3022,6 +3091,61 @@ def apply_layer_changes(
         if not existing:
             continue
         mapping[existing] = {"target": target, "applied": applied, "suggested_layer": (row.get("suggested_layer") or "").strip()}
+
+    def _assign_items_to_layer(target_name: str, items: List[Any]) -> int:
+        if not target_name or not items:
+            return 0
+        target_layer = None
+        for layer in model.by_type("IfcPresentationLayerAssignment"):
+            if (getattr(layer, "Name", "") or "").strip() == target_name:
+                target_layer = layer
+                break
+        if target_layer is None:
+            target_layer = model.create_entity("IfcPresentationLayerAssignment", Name=target_name, AssignedItems=[])
+        existing_items = list(getattr(target_layer, "AssignedItems", []) or [])
+        existing_ids = {item.id() for item in existing_items if hasattr(item, "id")}
+        added = 0
+        for item in items:
+            if not hasattr(item, "id"):
+                continue
+            item_id = item.id()
+            if item_id in existing_ids:
+                continue
+            existing_items.append(item)
+            existing_ids.add(item_id)
+            added += 1
+        if added:
+            target_layer.AssignedItems = existing_items
+        return added
+
+    for row in rows_to_apply:
+        if row.get("source_type") != "unassigned_ifcclass":
+            continue
+        target = (row.get("final_layer") or "").strip()
+        if not target or not bool(row.get("apply_change", False)):
+            continue
+        globalids = [gid for gid in (row.get("globalids") or []) if gid]
+        representation_items: List[Any] = []
+        for globalid in globalids:
+            try:
+                element = model.by_guid(globalid)
+            except Exception:
+                element = None
+            if element is None:
+                continue
+            representation = getattr(element, "Representation", None)
+            for shape in getattr(representation, "Representations", None) or []:
+                representation_items.extend(getattr(shape, "Items", None) or [])
+        added = _assign_items_to_layer(target, representation_items)
+        if added:
+            change_log.append({
+                "existing_layer": row.get("existing_layer", ""),
+                "suggested_layer": row.get("suggested_layer", ""),
+                "final_layer": target,
+                "applied": True,
+                "status": "assigned_from_ifcclass",
+                "timestamp": now,
+            })
 
     for layer in model.by_type("IfcPresentationLayerAssignment"):
         old_value = (getattr(layer, "Name", "") or "").strip()
