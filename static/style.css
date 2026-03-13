@@ -743,6 +743,8 @@ button.ghost {
 
 .excel-layout {
   align-items: start;
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
+  gap: 24px;
 }
 .excel-inline-controls {
   align-items: center;
@@ -751,7 +753,26 @@ button.ghost {
   flex: 1;
   min-width: 220px;
 }
-.excel-source-label {
-  color: var(--muted);
-  font-size: 13px;
+.excel-download-box,
+.excel-upload-box {
+  margin-top: 18px;
+}
+.excel-update-options {
+  margin-top: 12px;
+}
+#applyExcel {
+  margin-top: 12px;
+}
+.excel-bottom-actions {
+  margin-top: 20px;
+  display: flex;
+  justify-content: flex-end;
+}
+@media (max-width: 900px) {
+  .excel-layout {
+    grid-template-columns: 1fr;
+  }
+  .excel-bottom-actions {
+    justify-content: flex-start;
+  }
 }
