@@ -1509,6 +1509,8 @@ function wireEvents() {
 
   const plpExtract = el("plpExtract");
   if (plpExtract) plpExtract.addEventListener("click", extractPresentationLayers);
+  const plpExtractPrimary = el("plpExtractPrimary");
+  if (plpExtractPrimary) plpExtractPrimary.addEventListener("click", extractPresentationLayers);
   const plpApply = el("plpApply");
   if (plpApply) plpApply.addEventListener("click", applyPresentationLayers);
   const plpAcceptAll = el("plpAcceptAll");
