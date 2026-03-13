@@ -23,6 +23,7 @@ const state = {
     pageSize: 20,
   },
   processingCount: 0,
+  updatedIfcName: null,
 };
 
 
@@ -493,13 +494,15 @@ async function extractExcel() {
 
 async function applyExcel() {
   const ifcFile = el("excelIfcUpdate")?.value;
-  const xlsFile = el("excelFileUpdate")?.value;
+  const xlsFile = el("excelEditedSelection")?.value;
   if (!ifcFile || !xlsFile) return alert("Select IFC and Excel files.");
   const payload = {
     ifc_file: ifcFile,
     excel_file: xlsFile,
     add_new: document.querySelector('input[name="addNew"]:checked')?.value || "no",
   };
+  const downloadUpdatedBtn = el("downloadUpdatedIfc");
+  if (downloadUpdatedBtn) downloadUpdatedBtn.classList.add("hidden");
   return withProcessing("Applying Excel updates…", async () => {
     const resp = await fetch(`/api/session/${state.sessionId}/excel/update`, {
       method: "POST",
@@ -508,9 +511,12 @@ async function applyExcel() {
     });
     const data = await resp.json();
     if (data.ifc) {
+      state.updatedIfcName = data.ifc.name;
       el("excelStatus").textContent = `Updated IFC: ${data.ifc.name}`;
+      if (downloadUpdatedBtn) downloadUpdatedBtn.classList.remove("hidden");
       await refreshFiles();
     } else {
+      state.updatedIfcName = null;
       el("excelStatus").textContent = JSON.stringify(data);
     }
   });
@@ -921,7 +927,7 @@ async function uploadExcelSource() {
   }
   await refreshFiles();
   const first = input.files[0]?.name;
-  if (first && el("excelFileUpdate")) el("excelFileUpdate").value = first;
+  if (first && el("excelEditedSelection")) el("excelEditedSelection").value = first;
   el("excelStatus").textContent = "Excel uploaded to session files.";
   input.value = "";
 }
@@ -930,6 +936,15 @@ async function downloadSelectedExcel() {
   const name = el("excelFileUpdate")?.value;
   if (!name) return alert("Select an Excel source file first.");
   await downloadFile(name);
+}
+
+function triggerExcelUpload() {
+  el("excelUploadInput")?.click();
+}
+
+async function downloadUpdatedIfcFile() {
+  if (!state.updatedIfcName) return alert("Run Apply Excel → IFC first.");
+  await downloadFile(state.updatedIfcName);
 }
 
 async function downloadFile(name) {
@@ -1474,8 +1489,14 @@ function wireEvents() {
   const excelUploadInput = el("excelUploadInput");
   if (excelUploadInput) excelUploadInput.addEventListener("change", uploadExcelSource);
 
+  const triggerExcelUploadBtn = el("triggerExcelUpload");
+  if (triggerExcelUploadBtn) triggerExcelUploadBtn.addEventListener("click", triggerExcelUpload);
+
   const downloadExcelBtn = el("downloadExcelFile");
   if (downloadExcelBtn) downloadExcelBtn.addEventListener("click", downloadSelectedExcel);
+
+  const downloadUpdatedIfcBtn = el("downloadUpdatedIfc");
+  if (downloadUpdatedIfcBtn) downloadUpdatedIfcBtn.addEventListener("click", downloadUpdatedIfcFile);
 
   const parseStoreysBtn = el("parseStoreys");
   if (parseStoreysBtn) parseStoreysBtn.addEventListener("click", parseStoreyInfo);
