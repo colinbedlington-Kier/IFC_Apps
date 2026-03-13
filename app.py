@@ -2809,17 +2809,55 @@ def extract_presentation_layers(ifc_path: str) -> List[Dict[str, Any]]:
     ]
 
 
+def extract_uniclass_ss_classifications(ifc_path: str) -> List[Dict[str, Any]]:
+    model = ifcopenshell.open(ifc_path)
+    counts: Dict[str, int] = {}
+
+    def classification_parts(classification_ref) -> Tuple[str, str, str]:
+        code = (getattr(classification_ref, "Identification", "") or getattr(classification_ref, "ItemReference", "") or "").strip()
+        name = (getattr(classification_ref, "Name", "") or "").strip()
+        source = getattr(classification_ref, "ReferencedSource", None)
+        source_name = (getattr(source, "Name", "") or "").strip()
+        return code, name, source_name
+
+    for rel in model.by_type("IfcRelAssociatesClassification"):
+        classification_ref = getattr(rel, "RelatingClassification", None)
+        if not classification_ref:
+            continue
+        code, name, source_name = classification_parts(classification_ref)
+        code_lower = code.lower()
+        source_lower = source_name.lower()
+        looks_like_ss = bool(re.search(r"(^|[^a-z])ss[-_ ]?\d", code_lower)) or code_lower.startswith("ss")
+        if not looks_like_ss and "uniclass" not in source_lower:
+            continue
+        existing = f"{code}--{name}" if code and name else (code or name)
+        if not existing:
+            continue
+        related = getattr(rel, "RelatedObjects", None) or []
+        counts[existing] = counts.get(existing, 0) + len(related)
+
+    return [{"existing_layer": key, "count": counts[key], "layer_ids": []} for key in sorted(counts.keys())]
+
+
 def build_layer_review(ifc_path: str, allowed_values: List[str], confidence_threshold: float = 0.7) -> Dict[str, Any]:
     allowed_set = set(allowed_values)
     rows = []
     extracted = extract_presentation_layers(ifc_path)
+    source_mode = "presentation_layers"
+    if not extracted:
+        extracted = extract_uniclass_ss_classifications(ifc_path)
+        source_mode = "uniclass_ss_fallback" if extracted else "none"
     for item in extracted:
         mapping = propose_layer_mapping(item["existing_layer"], allowed_set, {}, True) or {}
         suggestion = mapping.get("target", "")
         confidence = float(mapping.get("confidence", 1.0 if mapping.get("reason") == "Exact" else 0.0))
         exact = item["existing_layer"] in allowed_set
-        status = "exact" if exact else ("suggested" if suggestion else "unmatched")
-        final_value = suggestion if (exact or confidence >= confidence_threshold) else ""
+        if source_mode == "uniclass_ss_fallback":
+            status = "classification_candidate"
+            final_value = suggestion if confidence >= confidence_threshold else ""
+        else:
+            status = "exact" if exact else ("suggested" if suggestion else "unmatched")
+            final_value = suggestion if (exact or confidence >= confidence_threshold) else ""
         rows.append(
             {
                 "existing_layer": item["existing_layer"],
@@ -2831,6 +2869,7 @@ def build_layer_review(ifc_path: str, allowed_values: List[str], confidence_thre
                 "suggested_confidence": round(confidence, 4),
                 "final_layer": final_value,
                 "status": status,
+                "source_type": source_mode,
                 "apply_change": bool(final_value and final_value != item["existing_layer"]),
             }
         )
@@ -2839,6 +2878,8 @@ def build_layer_review(ifc_path: str, allowed_values: List[str], confidence_thre
         "exact_matches": sum(1 for r in rows if r["status"] == "exact"),
         "suggested": sum(1 for r in rows if r["status"] == "suggested"),
         "unmatched": sum(1 for r in rows if r["status"] == "unmatched"),
+        "classification_candidates": sum(1 for r in rows if r["status"] == "classification_candidate"),
+        "source_mode": source_mode,
     }
     return {"rows": rows, "summary": summary}
 
@@ -5552,6 +5593,7 @@ def parse_allowed_layers_api(payload: Dict[str, Any] = Body(...)):
 @app.post("/api/session/{session_id}/presentation-layer/extract")
 def presentation_layer_extract(session_id: str, payload: Dict[str, Any] = Body(...)):
     root = SESSION_STORE.ensure(session_id)
+    APP_LOGGER.info("Presentation layer extraction requested for session %s", session_id)
     src = payload.get("ifc_file")
     if not src:
         raise HTTPException(status_code=400, detail="No IFC file provided")
@@ -5563,6 +5605,12 @@ def presentation_layer_extract(session_id: str, payload: Dict[str, Any] = Body(.
     threshold = float(payload.get("confidence_threshold", 0.7))
     allowed = build_allowed_layers(csv_text, use_uploaded_only=use_uploaded_only)
     review = build_layer_review(in_path, allowed["full_values"], confidence_threshold=threshold)
+    APP_LOGGER.info(
+        "Presentation layer extraction complete for %s: mode=%s rows=%s",
+        src,
+        review.get("summary", {}).get("source_mode"),
+        len(review.get("rows", [])),
+    )
     return {
         "rows": review["rows"],
         "summary": review["summary"],

@@ -688,24 +688,40 @@ async function parseAllowedCsv() {
 async function extractPresentationLayers() {
   const file = el("plpIfc")?.value;
   if (!file) return alert("Select IFC file.");
-  await parseAllowedCsv();
-  const resp = await fetch(`/api/session/${state.sessionId}/presentation-layer/extract`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      ifc_file: file,
-      allowed_csv_text: plpAllowedCsvText(),
-      use_uploaded_only: el("plpUseUploadedOnly")?.checked ?? false,
-      confidence_threshold: 0.7,
-    }),
+  if (el("plpStats")) el("plpStats").textContent = "Extracting layers from model…";
+  return withProcessing("Extracting presentation layers…", async () => {
+    try {
+      await parseAllowedCsv();
+      const resp = await fetch(`/api/session/${state.sessionId}/presentation-layer/extract`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ifc_file: file,
+          allowed_csv_text: plpAllowedCsvText(),
+          use_uploaded_only: el("plpUseUploadedOnly")?.checked ?? false,
+          confidence_threshold: 0.7,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        throw new Error(data.detail || "Extraction failed");
+      }
+      state.presentationLayer.rows = (data.rows || []).map((r) => ({ ...r, selected: false }));
+      if (el("plpStats")) {
+        const s = data.summary || {};
+        const mode = s.source_mode === "uniclass_ss_fallback"
+          ? "Uniclass Ss fallback"
+          : (s.source_mode === "presentation_layers" ? "Presentation layers" : "No source");
+        el("plpStats").textContent = `Mode: ${mode} · Found: ${s.layers_found || 0} · Exact: ${s.exact_matches || 0} · Suggested: ${s.suggested || 0} · Unmatched: ${s.unmatched || 0} · Classification candidates: ${s.classification_candidates || 0}`;
+      }
+      renderPresentationRows();
+    } catch (err) {
+      state.presentationLayer.rows = [];
+      renderPresentationRows();
+      if (el("plpStats")) el("plpStats").textContent = `Extraction failed: ${err?.message || err}`;
+      throw err;
+    }
   });
-  const data = await resp.json();
-  state.presentationLayer.rows = (data.rows || []).map((r) => ({ ...r, selected: false }));
-  if (el("plpStats")) {
-    const s = data.summary || {};
-    el("plpStats").textContent = `Found: ${s.layers_found || 0} · Exact: ${s.exact_matches || 0} · Suggested: ${s.suggested || 0} · Unmatched: ${s.unmatched || 0}`;
-  }
-  renderPresentationRows();
 }
 
 function plpAcceptAllSuggestions() {
