@@ -70,6 +70,8 @@ def test_parse_allowed_layers_csv_text_and_merge():
     merged = build_allowed_layers(csv_text, use_uploaded_only=False)
     assert "Z-Ss7550--MechanicalAndElectricalServicesControlProducts" in merged["full_values"]
 
+    merged = build_allowed_layers(csv_text, use_uploaded_only=False)
+    assert "Z-Ss7550--MechanicalAndElectricalServicesControlProducts" in merged["full_values"]
 
 def test_extract_and_apply_layer_changes(tmp_path):
     deep_layer = "Z-Ss755028--FireAndSmokeDetectionAndAlarmSystems"

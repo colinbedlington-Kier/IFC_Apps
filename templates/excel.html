@@ -13,25 +13,36 @@
         <select id="excelIfc" data-files-select></select>
         <button class="btn" id="extractExcel">Extract to Excel</button>
       </div>
+      <div class="excel-download-box">
+        <label for="excelFileUpdate">Excel workbook</label>
+        <div class="inline excel-inline-controls">
+          <select id="excelFileUpdate" data-files-select data-files-filter=".xlsx,.xlsm,.xls"></select>
+          <button class="btn" id="downloadExcelFile" type="button">Download Excel</button>
+        </div>
+      </div>
     </div>
     <div class="excel-update-col">
       <label for="excelIfcUpdate">IFC to update</label>
       <div class="inline excel-inline-controls">
         <select id="excelIfcUpdate" data-files-select></select>
-        <span class="excel-source-label">Excel source</span>
       </div>
-      <div class="inline excel-inline-controls" style="margin-top: 8px">
-        <select id="excelFileUpdate" data-files-select data-files-filter=".xlsx,.xlsm,.xls"></select>
-        <button class="btn" id="downloadExcelFile" type="button">Download Excel</button>
-        <label class="btn secondary" for="excelUploadInput">Upload Excel</label>
-        <input id="excelUploadInput" type="file" accept=".xlsx,.xlsm,.xls" class="hidden" />
+      <div class="excel-upload-box">
+        <label for="excelEditedSelection">Edited Excel file</label>
+        <div class="inline excel-inline-controls">
+          <select id="excelEditedSelection" data-files-select data-files-filter=".xlsx,.xlsm,.xls"></select>
+          <button class="btn secondary" id="triggerExcelUpload" type="button">Upload Excel</button>
+          <input id="excelUploadInput" type="file" accept=".xlsx,.xlsm,.xls" class="hidden" />
+        </div>
       </div>
-      <div class="inline" style="margin-top: 8px">
+      <div class="inline excel-update-options">
         <label><input type="radio" name="addNew" value="no" checked /> No new (update existing rows only)</label>
         <label><input type="radio" name="addNew" value="yes" /> Add new (create missing rows)</label>
       </div>
-      <button class="btn" id="applyExcel" style="margin-top: 8px">Apply Excel → IFC</button>
+      <button class="btn" id="applyExcel">Apply Excel → IFC</button>
     </div>
+  </div>
+  <div class="excel-bottom-actions">
+    <button class="btn hidden" id="downloadUpdatedIfc" type="button">Download updated IFC</button>
   </div>
   <div class="status" id="excelStatus">Select IFC and Excel files to start.</div>
 </div>
