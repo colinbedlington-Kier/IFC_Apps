@@ -12,6 +12,10 @@ const state = {
     rows: [],
     page: 1,
     pageSize: 20,
+    filter: "all",
+    allowedCsvText: "",
+    allowedFullValues: [],
+    allowedSet: new Set(),
   },
   proxyPredef: {
     rows: [],
@@ -22,12 +26,6 @@ const state = {
   updatedIfcName: null,
 };
 
-const presentationOverrides = [
-  {
-    source: "Z-Ss755028--FireAndSmokeDetectionAndAlarmSystems",
-    target: "Z-Ss7550--MechanicalAndElectricalServicesControlProducts",
-  },
-];
 
 const el = (id) => document.getElementById(id);
 
@@ -610,56 +608,17 @@ async function runProxyMapper() {
 // ------------------------------
 // Presentation Layer Purge
 // ------------------------------
-function renderOverridesTable(overrides) {
-  const body = el("plpOverridesBody");
-  if (!body) return;
-  body.innerHTML = "";
-  overrides.forEach((row, idx) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td><input type="text" value="${row.source || ""}" data-override-source="${idx}" /></td>
-      <td><input type="text" value="${row.target || ""}" data-override-target="${idx}" /></td>
-      <td><button class="btn secondary sm" data-override-remove="${idx}">Remove</button></td>
-    `;
-    body.appendChild(tr);
-  });
-  body.querySelectorAll("[data-override-remove]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const idx = Number(btn.dataset.overrideRemove);
-      overrides.splice(idx, 1);
-      renderOverridesTable(overrides);
-    });
-  });
+function plpAllowedCsvText() {
+  return state.presentationLayer.allowedCsvText || "";
 }
 
-function getOverridesFromTable() {
-  const overrides = {};
-  document.querySelectorAll("[data-override-source]").forEach((input) => {
-    const idx = Number(input.dataset.overrideSource);
-    const targetInput = document.querySelector(`[data-override-target="${idx}"]`);
-    const source = input.value.trim();
-    const target = targetInput?.value.trim() || "";
-    if (source && target) overrides[source] = target;
-  });
-  return overrides;
-}
-
-function setAllowedSummary(count, samples) {
-  const summary = el("plpAllowedSummary");
-  const sampleEl = el("plpAllowedSample");
-  if (summary) summary.textContent = `Allowed layers parsed: ${count}`;
-  if (sampleEl) sampleEl.textContent = samples?.length ? `Sample: ${samples.join(", ")}` : "";
-}
-
-function filterPresentationRows(rows) {
-  const search = el("plpFilterText")?.value.toLowerCase() || "";
-  const allowed = el("plpFilterAllowed")?.value || "";
-  const reason = el("plpFilterReason")?.value || "";
-  return rows.filter((row) => {
-    const haystack = `${row.ifc_class} ${row.presentation_layer} ${row.property_layer}`.toLowerCase();
-    if (search && !haystack.includes(search)) return false;
-    if (allowed && row.allowed_status !== allowed) return false;
-    if (reason && row.mapping_reason !== reason) return false;
+function plpFilteredRows() {
+  const mode = state.presentationLayer.filter || "all";
+  const search = (el("plpSearch")?.value || "").toLowerCase();
+  return (state.presentationLayer.rows || []).filter((row) => {
+    if (search && !(row.existing_layer || "").toLowerCase().includes(search)) return false;
+    if (mode === "changed" && row.final_layer === row.existing_layer) return false;
+    if (mode !== "all" && mode !== "changed" && row.status !== mode) return false;
     return true;
   });
 }
@@ -667,103 +626,164 @@ function filterPresentationRows(rows) {
 function renderPresentationRows() {
   const body = el("plpResultsBody");
   if (!body) return;
-  const { page, pageSize } = state.presentationLayer;
-  const filtered = filterPresentationRows(state.presentationLayer.rows);
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-  state.presentationLayer.page = Math.min(page, totalPages);
-  const start = (state.presentationLayer.page - 1) * pageSize;
-  const pageRows = filtered.slice(start, start + pageSize);
+  const rows = plpFilteredRows();
+  const datalistId = "plpAllowedList";
   body.innerHTML = "";
-  pageRows.forEach((row) => {
+  rows.forEach((row, idx) => {
     const tr = document.createElement("tr");
-    const checked = row.apply ?? row.apply_default;
+    const allowedWarn = row.final_layer && !state.presentationLayer.allowedSet.has(row.final_layer);
     tr.innerHTML = `
-      <td><input type="checkbox" data-plp-apply="${row.row_id}" ${checked ? "checked" : ""} /></td>
-      <td>${row.globalid}</td>
-      <td>${row.ifc_class}</td>
-      <td>${row.presentation_layer || "-"}</td>
-      <td>${row.property_layer || "-"}</td>
-      <td>${row.target_layer || "-"}</td>
-      <td>${row.mapping_reason}</td>
-      <td>${row.allowed_status}</td>
+      <td><input type="checkbox" data-plp-select="${row.existing_layer}" ${row.selected ? "checked" : ""} /></td>
+      <td><input type="checkbox" data-plp-apply="${row.existing_layer}" ${row.apply_change ? "checked" : ""} /></td>
+      <td>${row.existing_layer}</td>
+      <td>${row.status}${row.exact_match ? " (exact)" : ""}</td>
+      <td>${row.suggested_layer || "-"}</td>
+      <td><input list="${datalistId}" data-plp-final="${row.existing_layer}" value="${row.final_layer || ""}" class="${allowedWarn ? "danger-text" : ""}" /></td>
+      <td>${row.count || 0}</td>
+      <td>${Number(row.suggested_confidence || 0).toFixed(2)}</td>
     `;
     body.appendChild(tr);
   });
-  body.querySelectorAll("[data-plp-apply]").forEach((input) => {
-    input.addEventListener("change", (e) => {
-      const rowId = e.target.dataset.plpApply;
-      const row = state.presentationLayer.rows.find((r) => r.row_id === rowId);
-      if (row) row.apply = e.target.checked;
-    });
+  if (!document.getElementById(datalistId)) {
+    const list = document.createElement("datalist");
+    list.id = datalistId;
+    document.body.appendChild(list);
+  }
+  const list = document.getElementById(datalistId);
+  list.innerHTML = (state.presentationLayer.allowedFullValues || []).map((v) => `<option value="${v}"></option>`).join("");
+
+  body.querySelectorAll("[data-plp-select]").forEach((input) => input.addEventListener("change", (e) => {
+    const row = state.presentationLayer.rows.find((r) => r.existing_layer === e.target.dataset.plpSelect);
+    if (row) row.selected = e.target.checked;
+  }));
+  body.querySelectorAll("[data-plp-apply]").forEach((input) => input.addEventListener("change", (e) => {
+    const row = state.presentationLayer.rows.find((r) => r.existing_layer === e.target.dataset.plpApply);
+    if (row) row.apply_change = e.target.checked;
+  }));
+  body.querySelectorAll("[data-plp-final]").forEach((input) => input.addEventListener("input", (e) => {
+    const row = state.presentationLayer.rows.find((r) => r.existing_layer === e.target.dataset.plpFinal);
+    if (row) {
+      row.final_layer = e.target.value.trim();
+      row.apply_change = row.final_layer && row.final_layer !== row.existing_layer;
+    }
+  }));
+  if (el("plpResultsStatus")) el("plpResultsStatus").textContent = `${rows.length} rows shown`;
+}
+
+async function parseAllowedCsv() {
+  const resp = await fetch(`/api/presentation-layers/allowed-layers/parse`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ csv_text: plpAllowedCsvText(), use_uploaded_only: el("plpUseUploadedOnly")?.checked ?? false }),
   });
-  if (el("plpPageInfo")) el("plpPageInfo").textContent = `Page ${state.presentationLayer.page} of ${totalPages}`;
-  if (el("plpResultsStatus")) {
-    el("plpResultsStatus").textContent = filtered.length
-      ? `${filtered.length} rows (showing ${pageRows.length})`
-      : "No matching rows.";
+  const data = await resp.json();
+  state.presentationLayer.allowedFullValues = data.allowed_full_values || [];
+  state.presentationLayer.allowedSet = new Set(state.presentationLayer.allowedFullValues);
+  if (el("plpCsvStatus")) {
+    const errs = (data.errors || []).map((e) => `row ${e.row}: ${e.message}`).join("; ");
+    el("plpCsvStatus").textContent = `Allowed layers: ${data.count || 0}${errs ? ` · Warnings: ${errs}` : ""}`;
   }
 }
 
-async function scanPresentationLayers() {
+async function extractPresentationLayers() {
   const file = el("plpIfc")?.value;
   if (!file) return alert("Select IFC file.");
-  const allowedText = el("plpAllowedText")?.value || "";
-  const overrides = getOverridesFromTable();
-  const options = {
-    auto_shallow: el("plpAutoShallow")?.checked ?? true,
-  };
-  if (el("plpStats")) el("plpStats").textContent = "Scanning layers…";
-  return withProcessing("Scanning presentation layers…", async () => {
-    const resp = await fetch(`/api/session/${state.sessionId}/presentation-layer/scan`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ifc_file: file, allowed_text: allowedText, explicit_map: overrides, options }),
-    });
-    const data = await resp.json();
-    state.presentationLayer.rows = (data.rows || []).map((row) => ({ ...row, apply: row.apply_default }));
-    state.presentationLayer.page = 1;
-    if (data.stats && el("plpStats")) {
-      el("plpStats").textContent = `Schema: ${data.stats.schema} · Elements: ${data.stats.elements} · Rows: ${data.stats.rows}`;
-    }
-    setAllowedSummary(data.allowed_count || 0, data.allowed_samples || []);
-    renderPresentationRows();
+  await parseAllowedCsv();
+  const resp = await fetch(`/api/session/${state.sessionId}/presentation-layer/extract`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ifc_file: file,
+      allowed_csv_text: plpAllowedCsvText(),
+      use_uploaded_only: el("plpUseUploadedOnly")?.checked ?? false,
+      confidence_threshold: 0.7,
+    }),
   });
+  const data = await resp.json();
+  state.presentationLayer.rows = (data.rows || []).map((r) => ({ ...r, selected: false }));
+  if (el("plpStats")) {
+    const s = data.summary || {};
+    el("plpStats").textContent = `Found: ${s.layers_found || 0} · Exact: ${s.exact_matches || 0} · Suggested: ${s.suggested || 0} · Unmatched: ${s.unmatched || 0}`;
+  }
+  renderPresentationRows();
+}
+
+function plpAcceptAllSuggestions() {
+  state.presentationLayer.rows.forEach((row) => {
+    if (row.suggested_layer) {
+      row.final_layer = row.suggested_layer;
+      row.apply_change = row.final_layer !== row.existing_layer;
+    }
+  });
+  renderPresentationRows();
+}
+
+function plpAcceptHighConfidence() {
+  state.presentationLayer.rows.forEach((row) => {
+    if ((row.suggested_confidence || 0) >= 0.8 && row.suggested_layer) {
+      row.final_layer = row.suggested_layer;
+      row.apply_change = row.final_layer !== row.existing_layer;
+    }
+  });
+  renderPresentationRows();
+}
+
+function plpBatchSetSelected() {
+  const value = (el("plpBatchValue")?.value || "").trim();
+  if (!value) return;
+  state.presentationLayer.rows.forEach((row) => {
+    if (row.selected) {
+      row.final_layer = value;
+      row.apply_change = row.final_layer !== row.existing_layer;
+    }
+  });
+  renderPresentationRows();
+}
+
+function plpFillDown() {
+  const selected = state.presentationLayer.rows.filter((row) => row.selected);
+  if (!selected.length) return;
+  const first = selected[0].final_layer || "";
+  if (!first) return;
+  selected.forEach((row) => {
+    row.final_layer = first;
+    row.apply_change = row.final_layer !== row.existing_layer;
+  });
+  renderPresentationRows();
 }
 
 async function applyPresentationLayers() {
   const file = el("plpIfc")?.value;
   if (!file) return alert("Select IFC file.");
-  const rows = state.presentationLayer.rows.filter((row) => row.apply);
-  if (!rows.length) return alert("No rows selected.");
-  const options = { update_both: el("plpUpdateBoth")?.checked ?? false };
-  if (el("plpApplyStatus")) el("plpApplyStatus").textContent = "Applying updates…";
-  return withProcessing("Applying presentation layer updates…", async () => {
-    const resp = await fetch(`/api/session/${state.sessionId}/presentation-layer/apply`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ifc_file: file, rows, options }),
-    });
-    const data = await resp.json();
-    if (el("plpApplyStatus")) el("plpApplyStatus").textContent = "Export ready.";
-    await refreshFiles();
-    const downloads = el("plpDownloads");
-    if (!downloads) return;
-    downloads.innerHTML = "";
-    [data.ifc, data.log_json, data.log_csv].forEach((output) => {
-      if (!output) return;
-      const row = document.createElement("div");
-      row.className = "file-row";
-      row.innerHTML = `<span class="file-name">${output.name}</span>`;
-      const btn = document.createElement("button");
-      btn.className = "btn secondary sm";
-      btn.textContent = "Download";
-      btn.addEventListener("click", () => downloadFile(output.name));
-      row.appendChild(btn);
-      downloads.appendChild(row);
-    });
+  if (!state.presentationLayer.rows.length) return alert("Run extraction first.");
+  const rows = state.presentationLayer.rows;
+  const resp = await fetch(`/api/session/${state.sessionId}/presentation-layer/purge/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ifc_file: file, rows, options: { update_both: true, remove_orphans: true } }),
+  });
+  const data = await resp.json();
+  if (el("plpApplyStatus")) {
+    const s = data.summary || {};
+    el("plpApplyStatus").textContent = `Changed: ${s.changed || 0} · Unmatched: ${s.unmatched || 0}`;
+  }
+  await refreshFiles();
+  const downloads = el("plpDownloads");
+  if (!downloads) return;
+  downloads.innerHTML = "";
+  [data.ifc, data.log_json, data.log_csv].forEach((output) => {
+    if (!output) return;
+    const row = document.createElement("div");
+    row.className = "file-row";
+    row.innerHTML = `<span class="file-name">${output.name}</span>`;
+    const btn = document.createElement("button");
+    btn.className = "btn secondary sm";
+    btn.textContent = "Download";
+    btn.addEventListener("click", () => downloadFile(output.name));
+    row.appendChild(btn);
+    downloads.appendChild(row);
   });
 }
-
 // ------------------------------
 // Proxy → PredefinedType fixer
 // ------------------------------
@@ -1487,48 +1507,45 @@ function wireEvents() {
   const proxyBtn = el("runProxy");
   if (proxyBtn) proxyBtn.addEventListener("click", runProxyMapper);
 
-  const plpAddOverride = el("plpAddOverride");
-  if (plpAddOverride) {
-    renderOverridesTable(presentationOverrides);
-    plpAddOverride.addEventListener("click", () => {
-      presentationOverrides.push({ source: "", target: "" });
-      renderOverridesTable(presentationOverrides);
-    });
-  }
-  const plpScan = el("plpScan");
-  if (plpScan) plpScan.addEventListener("click", scanPresentationLayers);
+  const plpExtract = el("plpExtract");
+  if (plpExtract) plpExtract.addEventListener("click", extractPresentationLayers);
   const plpApply = el("plpApply");
   if (plpApply) plpApply.addEventListener("click", applyPresentationLayers);
-  const plpFilterText = el("plpFilterText");
-  if (plpFilterText) plpFilterText.addEventListener("input", renderPresentationRows);
-  const plpFilterAllowed = el("plpFilterAllowed");
-  if (plpFilterAllowed) plpFilterAllowed.addEventListener("change", renderPresentationRows);
-  const plpFilterReason = el("plpFilterReason");
-  if (plpFilterReason) plpFilterReason.addEventListener("change", renderPresentationRows);
-  const plpPrev = el("plpPrev");
-  if (plpPrev) {
-    plpPrev.addEventListener("click", () => {
-      state.presentationLayer.page = Math.max(1, state.presentationLayer.page - 1);
+  const plpAcceptAll = el("plpAcceptAll");
+  if (plpAcceptAll) plpAcceptAll.addEventListener("click", plpAcceptAllSuggestions);
+  const plpAcceptHigh = el("plpAcceptHigh");
+  if (plpAcceptHigh) plpAcceptHigh.addEventListener("click", plpAcceptHighConfidence);
+  const plpSetSelected = el("plpSetSelected");
+  if (plpSetSelected) plpSetSelected.addEventListener("click", plpBatchSetSelected);
+  const plpFillDownBtn = el("plpFillDown");
+  if (plpFillDownBtn) plpFillDownBtn.addEventListener("click", plpFillDown);
+  const plpSearch = el("plpSearch");
+  if (plpSearch) plpSearch.addEventListener("input", renderPresentationRows);
+  document.querySelectorAll("[data-plp-filter]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.presentationLayer.filter = btn.dataset.plpFilter || "all";
       renderPresentationRows();
     });
-  }
-  const plpNext = el("plpNext");
-  if (plpNext) {
-    plpNext.addEventListener("click", () => {
-      state.presentationLayer.page += 1;
-      renderPresentationRows();
-    });
-  }
+  });
   const allowedFileInput = el("plpAllowedFile");
   if (allowedFileInput) {
     allowedFileInput.addEventListener("change", (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = () => {
-        if (el("plpAllowedText")) el("plpAllowedText").value = String(reader.result || "");
+      reader.onload = async () => {
+        state.presentationLayer.allowedCsvText = String(reader.result || "");
+        await parseAllowedCsv();
       };
       reader.readAsText(file);
+    });
+  }
+  const plpUseUploadedOnly = el("plpUseUploadedOnly");
+  if (plpUseUploadedOnly) plpUseUploadedOnly.addEventListener("change", parseAllowedCsv);
+  const plpDownloadTemplate = el("plpDownloadTemplate");
+  if (plpDownloadTemplate) {
+    plpDownloadTemplate.addEventListener("click", () => {
+      window.open(`/api/presentation-layers/template`, "_blank");
     });
   }
 
