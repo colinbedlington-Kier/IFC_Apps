@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title">
+    <h2>IFC File Size Reducer</h2>
+    <span class="badge">Session-based workflow</span>
+  </div>
+  <p class="helper">Use an existing session IFC/IFCZIP file to analyse size-reduction opportunities and generate derived reduced outputs. Original session files are always preserved.</p>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Session source</h3></div>
+  <div class="grid-2">
+    <div class="field">
+      <label for="fsrSourceFile">Input session file</label>
+      <select id="fsrSourceFile" data-files-select data-files-filter=".ifc,.ifczip" data-allow-empty="1" data-empty-label="Select session IFC/IFCZIP"></select>
+      <div class="hint">Manual upload is disabled in this tool. Use Upload & Session first.</div>
+    </div>
+    <div class="field">
+      <label for="fsrOutputPrefix">Output name prefix</label>
+      <input id="fsrOutputPrefix" value="reduced" />
+    </div>
+  </div>
+  <div class="inline-actions" style="margin-top:10px;">
+    <button class="btn secondary" id="fsrRefreshFiles">Refresh files</button>
+    <button class="btn" id="fsrAnalyse">Analyse file</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Analysis summary</h3></div>
+  <div id="fsrAnalysisCards" class="grid-3"></div>
+  <pre id="fsrAnalysisJson" class="log-box">No analysis yet.</pre>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Reduction mode</h3></div>
+  <div class="grid-2">
+    <label class="toggle"><input type="radio" name="fsrMode" value="compress_only"><span><strong>Compress Only</strong>: Creates a smaller packaged copy without changing model content.</span></label>
+    <label class="toggle"><input type="radio" name="fsrMode" value="conservative_viewer_copy" checked><span><strong>Conservative Viewer Copy</strong>: Applies limited reductions suitable for coordination / viewing copies.</span></label>
+    <label class="toggle"><input type="radio" name="fsrMode" value="aggressive_viewer_copy"><span><strong>Aggressive Viewer Copy</strong>: Removes more metadata and may affect downstream use. For read-only copies only.</span></label>
+    <label class="toggle"><input type="radio" name="fsrMode" value="split_by_storey"><span><strong>Split by Storey</strong>: Reduces scope by creating separate files per storey.</span></label>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Advanced options</h3></div>
+  <div class="grid-2">
+    <label class="toggle"><input id="fsrExportZip" type="checkbox" checked /><span>Export IFCZIP</span></label>
+    <label class="toggle"><input id="fsrRemoveSite" type="checkbox" /><span>Remove site representation</span></label>
+    <label class="toggle"><input id="fsrPurgeData" type="checkbox" disabled /><span>Purge data (aggressive only)</span></label>
+    <label class="toggle"><input id="fsrOptimise" type="checkbox" disabled /><span>Optimise model (aggressive only)</span></label>
+    <label class="toggle"><input id="fsrSplitStorey" type="checkbox" /><span>Split by storey workflow</span></label>
+    <label class="toggle"><input id="fsrKeepOriginal" type="checkbox" checked disabled /><span>Keep original session file untouched (always true)</span></label>
+  </div>
+</div>
+
+<div class="card fsr-warning">
+  <div class="section-title"><h3>Risk and warnings</h3></div>
+  <p id="fsrRiskText" class="helper">Best for safest filesize reduction: Compress Only (.ifczip).</p>
+  <label class="toggle"><input id="fsrWarningAck" type="checkbox" /><span>I understand destructive/aggressive options may remove data and are for read-only copies.</span></label>
+  <p class="helper"><strong>Optimise warning:</strong> “This option uses IfcPatch Optimise. The IfcOpenShell documentation warns that it is very, very slow and should be treated as a lossy optimisation for read-only copies.”</p>
+</div>
+
+<div class="card">
+  <button class="btn" id="fsrRun">Run reduction</button>
+  <div id="fsrStatus" class="status muted" style="margin-top:10px;">Analyse a file to begin.</div>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Results</h3></div>
+  <div id="fsrResultCards" class="grid-3"></div>
+  <div id="fsrResultFiles" class="file-list"></div>
+  <pre id="fsrSummaryJson" class="log-box">No result yet.</pre>
+  <pre id="fsrLog" class="log-box">No backend log yet.</pre>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/ifc_file_size_reducer.js"></script>
+{% endblock %}
