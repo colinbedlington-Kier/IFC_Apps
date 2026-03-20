@@ -87,6 +87,29 @@ COBie QC is now a built-in IFC Toolkit page available at **/tools/cobieqc** (no 
 - `GET /api/tools/cobieqc/jobs/{job_id}/download` — download generated report HTML.
 - `GET /api/tools/cobieqc/health` — Java/runtime diagnostic.
 
+## IFC File Size Reducer
+
+The **IFC File Size Reducer** tool is available at **/tools/reduce-file-size** and only uses existing session files (no direct upload in-tool).
+
+### Modes
+
+- **Compress Only**: “Creates a smaller packaged copy without changing model content.”
+- **Conservative Viewer Copy**: “Applies limited reductions suitable for coordination / viewing copies.”
+- **Aggressive Viewer Copy**: “Removes more metadata and may affect downstream use. For read-only copies only.”
+- **Split by Storey**: “Reduces scope by creating separate files per storey.”
+
+### Endpoints
+
+- `POST /api/ifc-tools/reduce-file-size/analyse`
+- `POST /api/ifc-tools/reduce-file-size/run`
+
+### Limitations and warnings
+
+- `Optimise` is treated as expert-only and disabled by default; it is lossy and documented as very slow.
+- `PurgeData` is destructive and intended for stripped-down viewer copies.
+- IFCZIP is usually the safest first option when the goal is transfer/storage reduction only.
+- Split-by-storey depends on available IfcPatch recipe support in the runtime.
+
 ## Running locally
 
 ```bash

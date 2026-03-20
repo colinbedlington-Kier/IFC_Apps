@@ -54,6 +54,11 @@ from cobieqc_service.security import validate_upload
 from ifc_qa_service import REGISTRY as IFC_QA_V2_REGISTRY
 from ifc_qa_service import default_config_from_dir, start_job as start_ifc_qa_v2_job
 from backend.ifc_jobs import create_job as create_ifc_job, get_job as get_ifc_job, update_job as update_ifc_job
+from backend.ifc_file_size_reducer import (
+    IfcFileSizeReducerError,
+    analyze_ifc_file,
+    run_reduction as run_ifc_size_reduction,
+)
 from backend.ifc_move_rotate import TransformRequest, transform_ifc_file
 from backend.project_tables import get_tables_for_project_slug
 
@@ -4870,6 +4875,11 @@ def ifc_move_rotate_page(request: Request):
     return templates.TemplateResponse("ifc_move_rotate.html", {"request": request, "active": "ifc-move-rotate"})
 
 
+@app.get("/tools/reduce-file-size", response_class=HTMLResponse)
+def reduce_file_size_page(request: Request):
+    return templates.TemplateResponse("ifc_file_size_reducer.html", {"request": request, "active": "reduce-file-size"})
+
+
 @app.post("/api/session")
 def create_session(payload: Dict[str, Any] = Body(default=None)):
     SESSION_STORE.cleanup_stale()
@@ -4903,6 +4913,47 @@ def list_files(session_id: str):
                 "modified": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
             })
     return {"files": files}
+
+
+@app.post("/api/ifc-tools/reduce-file-size/analyse")
+def api_reduce_file_size_analyse(payload: Dict[str, Any] = Body(...)):
+    session_id = payload.get("session_id")
+    source_file = payload.get("source_file")
+    if not session_id or not source_file:
+        raise HTTPException(status_code=400, detail="session_id and source_file are required")
+    root = Path(SESSION_STORE.ensure(str(session_id)))
+    source_path = root / sanitize_filename(os.path.basename(str(source_file)))
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Selected source file not found")
+    if not source_path.name.lower().endswith((".ifc", ".ifczip")):
+        raise HTTPException(status_code=400, detail="Input must be .ifc or .ifczip")
+    try:
+        return {"status": "ok", "analysis": analyze_ifc_file(source_path)}
+    except IfcFileSizeReducerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
+
+
+@app.post("/api/ifc-tools/reduce-file-size/run")
+def api_reduce_file_size_run(payload: Dict[str, Any] = Body(...)):
+    session_id = payload.get("session_id")
+    source_file = payload.get("source_file")
+    if not session_id or not source_file:
+        raise HTTPException(status_code=400, detail="session_id and source_file are required")
+    root = Path(SESSION_STORE.ensure(str(session_id)))
+    try:
+        result = run_ifc_size_reduction(root, sanitize_filename(os.path.basename(str(source_file))), payload)
+        return {"status": "ok", "result": result}
+    except IfcFileSizeReducerError as exc:
+        detail = str(exc)
+        try:
+            parsed = json.loads(detail)
+            raise HTTPException(status_code=400, detail=parsed) from exc
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail=detail) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Reduction failed: {exc}") from exc
 
 
 @app.get("/api/tools/cobieqc/health")

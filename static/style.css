@@ -446,6 +446,18 @@ nav {
   align-items: center;
 }
 
+.stat-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.02);
+}
+
+.stat-label { color: var(--muted); font-size: 12px; }
+.stat-value { margin-top: 4px; font-size: 18px; font-weight: 600; }
+
+.fsr-warning { border-left: 4px solid #c08b2c; }
+
 .upload-progress {
   margin-top: 12px;
   padding: 10px 12px;
