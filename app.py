@@ -48,7 +48,7 @@ from cobieqc_service.jobs import (
     STATUS_RUNNING,
     CobieQcJobStore,
 )
-from cobieqc_service.runner import run_cobieqc
+from cobieqc_service.runner import resolve_cobieqc_jar, run_cobieqc
 from cobieqc_service.security import sanitize_filename as sanitize_upload_filename
 from cobieqc_service.security import validate_upload
 from ifc_qa_service import REGISTRY as IFC_QA_V2_REGISTRY
@@ -4958,13 +4958,24 @@ def api_reduce_file_size_run(payload: Dict[str, Any] = Body(...)):
 
 @app.get("/api/tools/cobieqc/health")
 def cobieqc_health():
+    jar_path, attempted_paths = resolve_cobieqc_jar()
     try:
         proc = subprocess.run(["java", "-version"], capture_output=True, text=True, check=False, timeout=10)
     except Exception as exc:
-        return {"ok": False, "java_available": False, "detail": str(exc)}
+        return {
+            "ok": False,
+            "java_available": False,
+            "jar_available": bool(jar_path),
+            "jar_path": str(jar_path) if jar_path else None,
+            "attempted_jar_paths": [str(p) for p in attempted_paths],
+            "detail": str(exc),
+        }
     return {
-        "ok": proc.returncode == 0,
+        "ok": proc.returncode == 0 and bool(jar_path),
         "java_available": proc.returncode == 0,
+        "jar_available": bool(jar_path),
+        "jar_path": str(jar_path) if jar_path else None,
+        "attempted_jar_paths": [str(p) for p in attempted_paths],
         "detail": (proc.stderr or proc.stdout or "").strip(),
     }
 
