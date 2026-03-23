@@ -49,7 +49,7 @@ from cobieqc_service.jobs import (
     CobieQcJobStore,
 )
 from cobieqc_service.bootstrap import bootstrap_cobieqc_assets
-from cobieqc_service.runner import get_cobieqc_runtime_diagnostics, run_cobieqc
+from cobieqc_service.runner import get_cobieqc_runtime_diagnostics, resolve_java_executable, run_cobieqc
 from cobieqc_service.security import sanitize_filename as sanitize_upload_filename
 from cobieqc_service.security import validate_upload
 from ifc_qa_service import REGISTRY as IFC_QA_V2_REGISTRY
@@ -4755,9 +4755,10 @@ def startup_cleanup() -> None:
     if runtime_diag["resource_error"]:
         APP_LOGGER.warning("COBieQC startup resource issue: %s", runtime_diag["resource_error"])
     try:
-        proc = subprocess.run(["java", "-version"], capture_output=True, text=True, check=False, timeout=10)
+        java_bin = resolve_java_executable()
+        proc = subprocess.run([java_bin, "-version"], capture_output=True, text=True, check=False, timeout=10)
         if proc.returncode == 0:
-            APP_LOGGER.info("COBieQC Java runtime detected")
+            APP_LOGGER.info("COBieQC Java runtime detected at %s", java_bin)
         else:
             APP_LOGGER.warning("COBieQC Java runtime check failed: %s", (proc.stderr or proc.stdout or "").strip())
     except Exception as exc:
@@ -4975,12 +4976,14 @@ def api_reduce_file_size_run(payload: Dict[str, Any] = Body(...)):
 @app.get("/api/tools/cobieqc/health")
 def cobieqc_health():
     runtime_diag = get_cobieqc_runtime_diagnostics()
+    java_bin = resolve_java_executable()
     try:
-        proc = subprocess.run(["java", "-version"], capture_output=True, text=True, check=False, timeout=10)
+        proc = subprocess.run([java_bin, "-version"], capture_output=True, text=True, check=False, timeout=10)
     except Exception as exc:
         return {
             "ok": False,
             "java_available": False,
+            "java_path": java_bin,
             "jar_available": runtime_diag["jar_exists"],
             "jar_path": runtime_diag["jar_path"],
             "resource_dir_available": runtime_diag["resource_dir_exists"],
@@ -4996,6 +4999,7 @@ def cobieqc_health():
     return {
         "ok": proc.returncode == 0 and runtime_diag["jar_exists"] and runtime_diag["resource_dir_exists"],
         "java_available": proc.returncode == 0,
+        "java_path": java_bin,
         "jar_available": runtime_diag["jar_exists"],
         "jar_path": runtime_diag["jar_path"],
         "resource_dir_available": runtime_diag["resource_dir_exists"],
