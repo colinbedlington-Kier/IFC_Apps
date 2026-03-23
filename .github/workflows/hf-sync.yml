@@ -38,9 +38,15 @@ jobs:
 
           api = HfApi(token=token)
           folder = Path('.')
+          # Runtime COBieQC assets are managed directly on HF persistent storage (/data/cobieqc)
+          # and must never be modified by source sync.
           ignore = [
               '.git', '.github', 'sessions', '__pycache__', '.pytest_cache',
-              '*.pyc', '*.pyo', '*.pyd', '*.swp', '*.bak', '*.tmp'
+              '*.pyc', '*.pyo', '*.pyd', '*.swp', '*.bak', '*.tmp',
+              'app/CobieQcReporter/**',
+              'app/COBieQC/**',
+              'vendor/cobieqc/**',
+              'data/cobieqc/**',
           ]
           api.upload_folder(
               repo_id=space,
@@ -49,5 +55,6 @@ jobs:
               path_in_repo=".",
               allow_patterns=None,
               ignore_patterns=ignore,
+              delete_patterns=None,
           )
           PY

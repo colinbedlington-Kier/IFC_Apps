@@ -1,86 +1,203 @@
+import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
+LOGGER = logging.getLogger("ifc_app.cobieqc")
 DEFAULT_TIMEOUT_SECONDS = int(os.getenv("COBIEQC_TIMEOUT_SECONDS", "300"))
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+def _dedupe_paths(paths: List[Path]) -> List[Path]:
+    deduped: List[Path] = []
+    seen = set()
+    for item in paths:
+        key = str(item)
+        if key in seen:
+            continue
+        deduped.append(item)
+        seen.add(key)
+    return deduped
 
 
-def _candidate_jar_paths() -> List[Path]:
+def cobieqc_jar_candidates() -> List[Path]:
     configured = os.getenv("COBIEQC_JAR_PATH", "").strip()
     candidates: List[Path] = []
     if configured:
         candidates.append(Path(configured).expanduser())
 
-    # Legacy in-repo path
-    candidates.append(_repo_root() / "COBieQC" / "CobieQcReporter" / "CobieQcReporter.jar")
-
-    # Common container-mounted paths
-    candidates.append(Path("/app/COBieQC/CobieQcReporter/CobieQcReporter.jar"))
-    candidates.append(Path("/app/CobieQcReporter/CobieQcReporter.jar"))
-    candidates.append(Path("/opt/COBieQC/CobieQcReporter/CobieQcReporter.jar"))
-
-    # Preserve order but remove duplicates
-    deduped: List[Path] = []
-    seen = set()
-    for c in candidates:
-        key = str(c)
-        if key not in seen:
-            deduped.append(c)
-            seen.add(key)
-    return deduped
+    candidates.extend(
+        [
+            Path("/data/cobieqc/CobieQcReporter.jar"),
+            Path("/app/CobieQcReporter/CobieQcReporter.jar"),
+            Path("/app/COBieQC/CobieQcReporter/CobieQcReporter.jar"),
+            Path("/opt/COBieQC/CobieQcReporter/CobieQcReporter.jar"),
+        ]
+    )
+    return _dedupe_paths(candidates)
 
 
-def resolve_cobieqc_jar() -> Tuple[Optional[Path], List[Path]]:
-    attempted = _candidate_jar_paths()
-    for candidate in attempted:
-        resolved = candidate.resolve()
-        if resolved.exists() and resolved.is_file():
-            return resolved, attempted
-    return None, attempted
+def cobieqc_resource_candidates() -> List[Path]:
+    configured = os.getenv("COBIEQC_RESOURCE_DIR", "").strip()
+    candidates: List[Path] = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+
+    candidates.extend(
+        [
+            Path("/data/cobieqc/xsl_xml"),
+            Path("/app/CobieQcReporter/xsl_xml"),
+            Path("/app/COBieQC/CobieQcReporter/xsl_xml"),
+            Path("/opt/COBieQC/CobieQcReporter/xsl_xml"),
+        ]
+    )
+    return _dedupe_paths(candidates)
+
+
+def _resolve_existing_path(candidates: List[Path], expected_kind: str, label: str) -> Path:
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        exists = resolved.exists()
+        LOGGER.info("COBieQC %s check: %s (exists=%s)", label, resolved, exists)
+        if not exists:
+            continue
+        if expected_kind == "file" and resolved.is_file():
+            LOGGER.info("COBieQC %s selected: %s", label, resolved)
+            return resolved
+        if expected_kind == "dir" and resolved.is_dir():
+            LOGGER.info("COBieQC %s selected: %s", label, resolved)
+            return resolved
+        LOGGER.info("COBieQC %s skipped (wrong type): %s", label, resolved)
+
+    attempted = ", ".join(str(p.expanduser()) for p in candidates)
+    raise RuntimeError(f"COBieQC {label} not found. Checked: {attempted}")
+
+
+def resolve_cobieqc_jar_path() -> Path:
+    return _resolve_existing_path(cobieqc_jar_candidates(), expected_kind="file", label="JAR path")
+
+
+def resolve_cobieqc_resource_dir() -> Path:
+    return _resolve_existing_path(cobieqc_resource_candidates(), expected_kind="dir", label="resource dir")
+
+
+def _resource_file_counts(resource_dir: Path) -> Dict[str, int]:
+    xml_count = sum(1 for p in resource_dir.rglob("*.xml") if p.is_file())
+    xsl_count = sum(1 for p in resource_dir.rglob("*.xsl") if p.is_file())
+    return {"xml_count": xml_count, "xsl_count": xsl_count}
+
+
+def get_cobieqc_runtime_diagnostics() -> Dict[str, object]:
+    jar_candidates = [str(p) for p in cobieqc_jar_candidates()]
+    resource_candidates = [str(p) for p in cobieqc_resource_candidates()]
+
+    jar_path: Optional[Path] = None
+    resource_dir: Optional[Path] = None
+    jar_error = ""
+    resource_error = ""
+
+    try:
+        jar_path = resolve_cobieqc_jar_path()
+    except RuntimeError as exc:
+        jar_error = str(exc)
+
+    try:
+        resource_dir = resolve_cobieqc_resource_dir()
+    except RuntimeError as exc:
+        resource_error = str(exc)
+
+    counts = {"xml_count": 0, "xsl_count": 0}
+    if resource_dir:
+        counts = _resource_file_counts(resource_dir)
+
+    return {
+        "jar_exists": bool(jar_path),
+        "resource_dir_exists": bool(resource_dir),
+        "jar_path": str(jar_path) if jar_path else None,
+        "resource_dir": str(resource_dir) if resource_dir else None,
+        "jar_candidates": jar_candidates,
+        "resource_candidates": resource_candidates,
+        "xml_count": counts["xml_count"],
+        "xsl_count": counts["xsl_count"],
+        "jar_error": jar_error,
+        "resource_error": resource_error,
+    }
+
+
+def _build_cobieqc_cmd(
+    jar_path: Path,
+    input_xlsx_path: Path,
+    output_html_path: Path,
+    stage: str,
+    resource_dir: Path,
+    include_resource_arg: bool,
+) -> List[str]:
+    cmd = [
+        "java",
+        "-jar",
+        str(jar_path),
+        "-i",
+        str(input_xlsx_path),
+        "-o",
+        str(output_html_path),
+        "-p",
+        stage,
+    ]
+
+    if include_resource_arg:
+        resource_flag = os.getenv("COBIEQC_RESOURCE_ARG", "--resource-dir").strip() or "--resource-dir"
+        cmd.extend([resource_flag, str(resource_dir)])
+
+    return cmd
+
+
+def _java_executable() -> str:
+    explicit = os.getenv("JAVA_BIN", "").strip()
+    if explicit:
+        return explicit
+    return shutil.which("java") or "java"
 
 
 def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, object]:
     if stage not in {"D", "C"}:
         return {"ok": False, "stdout": "", "stderr": "", "error": "Stage must be D or C."}
 
-    jar_path, attempted_paths = resolve_cobieqc_jar()
+    input_path = Path(input_xlsx_path).resolve()
     output_filename = "report.html"
-    output_html_path = Path(job_dir) / output_filename
+    output_html_path = Path(job_dir).resolve() / output_filename
 
-    if not jar_path:
-        attempted_text = ", ".join(str(p) for p in attempted_paths)
+    try:
+        jar_path = resolve_cobieqc_jar_path()
+        resource_dir = resolve_cobieqc_resource_dir()
+    except RuntimeError as exc:
         return {
             "ok": False,
             "stdout": "",
             "stderr": "",
-            "error": (
-                "COBieQC reporter JAR not found. Set COBIEQC_JAR_PATH or place "
-                f"CobieQcReporter.jar in one of: {attempted_text}"
-            ),
+            "error": str(exc),
         }
 
-    jar_dir = jar_path.parent
+    java_bin = _java_executable()
+    include_resource_arg = os.getenv("COBIEQC_PASS_RESOURCE_ARG", "1").lower() not in {"0", "false", "no"}
+    cmd = _build_cobieqc_cmd(jar_path, input_path, output_html_path, stage, resource_dir, include_resource_arg)
 
-    cmd = [
-        "java",
-        "-jar",
-        str(jar_path),
-        "-i",
-        str(Path(input_xlsx_path).resolve()),
-        "-o",
-        str(output_html_path.resolve()),
-        "-p",
+    LOGGER.info(
+        "COBieQC execution context stage=%s java=%s jar=%s resources=%s input=%s cwd=%s cmd=%s",
         stage,
-    ]
+        java_bin,
+        jar_path,
+        resource_dir,
+        input_path,
+        resource_dir.parent,
+        cmd,
+    )
+    cmd[0] = java_bin
+
     try:
         proc = subprocess.run(
             cmd,
-            cwd=str(jar_dir),
+            cwd=str(resource_dir.parent),
             capture_output=True,
             text=True,
             timeout=DEFAULT_TIMEOUT_SECONDS,
@@ -103,6 +220,25 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
 
     stdout = proc.stdout or ""
     stderr = proc.stderr or ""
+
+    if proc.returncode != 0 and include_resource_arg:
+        combined = f"{stdout}\n{stderr}".lower()
+        if any(token in combined for token in ["unrecognized option", "unknown option", "invalid option"]):
+            LOGGER.warning("COBieQC reporter rejected resource arg; retrying without explicit resource arg")
+            retry_cmd = _build_cobieqc_cmd(jar_path, input_path, output_html_path, stage, resource_dir, False)
+            retry_cmd[0] = java_bin
+            LOGGER.info("COBieQC retry command=%s", retry_cmd)
+            proc = subprocess.run(
+                retry_cmd,
+                cwd=str(resource_dir.parent),
+                capture_output=True,
+                text=True,
+                timeout=DEFAULT_TIMEOUT_SECONDS,
+                check=False,
+            )
+            stdout = proc.stdout or ""
+            stderr = proc.stderr or ""
+
     if proc.returncode != 0:
         return {
             "ok": False,
@@ -127,3 +263,12 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
         "output_filename": output_filename,
         "error": "",
     }
+
+
+# Backward-compatible alias for any existing imports.
+def resolve_cobieqc_jar() -> tuple[Optional[Path], List[Path]]:
+    candidates = cobieqc_jar_candidates()
+    try:
+        return resolve_cobieqc_jar_path(), candidates
+    except RuntimeError:
+        return None, candidates
