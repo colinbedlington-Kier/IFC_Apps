@@ -48,7 +48,8 @@ from cobieqc_service.jobs import (
     STATUS_RUNNING,
     CobieQcJobStore,
 )
-from cobieqc_service.runner import resolve_cobieqc_jar, run_cobieqc
+from cobieqc_service.bootstrap import bootstrap_cobieqc_assets
+from cobieqc_service.runner import get_cobieqc_runtime_diagnostics, run_cobieqc
 from cobieqc_service.security import sanitize_filename as sanitize_upload_filename
 from cobieqc_service.security import validate_upload
 from ifc_qa_service import REGISTRY as IFC_QA_V2_REGISTRY
@@ -4738,6 +4739,21 @@ def _run_cobieqc_job(job_id: str) -> None:
 def startup_cleanup() -> None:
     SESSION_STORE.cleanup_stale()
     COBIEQC_JOB_STORE.cleanup_old_jobs()
+    bootstrap_cobieqc_assets()
+    runtime_diag = get_cobieqc_runtime_diagnostics()
+    APP_LOGGER.info(
+        "COBieQC startup diagnostics jar_exists=%s resource_dir_exists=%s jar_path=%s resource_dir=%s xml_count=%s xsl_count=%s",
+        runtime_diag["jar_exists"],
+        runtime_diag["resource_dir_exists"],
+        runtime_diag["jar_path"],
+        runtime_diag["resource_dir"],
+        runtime_diag["xml_count"],
+        runtime_diag["xsl_count"],
+    )
+    if runtime_diag["jar_error"]:
+        APP_LOGGER.warning("COBieQC startup JAR issue: %s", runtime_diag["jar_error"])
+    if runtime_diag["resource_error"]:
+        APP_LOGGER.warning("COBieQC startup resource issue: %s", runtime_diag["resource_error"])
     try:
         proc = subprocess.run(["java", "-version"], capture_output=True, text=True, check=False, timeout=10)
         if proc.returncode == 0:
@@ -4958,24 +4974,38 @@ def api_reduce_file_size_run(payload: Dict[str, Any] = Body(...)):
 
 @app.get("/api/tools/cobieqc/health")
 def cobieqc_health():
-    jar_path, attempted_paths = resolve_cobieqc_jar()
+    runtime_diag = get_cobieqc_runtime_diagnostics()
     try:
         proc = subprocess.run(["java", "-version"], capture_output=True, text=True, check=False, timeout=10)
     except Exception as exc:
         return {
             "ok": False,
             "java_available": False,
-            "jar_available": bool(jar_path),
-            "jar_path": str(jar_path) if jar_path else None,
-            "attempted_jar_paths": [str(p) for p in attempted_paths],
+            "jar_available": runtime_diag["jar_exists"],
+            "jar_path": runtime_diag["jar_path"],
+            "resource_dir_available": runtime_diag["resource_dir_exists"],
+            "resource_dir": runtime_diag["resource_dir"],
+            "xml_count": runtime_diag["xml_count"],
+            "xsl_count": runtime_diag["xsl_count"],
+            "attempted_jar_paths": runtime_diag["jar_candidates"],
+            "attempted_resource_dirs": runtime_diag["resource_candidates"],
+            "jar_error": runtime_diag["jar_error"],
+            "resource_error": runtime_diag["resource_error"],
             "detail": str(exc),
         }
     return {
-        "ok": proc.returncode == 0 and bool(jar_path),
+        "ok": proc.returncode == 0 and runtime_diag["jar_exists"] and runtime_diag["resource_dir_exists"],
         "java_available": proc.returncode == 0,
-        "jar_available": bool(jar_path),
-        "jar_path": str(jar_path) if jar_path else None,
-        "attempted_jar_paths": [str(p) for p in attempted_paths],
+        "jar_available": runtime_diag["jar_exists"],
+        "jar_path": runtime_diag["jar_path"],
+        "resource_dir_available": runtime_diag["resource_dir_exists"],
+        "resource_dir": runtime_diag["resource_dir"],
+        "xml_count": runtime_diag["xml_count"],
+        "xsl_count": runtime_diag["xsl_count"],
+        "attempted_jar_paths": runtime_diag["jar_candidates"],
+        "attempted_resource_dirs": runtime_diag["resource_candidates"],
+        "jar_error": runtime_diag["jar_error"],
+        "resource_error": runtime_diag["resource_error"],
         "detail": (proc.stderr or proc.stdout or "").strip(),
     }
 

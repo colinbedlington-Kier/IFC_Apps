@@ -1,0 +1,16 @@
+# Python cache/artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# COBieQC runtime/vendor assets are intentionally not source-controlled.
+/vendor/cobieqc/
+/data/cobieqc/
+/app/CobieQcReporter/
+/app/COBieQC/
+
+# Scoped binary/runtime patterns for COBieQC bundles only.
+/vendor/cobieqc/**/*.jar
+/data/cobieqc/**/*.jar
+/vendor/cobieqc/**/xsl_xml/
+/data/cobieqc/**/xsl_xml/

@@ -9,4 +9,4 @@ RUN apt-get update \
 COPY . .
 
 EXPOSE 7860
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["bash", "-lc", "scripts/bootstrap_cobieqc.sh && uvicorn app:app --host 0.0.0.0 --port 7860"]
