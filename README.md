@@ -77,10 +77,15 @@ COBie QC is now a built-in IFC Toolkit page available at **/tools/cobieqc** (no 
 
 - Java runtime is required because the backend executes `CobieQcReporter.jar`.
 - The reporter JAR is not committed in this repository. Configure its location with `COBIEQC_JAR_PATH`, or place it in one of:
+  - `vendor/cobieqc/CobieQcReporter.jar` (repo-local)
   - `COBieQC/CobieQcReporter/CobieQcReporter.jar` (legacy in-repo path)
   - `/app/COBieQC/CobieQcReporter/CobieQcReporter.jar`
   - `/app/CobieQcReporter/CobieQcReporter.jar`
   - `/opt/COBieQC/CobieQcReporter/CobieQcReporter.jar`
+- COBieQC resources (`xsl_xml`) are discovered from similar repo-local and absolute paths, or from `COBIEQC_RESOURCE_DIR`.
+- Optional bootstrap source overrides are available:
+  - `COBIEQC_JAR_SOURCE=/path/to/CobieQcReporter.jar`
+  - `COBIEQC_RESOURCE_SOURCE=/path/to/xsl_xml`
 - The Docker image installs `default-jre-headless`.
 - Reports are generated into per-job data directories (`$IFC_APP_DATA_DIR/jobs/cobieqc/<job_id>/`) instead of `COBieQC/reports/`.
 

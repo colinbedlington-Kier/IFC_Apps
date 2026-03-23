@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 
 LOGGER = logging.getLogger("ifc_app.cobieqc")
 DEFAULT_TIMEOUT_SECONDS = int(os.getenv("COBIEQC_TIMEOUT_SECONDS", "300"))
+APP_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _dedupe_paths(paths: List[Path]) -> List[Path]:
@@ -29,6 +30,12 @@ def cobieqc_jar_candidates() -> List[Path]:
 
     candidates.extend(
         [
+            APP_ROOT / "vendor" / "cobieqc" / "CobieQcReporter.jar",
+            APP_ROOT / "CobieQcReporter" / "CobieQcReporter.jar",
+            APP_ROOT / "COBieQC" / "CobieQcReporter" / "CobieQcReporter.jar",
+            Path.cwd() / "vendor" / "cobieqc" / "CobieQcReporter.jar",
+            Path.cwd() / "CobieQcReporter" / "CobieQcReporter.jar",
+            Path.cwd() / "COBieQC" / "CobieQcReporter" / "CobieQcReporter.jar",
             Path("/app/data/cobieqc/CobieQcReporter.jar"),
             Path("/app/data/CobieQcReporter.jar"),
             Path("/data/cobieqc/CobieQcReporter.jar"),
@@ -48,6 +55,12 @@ def cobieqc_resource_candidates() -> List[Path]:
 
     candidates.extend(
         [
+            APP_ROOT / "vendor" / "cobieqc" / "xsl_xml",
+            APP_ROOT / "CobieQcReporter" / "xsl_xml",
+            APP_ROOT / "COBieQC" / "CobieQcReporter" / "xsl_xml",
+            Path.cwd() / "vendor" / "cobieqc" / "xsl_xml",
+            Path.cwd() / "CobieQcReporter" / "xsl_xml",
+            Path.cwd() / "COBieQC" / "CobieQcReporter" / "xsl_xml",
             Path("/app/data/xsl_xml"),
             Path("/data/xsl_xml"),
             Path("/data/cobieqc/xsl_xml"),
@@ -198,7 +211,31 @@ def _java_executable() -> str:
     explicit = os.getenv("JAVA_BIN", "").strip()
     if explicit:
         return explicit
+
+    java_home = os.getenv("JAVA_HOME", "").strip()
+    candidates: List[Path] = []
+    if java_home:
+        candidates.append(Path(java_home).expanduser() / "bin" / "java")
+
+    candidates.extend(
+        [
+            Path("/usr/bin/java"),
+            Path("/usr/local/bin/java"),
+            Path("/usr/lib/jvm/default-java/bin/java"),
+            Path("/usr/lib/jvm/java-17-openjdk-amd64/bin/java"),
+            Path("/usr/lib/jvm/java-11-openjdk-amd64/bin/java"),
+        ]
+    )
+    for candidate in candidates:
+        expanded = candidate.expanduser()
+        if expanded.exists() and expanded.is_file():
+            return str(expanded)
+
     return shutil.which("java") or "java"
+
+
+def resolve_java_executable() -> str:
+    return _java_executable()
 
 
 def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, object]:
