@@ -4755,16 +4755,28 @@ def startup_cleanup() -> None:
     if runtime_diag["resource_error"]:
         APP_LOGGER.warning("COBieQC startup resource issue: %s", runtime_diag["resource_error"])
     APP_LOGGER.info("COBieQC Java diagnostics PATH=%s", os.getenv("PATH", ""))
-    which_java = shutil.which("java")
-    APP_LOGGER.info("COBieQC Java diagnostics which java=%s", which_java or "<not found>")
+    which_java = subprocess.run(
+        ["which", "java"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    which_java_output = (which_java.stdout or which_java.stderr or "").strip()
+    APP_LOGGER.info(
+        "COBieQC Java diagnostics which java (rc=%s): %s",
+        which_java.returncode,
+        which_java_output or "<not found>",
+    )
     try:
         java_bin = resolve_java_executable()
         proc = subprocess.run([java_bin, "-version"], capture_output=True, text=True, check=False, timeout=10)
+        java_version_output = (proc.stderr or proc.stdout or "").strip()
+        APP_LOGGER.info("COBieQC Java diagnostics java -version (rc=%s): %s", proc.returncode, java_version_output)
         if proc.returncode == 0:
             APP_LOGGER.info("COBieQC Java runtime detected at %s", java_bin)
-            APP_LOGGER.info("COBieQC Java diagnostics java -version: %s", (proc.stderr or proc.stdout or "").strip())
         else:
-            APP_LOGGER.warning("COBieQC Java runtime check failed: %s", (proc.stderr or proc.stdout or "").strip())
+            APP_LOGGER.warning("COBieQC Java runtime check failed: %s", java_version_output)
             APP_LOGGER.warning("COBieQC Java runtime unavailable")
     except Exception as exc:
         APP_LOGGER.warning("COBieQC Java runtime unavailable: %s", exc)
