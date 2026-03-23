@@ -86,7 +86,8 @@ COBie QC is now a built-in IFC Toolkit page available at **/tools/cobieqc** (no 
 - Optional bootstrap source overrides are available:
   - `COBIEQC_JAR_SOURCE=/path/to/CobieQcReporter.jar`
   - `COBIEQC_RESOURCE_SOURCE=/path/to/xsl_xml`
-- The Docker image installs `default-jre-headless`.
+- Hugging Face non-Docker Spaces install Java from `packages.txt` (`openjdk-17-jre-headless`).
+- The repo `Dockerfile` (used for local/containerized runs) also installs `openjdk-17-jre-headless`.
 - Reports are generated into per-job data directories (`$IFC_APP_DATA_DIR/jobs/cobieqc/<job_id>/`) instead of `COBieQC/reports/`.
 
 ### API endpoints

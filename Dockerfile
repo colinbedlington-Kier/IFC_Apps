@@ -1,4 +1,6 @@
 FROM python:3.11-slim
+# Note: Hugging Face Spaces deploy for this repo is configured as `sdk: gradio` (non-Docker),
+# so `packages.txt` is the authoritative place for system packages in HF runtime.
 
 WORKDIR /app
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
