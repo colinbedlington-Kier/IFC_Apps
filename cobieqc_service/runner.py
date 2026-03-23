@@ -29,6 +29,8 @@ def cobieqc_jar_candidates() -> List[Path]:
 
     candidates.extend(
         [
+            Path("/app/data/cobieqc/CobieQcReporter.jar"),
+            Path("/app/data/CobieQcReporter.jar"),
             Path("/data/cobieqc/CobieQcReporter.jar"),
             Path("/app/CobieQcReporter/CobieQcReporter.jar"),
             Path("/app/COBieQC/CobieQcReporter/CobieQcReporter.jar"),
@@ -46,6 +48,8 @@ def cobieqc_resource_candidates() -> List[Path]:
 
     candidates.extend(
         [
+            Path("/app/data/xsl_xml"),
+            Path("/data/xsl_xml"),
             Path("/data/cobieqc/xsl_xml"),
             Path("/app/CobieQcReporter/xsl_xml"),
             Path("/app/COBieQC/CobieQcReporter/xsl_xml"),
@@ -71,6 +75,13 @@ def _resolve_existing_path(candidates: List[Path], expected_kind: str, label: st
         LOGGER.info("COBieQC %s skipped (wrong type): %s", label, resolved)
 
     attempted = ", ".join(str(p.expanduser()) for p in candidates)
+    if label == "JAR path":
+        cwd = Path.cwd()
+        app_data_exists = Path("/app/data").exists()
+        raise RuntimeError(
+            f"COBieQC JAR path not found. Checked: {attempted}. "
+            f"Current working directory: {cwd}. /app/data exists: {app_data_exists}."
+        )
     raise RuntimeError(f"COBieQC {label} not found. Checked: {attempted}")
 
 
@@ -86,6 +97,37 @@ def _resource_file_counts(resource_dir: Path) -> Dict[str, int]:
     xml_count = sum(1 for p in resource_dir.rglob("*.xml") if p.is_file())
     xsl_count = sum(1 for p in resource_dir.rglob("*.xsl") if p.is_file())
     return {"xml_count": xml_count, "xsl_count": xsl_count}
+
+
+def _log_preflight_diagnostics(
+    jar_candidates: List[Path],
+    resource_candidates: List[Path],
+    resolved_resource_dir: Optional[Path] = None,
+) -> None:
+    cwd = Path.cwd()
+    LOGGER.info("COBieQC preflight cwd=%s", cwd)
+
+    for jar_candidate in jar_candidates:
+        candidate = jar_candidate.expanduser().resolve()
+        LOGGER.info("COBieQC preflight jar candidate: %s exists=%s", candidate, candidate.exists())
+
+    for resource_candidate in resource_candidates:
+        candidate = resource_candidate.expanduser().resolve()
+        LOGGER.info("COBieQC preflight resource candidate: %s exists=%s", candidate, candidate.exists())
+
+    app_data = Path("/app/data")
+    if app_data.exists() and app_data.is_dir():
+        children = sorted(child.name for child in app_data.iterdir())
+        LOGGER.info("COBieQC preflight /app/data children: %s", children)
+
+    if resolved_resource_dir and resolved_resource_dir.exists() and resolved_resource_dir.is_dir():
+        counts = _resource_file_counts(resolved_resource_dir)
+        LOGGER.info(
+            "COBieQC preflight resolved resource counts dir=%s xml_count=%s xsl_count=%s",
+            resolved_resource_dir,
+            counts["xml_count"],
+            counts["xsl_count"],
+        )
 
 
 def get_cobieqc_runtime_diagnostics() -> Dict[str, object]:
@@ -167,16 +209,22 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
     output_filename = "report.html"
     output_html_path = Path(job_dir).resolve() / output_filename
 
+    jar_candidates = cobieqc_jar_candidates()
+    resource_candidates = cobieqc_resource_candidates()
+
     try:
-        jar_path = resolve_cobieqc_jar_path()
-        resource_dir = resolve_cobieqc_resource_dir()
+        jar_path = _resolve_existing_path(jar_candidates, expected_kind="file", label="JAR path")
+        resource_dir = _resolve_existing_path(resource_candidates, expected_kind="dir", label="resource dir")
     except RuntimeError as exc:
+        _log_preflight_diagnostics(jar_candidates, resource_candidates)
         return {
             "ok": False,
             "stdout": "",
             "stderr": "",
             "error": str(exc),
         }
+
+    _log_preflight_diagnostics(jar_candidates, resource_candidates, resolved_resource_dir=resource_dir)
 
     java_bin = _java_executable()
     include_resource_arg = os.getenv("COBIEQC_PASS_RESOURCE_ARG", "1").lower() not in {"0", "false", "no"}
