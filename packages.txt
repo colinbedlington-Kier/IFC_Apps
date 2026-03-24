@@ -1,3 +1,1 @@
-# Hugging Face Spaces runtime for this repo is non-Docker (`sdk: gradio` in README front matter),
-# so system dependencies must be declared here.
-openjdk-17-jre-headless
+openjdk-21-jre-headless
