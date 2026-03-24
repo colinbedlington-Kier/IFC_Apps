@@ -10,6 +10,9 @@ DEFAULT_TIMEOUT_SECONDS = int(os.getenv("COBIEQC_TIMEOUT_SECONDS", "300"))
 APP_ROOT = Path(__file__).resolve().parents[1]
 COBIEQC_RUNNER_BUILD_MARKER = "2026-03-24-flags-short-form"
 COBIEQC_RUNNER_FLAG_MARKER = "flags=-i,-o,-p"
+COBIEQC_INPUT_ARG = "-i"
+COBIEQC_OUTPUT_ARG = "-o"
+COBIEQC_PHASE_ARG = "-p"
 
 LOGGER.info(
     "COBieQC runner version marker: %s build_marker=%s file=%s",
@@ -200,11 +203,11 @@ def _build_cobieqc_cmd(
         java_bin,
         "-jar",
         str(jar_path),
-        "-i_Input",
+        COBIEQC_INPUT_ARG,
         str(input_xlsx_path),
-        "-o_Output",
+        COBIEQC_OUTPUT_ARG,
         str(output_html_path),
-        "-p_Phase",
+        COBIEQC_PHASE_ARG,
         stage,
     ]
     return cmd
@@ -282,10 +285,11 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
         COBIEQC_RUNNER_BUILD_MARKER,
     )
     LOGGER.info(
-        "COBieQC final argv=%s runner_file=%s COBIEQC_RUNNER_BUILD_MARKER=%s",
+        "COBieQC final argv=%s runner_file=%s COBIEQC_RUNNER_BUILD_MARKER=%s flag_marker=%s",
         cmd,
         __file__,
         COBIEQC_RUNNER_BUILD_MARKER,
+        COBIEQC_RUNNER_FLAG_MARKER,
     )
 
     try:
@@ -342,7 +346,8 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
         jar_size = jar_path.stat().st_size if jar_exists else 0
         LOGGER.error(
             "COBieQC missing/empty output. cmd=%s input_exists=%s input_size=%s "
-            "output_exists=%s output_size=%s jar_exists=%s jar_size=%s",
+            "output_exists=%s output_size=%s jar_exists=%s jar_size=%s "
+            "runner_file=%s build_marker=%s flag_marker=%s",
             cmd,
             input_exists,
             input_size,
@@ -350,6 +355,9 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
             output_size,
             jar_exists,
             jar_size,
+            __file__,
+            COBIEQC_RUNNER_BUILD_MARKER,
+            COBIEQC_RUNNER_FLAG_MARKER,
         )
         return {
             "ok": False,
