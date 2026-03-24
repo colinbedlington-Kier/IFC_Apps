@@ -3,7 +3,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 LOGGER = logging.getLogger("ifc_app.cobieqc")
 DEFAULT_TIMEOUT_SECONDS = int(os.getenv("COBIEQC_TIMEOUT_SECONDS", "300"))
@@ -181,30 +181,81 @@ def get_cobieqc_runtime_diagnostics() -> Dict[str, object]:
 
 
 def _build_cobieqc_cmd(
+    java_bin: str,
     jar_path: Path,
     input_xlsx_path: Path,
     output_html_path: Path,
     stage: str,
-    resource_dir: Path,
-    include_resource_arg: bool,
+    extra_args: Optional[List[str]] = None,
 ) -> List[str]:
     cmd = [
-        "java",
+        java_bin,
         "-jar",
         str(jar_path),
-        "-i",
+        "-i_Input",
         str(input_xlsx_path),
-        "-o",
+        "-o_Output",
         str(output_html_path),
-        "-p",
+        "-p_Phase",
         stage,
     ]
 
-    if include_resource_arg:
-        resource_flag = os.getenv("COBIEQC_RESOURCE_ARG", "--resource-dir").strip() or "--resource-dir"
-        cmd.extend([resource_flag, str(resource_dir)])
+    if extra_args:
+        cmd.extend(extra_args)
 
     return cmd
+
+
+def _detect_jar_option_support(java_bin: str, jar_path: Path, option: str) -> Tuple[bool, str]:
+    try:
+        probe = subprocess.run(
+            [java_bin, "-jar", str(jar_path)],
+            capture_output=True,
+            text=True,
+            timeout=min(DEFAULT_TIMEOUT_SECONDS, 30),
+            check=False,
+        )
+    except FileNotFoundError:
+        return False, "java runtime not found for option support probe"
+    except subprocess.TimeoutExpired:
+        return False, "timed out probing jar cli options"
+
+    combined = f"{probe.stdout or ''}\n{probe.stderr or ''}".lower()
+    return option.lower() in combined, combined
+
+
+def _resolve_optional_cli_args(java_bin: str, jar_path: Path, resource_dir: Path) -> List[str]:
+    configured_resource_flag = os.getenv("COBIEQC_RESOURCE_ARG", "").strip()
+    configured_resource_dir = os.getenv("COBIEQC_RESOURCE_DIR", "").strip()
+    force_resource_arg = os.getenv("COBIEQC_FORCE_RESOURCE_ARG", "0").lower() in {"1", "true", "yes"}
+
+    if not configured_resource_flag and not configured_resource_dir:
+        return []
+
+    resource_flag = configured_resource_flag or "--resource-dir"
+    resource_path = configured_resource_dir or str(resource_dir)
+
+    if force_resource_arg:
+        LOGGER.warning(
+            "COBieQC forcing optional resource argument via COBIEQC_FORCE_RESOURCE_ARG=1: %s %s",
+            resource_flag,
+            resource_path,
+        )
+        return [resource_flag, resource_path]
+
+    supported, probe_output = _detect_jar_option_support(java_bin, jar_path, resource_flag)
+    if supported:
+        LOGGER.info("COBieQC optional resource argument supported by jar: %s", resource_flag)
+        return [resource_flag, resource_path]
+
+    LOGGER.warning(
+        "COBieQC optional resource argument configured but unsupported by jar; skipping. "
+        "flag=%s jar=%s probe_excerpt=%s",
+        resource_flag,
+        jar_path,
+        (probe_output[:400] + "...") if len(probe_output) > 400 else probe_output,
+    )
+    return []
 
 
 def _java_executable() -> str:
@@ -264,8 +315,8 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
     _log_preflight_diagnostics(jar_candidates, resource_candidates, resolved_resource_dir=resource_dir)
 
     java_bin = _java_executable()
-    include_resource_arg = os.getenv("COBIEQC_PASS_RESOURCE_ARG", "1").lower() not in {"0", "false", "no"}
-    cmd = _build_cobieqc_cmd(jar_path, input_path, output_html_path, stage, resource_dir, include_resource_arg)
+    extra_args = _resolve_optional_cli_args(java_bin, jar_path, resource_dir)
+    cmd = _build_cobieqc_cmd(java_bin, jar_path, input_path, output_html_path, stage, extra_args)
 
     LOGGER.info(
         "COBieQC execution context stage=%s java=%s jar=%s resources=%s input=%s cwd=%s cmd=%s",
@@ -277,7 +328,7 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
         resource_dir.parent,
         cmd,
     )
-    cmd[0] = java_bin
+    LOGGER.info("COBieQC final argv=%s", cmd)
 
     try:
         proc = subprocess.run(
@@ -305,39 +356,53 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
 
     stdout = proc.stdout or ""
     stderr = proc.stderr or ""
-
-    if proc.returncode != 0 and include_resource_arg:
-        combined = f"{stdout}\n{stderr}".lower()
-        if any(token in combined for token in ["unrecognized option", "unknown option", "invalid option"]):
-            LOGGER.warning("COBieQC reporter rejected resource arg; retrying without explicit resource arg")
-            retry_cmd = _build_cobieqc_cmd(jar_path, input_path, output_html_path, stage, resource_dir, False)
-            retry_cmd[0] = java_bin
-            LOGGER.info("COBieQC retry command=%s", retry_cmd)
-            proc = subprocess.run(
-                retry_cmd,
-                cwd=str(resource_dir.parent),
-                capture_output=True,
-                text=True,
-                timeout=DEFAULT_TIMEOUT_SECONDS,
-                check=False,
-            )
-            stdout = proc.stdout or ""
-            stderr = proc.stderr or ""
+    LOGGER.info(
+        "COBieQC process completed exit_code=%s stdout=%s stderr=%s",
+        proc.returncode,
+        stdout,
+        stderr,
+    )
 
     if proc.returncode != 0:
+        combined = f"{stdout}\n{stderr}".lower()
+        usage_hint = ""
+        if "usage:" in combined and "required" in combined:
+            usage_hint = " COBieQC CLI usage was printed; command arguments likely mismatched the jar version."
         return {
             "ok": False,
             "stdout": stdout,
             "stderr": stderr,
-            "error": f"COBieQC exited with code {proc.returncode}.",
+            "error": f"COBieQC exited with code {proc.returncode}.{usage_hint}",
         }
 
     if not output_html_path.exists() or output_html_path.stat().st_size <= 0:
+        output_exists = output_html_path.exists()
+        output_size = output_html_path.stat().st_size if output_exists else 0
+        input_exists = input_path.exists()
+        input_size = input_path.stat().st_size if input_exists else 0
+        jar_exists = jar_path.exists()
+        jar_size = jar_path.stat().st_size if jar_exists else 0
+        LOGGER.error(
+            "COBieQC missing/empty output. cmd=%s input_exists=%s input_size=%s "
+            "output_exists=%s output_size=%s jar_exists=%s jar_size=%s",
+            cmd,
+            input_exists,
+            input_size,
+            output_exists,
+            output_size,
+            jar_exists,
+            jar_size,
+        )
         return {
             "ok": False,
             "stdout": stdout,
             "stderr": stderr,
-            "error": "COBieQC did not produce a non-empty HTML report.",
+            "error": (
+                "COBieQC did not produce a non-empty HTML report. "
+                f"cmd={cmd} input_exists={input_exists} input_size={input_size} "
+                f"output_exists={output_exists} output_size={output_size} "
+                f"jar_exists={jar_exists} jar_size={jar_size}"
+            ),
         }
 
     return {
