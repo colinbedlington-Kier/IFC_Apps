@@ -3,7 +3,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 LOGGER = logging.getLogger("ifc_app.cobieqc")
 DEFAULT_TIMEOUT_SECONDS = int(os.getenv("COBIEQC_TIMEOUT_SECONDS", "300"))
@@ -200,11 +200,11 @@ def _build_cobieqc_cmd(
         java_bin,
         "-jar",
         str(jar_path),
-        "-i",
+        "-i_Input",
         str(input_xlsx_path),
-        "-o",
+        "-o_Output",
         str(output_html_path),
-        "-p",
+        "-p_Phase",
         stage,
     ]
     return cmd
