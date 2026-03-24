@@ -3,7 +3,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 LOGGER = logging.getLogger("ifc_app.cobieqc")
 DEFAULT_TIMEOUT_SECONDS = int(os.getenv("COBIEQC_TIMEOUT_SECONDS", "300"))
@@ -191,14 +191,66 @@ def _build_cobieqc_cmd(
         java_bin,
         "-jar",
         str(jar_path),
-        "-i",
+        "-i_Input",
         str(input_xlsx_path),
-        "-o",
+        "-o_Output",
         str(output_html_path),
-        "-p",
+        "-p_Phase",
         stage,
     ]
     return cmd
+
+
+def _detect_jar_option_support(java_bin: str, jar_path: Path, option: str) -> Tuple[bool, str]:
+    try:
+        probe = subprocess.run(
+            [java_bin, "-jar", str(jar_path)],
+            capture_output=True,
+            text=True,
+            timeout=min(DEFAULT_TIMEOUT_SECONDS, 30),
+            check=False,
+        )
+    except FileNotFoundError:
+        return False, "java runtime not found for option support probe"
+    except subprocess.TimeoutExpired:
+        return False, "timed out probing jar cli options"
+
+    combined = f"{probe.stdout or ''}\n{probe.stderr or ''}".lower()
+    return option.lower() in combined, combined
+
+
+def _resolve_optional_cli_args(java_bin: str, jar_path: Path, resource_dir: Path) -> List[str]:
+    configured_resource_flag = os.getenv("COBIEQC_RESOURCE_ARG", "").strip()
+    configured_resource_dir = os.getenv("COBIEQC_RESOURCE_DIR", "").strip()
+    force_resource_arg = os.getenv("COBIEQC_FORCE_RESOURCE_ARG", "0").lower() in {"1", "true", "yes"}
+
+    if not configured_resource_flag and not configured_resource_dir:
+        return []
+
+    resource_flag = configured_resource_flag or "--resource-dir"
+    resource_path = configured_resource_dir or str(resource_dir)
+
+    if force_resource_arg:
+        LOGGER.warning(
+            "COBieQC forcing optional resource argument via COBIEQC_FORCE_RESOURCE_ARG=1: %s %s",
+            resource_flag,
+            resource_path,
+        )
+        return [resource_flag, resource_path]
+
+    supported, probe_output = _detect_jar_option_support(java_bin, jar_path, resource_flag)
+    if supported:
+        LOGGER.info("COBieQC optional resource argument supported by jar: %s", resource_flag)
+        return [resource_flag, resource_path]
+
+    LOGGER.warning(
+        "COBieQC optional resource argument configured but unsupported by jar; skipping. "
+        "flag=%s jar=%s probe_excerpt=%s",
+        resource_flag,
+        jar_path,
+        (probe_output[:400] + "...") if len(probe_output) > 400 else probe_output,
+    )
+    return []
 
 
 def _java_executable() -> str:
