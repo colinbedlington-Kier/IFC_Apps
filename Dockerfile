@@ -13,7 +13,7 @@ RUN apt-get update && \
     if [ -s /tmp/apt-packages-clean.txt ]; then \
         xargs -r -a /tmp/apt-packages-clean.txt apt-get install -y --no-install-recommends; \
     fi && \
-    apt-get install -y --no-install-recommends curl ca-certificates gnupg && \
+    apt-get install -y --no-install-recommends curl ca-certificates gnupg bash && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/* && \
@@ -22,6 +22,8 @@ RUN apt-get update && \
 
 COPY . .
 
+RUN chmod +x /app/scripts/bootstrap_cobieqc.sh
+
 EXPOSE 7860
 
-CMD ["bash", "-lc", "scripts/bootstrap_cobieqc.sh && uvicorn app:app --host 0.0.0.0 --port 7860"]
+CMD ["bash", "-lc", "/app/scripts/bootstrap_cobieqc.sh && uvicorn app:app --host 0.0.0.0 --port 7860"]
