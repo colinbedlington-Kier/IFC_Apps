@@ -49,6 +49,7 @@ from cobieqc_service.jobs import (
     CobieQcJobStore,
 )
 from cobieqc_service.bootstrap import bootstrap_cobieqc_assets
+from cobieqc_service import runner as cobieqc_runner_module
 from cobieqc_service.runner import get_cobieqc_runtime_diagnostics, resolve_java_executable, run_cobieqc
 from cobieqc_service.security import sanitize_filename as sanitize_upload_filename
 from cobieqc_service.security import validate_upload
@@ -87,6 +88,26 @@ UTC = datetime.timezone.utc
 
 def utc_now() -> datetime.datetime:
     return datetime.datetime.now(UTC)
+
+
+def _resolve_git_commit_sha() -> str:
+    env_sha = os.getenv("GIT_COMMIT_SHA", "").strip()
+    if env_sha:
+        return env_sha
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+            cwd=str(Path(__file__).resolve().parent),
+        )
+        if proc.returncode == 0:
+            return (proc.stdout or "").strip() or "unknown"
+    except Exception:
+        pass
+    return "unknown"
 
 
 # ----------------------------------------------------------------------------
@@ -4755,6 +4776,19 @@ def startup_cleanup() -> None:
     if runtime_diag["resource_error"]:
         APP_LOGGER.warning("COBieQC startup resource issue: %s", runtime_diag["resource_error"])
     APP_LOGGER.info("COBieQC Java diagnostics PATH=%s", os.getenv("PATH", ""))
+    app_file = str(Path(__file__).resolve())
+    runner_file = str(Path(cobieqc_runner_module.__file__).resolve())
+    git_sha = _resolve_git_commit_sha()
+    cobieqc_marker = getattr(cobieqc_runner_module, "COBIEQC_RUNNER_BUILD_MARKER", "unknown")
+    cobieqc_flags = getattr(cobieqc_runner_module, "COBIEQC_RUNNER_FLAG_MARKER", "unknown")
+    APP_LOGGER.info(
+        "Runtime build diagnostics git_sha=%s app_file=%s cobieqc_runner_file=%s cobieqc_marker=%s cobieqc_flags=%s",
+        git_sha,
+        app_file,
+        runner_file,
+        cobieqc_marker,
+        cobieqc_flags,
+    )
     which_java = subprocess.run(
         ["which", "java"],
         capture_output=True,
@@ -5033,6 +5067,18 @@ def cobieqc_health():
         "jar_error": runtime_diag["jar_error"],
         "resource_error": runtime_diag["resource_error"],
         "detail": (proc.stderr or proc.stdout or "").strip(),
+    }
+
+
+@app.get("/api/runtime/build-info")
+def runtime_build_info():
+    return {
+        "git_sha": _resolve_git_commit_sha(),
+        "app_file": str(Path(__file__).resolve()),
+        "cobieqc_runner_file": str(Path(cobieqc_runner_module.__file__).resolve()),
+        "cobieqc_build_marker": getattr(cobieqc_runner_module, "COBIEQC_RUNNER_BUILD_MARKER", "unknown"),
+        "cobieqc_flag_marker": getattr(cobieqc_runner_module, "COBIEQC_RUNNER_FLAG_MARKER", "unknown"),
+        "timestamp": utc_now().isoformat() + "Z",
     }
 
 
