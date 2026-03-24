@@ -222,7 +222,7 @@ def _java_executable() -> str:
             Path("/usr/bin/java"),
             Path("/usr/local/bin/java"),
             Path("/usr/lib/jvm/default-java/bin/java"),
-            Path("/usr/lib/jvm/java-17-openjdk-amd64/bin/java"),
+            Path("/usr/lib/jvm/java-21-openjdk-amd64/bin/java"),
             Path("/usr/lib/jvm/java-11-openjdk-amd64/bin/java"),
         ]
     )
