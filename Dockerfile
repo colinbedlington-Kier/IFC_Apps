@@ -1,6 +1,7 @@
 FROM python:3.13-slim
 
 WORKDIR /app
+ARG BUILD_MARKER=dev
 
 ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
@@ -21,6 +22,7 @@ RUN apt-get update && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+RUN echo "BUILD_MARKER=${BUILD_MARKER}"
 
 RUN chmod +x /app/scripts/bootstrap_cobieqc.sh
 
