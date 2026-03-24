@@ -186,7 +186,6 @@ def _build_cobieqc_cmd(
     input_xlsx_path: Path,
     output_html_path: Path,
     stage: str,
-    extra_args: Optional[List[str]] = None,
 ) -> List[str]:
     cmd = [
         java_bin,
@@ -199,10 +198,6 @@ def _build_cobieqc_cmd(
         "-p_Phase",
         stage,
     ]
-
-    if extra_args:
-        cmd.extend(extra_args)
-
     return cmd
 
 
@@ -315,8 +310,7 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
     _log_preflight_diagnostics(jar_candidates, resource_candidates, resolved_resource_dir=resource_dir)
 
     java_bin = _java_executable()
-    extra_args = _resolve_optional_cli_args(java_bin, jar_path, resource_dir)
-    cmd = _build_cobieqc_cmd(java_bin, jar_path, input_path, output_html_path, stage, extra_args)
+    cmd = _build_cobieqc_cmd(java_bin, jar_path, input_path, output_html_path, stage)
 
     LOGGER.info(
         "COBieQC execution context stage=%s java=%s jar=%s resources=%s input=%s cwd=%s cmd=%s",
