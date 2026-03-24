@@ -24,6 +24,7 @@ const state = {
   },
   processingCount: 0,
   updatedIfcName: null,
+  excelPreview: null,
 };
 
 
@@ -475,7 +476,33 @@ async function runCleaner() {
 async function extractExcel() {
   const file = el("excelIfc")?.value;
   if (!file) return alert("Select an IFC file.");
-  const payload = { ifc_file: file };
+  const includeSheets = [];
+  const sheetMap = [
+    ["sheetProjectData", "ProjectData"],
+    ["sheetElements", "Elements"],
+    ["sheetProperties", "Properties"],
+    ["sheetCobie", "COBieMapping"],
+    ["sheetUniclassPr", "Uniclass_Pr"],
+    ["sheetUniclassSs", "Uniclass_Ss"],
+    ["sheetUniclassEf", "Uniclass_EF"],
+  ];
+  sheetMap.forEach(([id, name]) => {
+    if (el(id)?.checked) includeSheets.push(name);
+  });
+  const selectedClasses = getSelectedMultiple(el("excelEntityClassFilter") || { selectedOptions: [] });
+  const selectedPsets = getSelectedMultiple(el("excelPsetFilter") || { selectedOptions: [] });
+  const payload = {
+    ifc_file: file,
+    plan: {
+      include_sheets: includeSheets,
+      entity_classes: selectedClasses,
+      property_sets: selectedPsets,
+      cobie_pairs: (state.excelPreview?.cobie_pairs || []).map((item) => `${item.pset}.${item.property}`),
+      include_type_properties: !!el("excelIncludeTypeProps")?.checked,
+      include_spatial_fields: !!el("excelIncludeSpatial")?.checked,
+      include_classifications: !!el("excelIncludeClassifications")?.checked,
+    },
+  };
   return withProcessing("Extracting Excel workbook…", async () => {
     const resp = await fetch(`/api/session/${state.sessionId}/excel/extract`, {
       method: "POST",
@@ -484,10 +511,71 @@ async function extractExcel() {
     });
     const data = await resp.json();
     if (data.excel) {
-      el("excelStatus").textContent = `Excel ready: ${data.excel.name}`;
+      const timings = data.timings_ms ? JSON.stringify(data.timings_ms) : "";
+      const counts = data.counts ? JSON.stringify(data.counts) : "";
+      el("excelStatus").textContent = `Excel ready: ${data.excel.name}${timings ? ` | timings(ms): ${timings}` : ""}${counts ? ` | counts: ${counts}` : ""}`;
       await refreshFiles();
     } else {
       el("excelStatus").textContent = JSON.stringify(data);
+    }
+  });
+}
+
+function renderExcelPreview(preview) {
+  state.excelPreview = preview;
+  const classSelect = el("excelEntityClassFilter");
+  const psetSelect = el("excelPsetFilter");
+  if (classSelect) {
+    classSelect.innerHTML = "";
+    (preview.available_classes || []).forEach((item) => {
+      const opt = document.createElement("option");
+      opt.value = item.name;
+      opt.textContent = `${item.name} (${item.count})`;
+      opt.selected = true;
+      classSelect.appendChild(opt);
+    });
+  }
+  if (psetSelect) {
+    psetSelect.innerHTML = "";
+    (preview.available_psets || []).forEach((item) => {
+      const opt = document.createElement("option");
+      opt.value = item.name;
+      opt.textContent = `${item.name} (${item.count})`;
+      psetSelect.appendChild(opt);
+    });
+  }
+  if (el("excelPreviewStatus")) {
+    el("excelPreviewStatus").textContent = `Scan complete for ${preview.schema || "unknown schema"} model. Elements: ${preview.model_info?.elements || 0}.`;
+  }
+  if (el("excelPreviewMeta")) {
+    const summary = {
+      schema: preview.schema,
+      model_info: preview.model_info,
+      timings_ms: preview.timings_ms,
+      class_count: (preview.available_classes || []).length,
+      pset_count: (preview.available_psets || []).length,
+      quantity_set_count: Object.keys(preview.quantities_by_set || {}).length,
+      classification_systems: preview.classification_systems || [],
+    };
+    el("excelPreviewMeta").textContent = JSON.stringify(summary, null, 2);
+  }
+}
+
+async function scanExcelModel() {
+  const file = el("excelIfc")?.value;
+  if (!file) return alert("Select an IFC file.");
+  return withProcessing("Scanning IFC model for preview…", async () => {
+    const resp = await fetch(`/api/session/${state.sessionId}/excel/scan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ifc_file: file }),
+    });
+    const data = await resp.json();
+    if (data.preview) {
+      renderExcelPreview(data.preview);
+    } else {
+      el("excelPreviewStatus").textContent = "Scan failed.";
+      el("excelPreviewMeta").textContent = JSON.stringify(data, null, 2);
     }
   });
 }
@@ -1500,6 +1588,8 @@ function wireEvents() {
 
   const extractBtn = el("extractExcel");
   if (extractBtn) extractBtn.addEventListener("click", extractExcel);
+  const scanExcelBtn = el("scanExcelModel");
+  if (scanExcelBtn) scanExcelBtn.addEventListener("click", scanExcelModel);
 
   const applyExcelBtn = el("applyExcel");
   if (applyExcelBtn) applyExcelBtn.addEventListener("click", applyExcel);
