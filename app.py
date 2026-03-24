@@ -4803,87 +4803,92 @@ templates = Jinja2Templates(directory="templates")
 
 @app.get("/", response_class=HTMLResponse)
 def upload_page(request: Request):
-    return templates.TemplateResponse("upload.html", {"request": request, "active": "upload"})
+    return templates.TemplateResponse(request=request, name="upload.html", context={"request": request, "active": "upload"})
 
 
 @app.get("/cleaner", response_class=HTMLResponse)
 def cleaner_page(request: Request):
-    return templates.TemplateResponse("cleaner.html", {"request": request, "active": "cleaner"})
+    return templates.TemplateResponse(request=request, name="cleaner.html", context={"request": request, "active": "cleaner"})
 
 
 @app.get("/excel", response_class=HTMLResponse)
 def excel_page(request: Request):
-    return templates.TemplateResponse("excel.html", {"request": request, "active": "excel"})
+    return templates.TemplateResponse(request=request, name="excel.html", context={"request": request, "active": "excel"})
 
 
 @app.get("/ifc-qa/extractor", response_class=HTMLResponse)
 def ifc_qa_extractor_page(request: Request):
     return templates.TemplateResponse(
-        "ifc_qa.html",
-        {"request": request, "active": "ifc-qa", "qa_page": "extractor"},
+        request=request,
+        name="ifc_qa.html",
+        context={"request": request, "active": "ifc-qa", "qa_page": "extractor"},
     )
 
 
 @app.get("/ifc-qa/dashboard", response_class=HTMLResponse)
 def ifc_qa_dashboard_page(request: Request):
     return templates.TemplateResponse(
-        "ifc_qa.html",
-        {"request": request, "active": "ifc-qa", "qa_page": "dashboard"},
+        request=request,
+        name="ifc_qa.html",
+        context={"request": request, "active": "ifc-qa", "qa_page": "dashboard"},
     )
 
 
 @app.get("/ifc-qa/config", response_class=HTMLResponse)
 def ifc_qa_config_page(request: Request):
     return templates.TemplateResponse(
-        "ifc_qa.html",
-        {"request": request, "active": "ifc-qa", "qa_page": "config"},
+        request=request,
+        name="ifc_qa.html",
+        context={"request": request, "active": "ifc-qa", "qa_page": "config"},
     )
 
 
 @app.get("/data-extractor", response_class=HTMLResponse)
 def data_extractor_page(request: Request):
     return templates.TemplateResponse(
-        "data_extractor.html",
-        {"request": request, "active": "data-extractor", "regex_defaults": load_default_config()},
+        request=request,
+        name="data_extractor.html",
+        context={"request": request, "active": "data-extractor", "regex_defaults": load_default_config()},
     )
 
 
 @app.get("/storeys", response_class=HTMLResponse)
 def storeys_page(request: Request):
-    return templates.TemplateResponse("storeys.html", {"request": request, "active": "storeys"})
+    return templates.TemplateResponse(request=request, name="storeys.html", context={"request": request, "active": "storeys"})
 
 
 @app.get("/proxy", response_class=HTMLResponse)
 def proxy_page(request: Request):
-    return templates.TemplateResponse("proxy.html", {"request": request, "active": "proxy"})
+    return templates.TemplateResponse(request=request, name="proxy.html", context={"request": request, "active": "proxy"})
 
 
 @app.get("/presentation-layer", response_class=HTMLResponse)
 def presentation_layer_page(request: Request):
     return templates.TemplateResponse(
-        "presentation_layer.html",
-        {"request": request, "active": "presentation-layer"},
+        request=request,
+        name="presentation_layer.html",
+        context={"request": request, "active": "presentation-layer"},
     )
 
 
 @app.get("/step2ifc", response_class=HTMLResponse)
 def step2ifc_page(request: Request):
-    return templates.TemplateResponse("step2ifc.html", {"request": request, "active": "step2ifc"})
+    return templates.TemplateResponse(request=request, name="step2ifc.html", context={"request": request, "active": "step2ifc"})
 
 
 @app.get("/tools/cobieqc", response_class=HTMLResponse)
 def cobieqc_page(request: Request):
-    return templates.TemplateResponse("cobieqc.html", {"request": request, "active": "cobieqc"})
+    return templates.TemplateResponse(request=request, name="cobieqc.html", context={"request": request, "active": "cobieqc"})
 
 
 @app.get("/files", response_class=HTMLResponse)
 def files_page(request: Request):
-    return templates.TemplateResponse("files.html", {"request": request, "active": "files"})
+    return templates.TemplateResponse(request=request, name="files.html", context={"request": request, "active": "files"})
 
 
 @app.get("/levels", response_class=HTMLResponse)
 def levels_page(request: Request):
-    return templates.TemplateResponse("levels.html", {"request": request, "active": "levels"})
+    return templates.TemplateResponse(request=request, name="levels.html", context={"request": request, "active": "levels"})
 
 
 @app.get("/viewer", response_class=HTMLResponse)
@@ -4896,22 +4901,22 @@ def viewer_page(request: Request):
 
 @app.get("/model-checking", response_class=HTMLResponse)
 def model_checking_page(request: Request):
-    return templates.TemplateResponse("model_checking.html", {"request": request, "active": "model-checking"})
+    return templates.TemplateResponse(request=request, name="model_checking.html", context={"request": request, "active": "model-checking"})
 
 
 @app.get("/admin/mappings", response_class=HTMLResponse)
 def admin_mappings_page(request: Request):
-    return templates.TemplateResponse("mappings.html", {"request": request, "active": "mappings"})
+    return templates.TemplateResponse(request=request, name="mappings.html", context={"request": request, "active": "mappings"})
 
 
 @app.get("/wip/ifc-move-rotate", response_class=HTMLResponse)
 def ifc_move_rotate_page(request: Request):
-    return templates.TemplateResponse("ifc_move_rotate.html", {"request": request, "active": "ifc-move-rotate"})
+    return templates.TemplateResponse(request=request, name="ifc_move_rotate.html", context={"request": request, "active": "ifc-move-rotate"})
 
 
 @app.get("/tools/reduce-file-size", response_class=HTMLResponse)
 def reduce_file_size_page(request: Request):
-    return templates.TemplateResponse("ifc_file_size_reducer.html", {"request": request, "active": "reduce-file-size"})
+    return templates.TemplateResponse(request=request, name="ifc_file_size_reducer.html", context={"request": request, "active": "reduce-file-size"})
 
 
 @app.post("/api/session")
