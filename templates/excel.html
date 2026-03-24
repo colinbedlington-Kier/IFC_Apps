@@ -11,7 +11,33 @@
       <label for="excelIfc">IFC for extract</label>
       <div class="inline excel-inline-controls">
         <select id="excelIfc" data-files-select></select>
+        <button class="btn secondary" id="scanExcelModel" type="button">Scan model</button>
         <button class="btn" id="extractExcel">Extract to Excel</button>
+      </div>
+      <div class="excel-download-box">
+        <label>Extraction scope</label>
+        <div class="inline excel-update-options">
+          <label><input type="checkbox" id="sheetProjectData" checked /> ProjectData</label>
+          <label><input type="checkbox" id="sheetElements" checked /> Elements</label>
+          <label><input type="checkbox" id="sheetProperties" checked /> Properties</label>
+          <label><input type="checkbox" id="sheetCobie" checked /> COBieMapping</label>
+          <label><input type="checkbox" id="sheetUniclassPr" checked /> Uniclass_Pr</label>
+          <label><input type="checkbox" id="sheetUniclassSs" checked /> Uniclass_Ss</label>
+          <label><input type="checkbox" id="sheetUniclassEf" checked /> Uniclass_EF</label>
+        </div>
+        <div class="inline excel-update-options">
+          <label><input type="checkbox" id="excelIncludeTypeProps" checked /> Include type properties</label>
+          <label><input type="checkbox" id="excelIncludeSpatial" checked /> Include spatial/container fields</label>
+          <label><input type="checkbox" id="excelIncludeClassifications" checked /> Include classifications</label>
+        </div>
+      </div>
+      <div class="excel-download-box">
+        <label for="excelEntityClassFilter">Entity classes to include (preview-driven)</label>
+        <select id="excelEntityClassFilter" multiple size="7"></select>
+      </div>
+      <div class="excel-download-box">
+        <label for="excelPsetFilter">Property sets to include in Properties sheet</label>
+        <select id="excelPsetFilter" multiple size="7"></select>
       </div>
       <div class="excel-download-box">
         <label for="excelFileUpdate">Excel workbook</label>
@@ -44,6 +70,8 @@
   <div class="excel-bottom-actions">
     <button class="btn hidden" id="downloadUpdatedIfc" type="button">Download updated IFC</button>
   </div>
+  <div class="status muted" id="excelPreviewStatus">Scan an IFC model to preview classes, psets, and quantities before extraction.</div>
+  <pre class="status muted" id="excelPreviewMeta"></pre>
   <div class="status" id="excelStatus">Select IFC and Excel files to start.</div>
 </div>
 {% endblock %}

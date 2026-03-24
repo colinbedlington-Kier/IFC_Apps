@@ -16,8 +16,9 @@ import time
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import ifcopenshell
 import ifcopenshell.api
@@ -181,6 +182,7 @@ STEP2IFC_JOBS: Dict[str, Dict[str, Any]] = {}
 DATA_EXTRACT_JOBS: Dict[str, Dict[str, Any]] = {}
 IFC_QA_JOBS: Dict[str, Dict[str, Any]] = {}
 COBIEQC_JOB_STORE = CobieQcJobStore()
+EXCEL_SCAN_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 # ----------------------------------------------------------------------------
@@ -821,27 +823,220 @@ def parse_required_pairs(raw):
     return pairs
 
 
-def get_pset_value(elem, pset_name, prop_name):
-    psets = ifcopenshell.util.element.get_psets(elem)
-    if pset_name in psets and prop_name in psets[pset_name]:
-        return psets[pset_name][prop_name]
-
-    type_obj = None
-    for rel in elem.IsDefinedBy or []:
-        if rel.is_a("IfcRelDefinesByType"):
-            type_obj = rel.RelatingType
-            break
-    if type_obj is not None:
-        type_psets = ifcopenshell.util.element.get_psets(type_obj)
-        if pset_name in type_psets and prop_name in type_psets[pset_name]:
-            return type_psets[pset_name][prop_name]
-    return ""
+@dataclass
+class ExtractionPlan:
+    include_sheets: Set[str] = field(default_factory=lambda: {"ProjectData", "Elements", "Properties", "COBieMapping", "Uniclass_Pr", "Uniclass_Ss", "Uniclass_EF"})
+    entity_classes: Set[str] = field(default_factory=set)
+    property_sets: Set[str] = field(default_factory=set)
+    quantity_sets: Set[str] = field(default_factory=set)
+    cobie_pairs: Set[Tuple[str, str]] = field(default_factory=set)
+    include_type_properties: bool = True
+    include_spatial_fields: bool = True
+    include_classifications: bool = True
 
 
-def extract_to_excel(ifc_path: str, output_path: str) -> str:
+class StageTimer:
+    def __init__(self) -> None:
+        self._marks: Dict[str, float] = {}
+        self.timings: Dict[str, float] = {}
+
+    def start(self, name: str) -> None:
+        self._marks[name] = time.perf_counter()
+
+    def stop(self, name: str) -> None:
+        start = self._marks.pop(name, None)
+        if start is not None:
+            self.timings[name] = round((time.perf_counter() - start) * 1000.0, 2)
+
+    def as_payload(self) -> Dict[str, float]:
+        return dict(self.timings)
+
+
+def _extract_uniclass(entity: Any, target_name: str, is_ifc2x3: bool) -> Tuple[str, str]:
+    for rel in getattr(entity, "HasAssociations", []) or []:
+        if not rel.is_a("IfcRelAssociatesClassification"):
+            continue
+        classification_ref = rel.RelatingClassification
+        if not classification_ref or not classification_ref.is_a("IfcClassificationReference"):
+            continue
+        if is_ifc2x3:
+            if getattr(classification_ref, "Name", "") == target_name:
+                return getattr(classification_ref, "ItemReference", ""), getattr(classification_ref, "Name", "")
+            continue
+        src = getattr(classification_ref, "ReferencedSource", None)
+        if src and getattr(src, "Name", "") == target_name:
+            return getattr(classification_ref, "ItemReference", ""), getattr(classification_ref, "Name", "")
+    return "", ""
+
+
+def _parse_excel_extraction_plan(payload: Optional[Dict[str, Any]]) -> ExtractionPlan:
+    if not payload:
+        return ExtractionPlan()
+    include_sheets = set(payload.get("include_sheets") or []) or ExtractionPlan().include_sheets
+    entity_classes = set(payload.get("entity_classes") or [])
+    property_sets = set(payload.get("property_sets") or [])
+    quantity_sets = set(payload.get("quantity_sets") or [])
+    include_type_properties = bool(payload.get("include_type_properties", True))
+    include_spatial_fields = bool(payload.get("include_spatial_fields", True))
+    include_classifications = bool(payload.get("include_classifications", True))
+    raw_pairs = payload.get("cobie_pairs") or []
+    cobie_pairs: Set[Tuple[str, str]] = set()
+    for item in raw_pairs:
+        if isinstance(item, str) and "." in item:
+            pset, prop = item.split(".", 1)
+            if pset and prop:
+                cobie_pairs.add((pset.strip(), prop.strip()))
+        elif isinstance(item, dict):
+            pset = (item.get("pset") or "").strip()
+            prop = (item.get("property") or "").strip()
+            if pset and prop:
+                cobie_pairs.add((pset, prop))
+    return ExtractionPlan(
+        include_sheets=include_sheets,
+        entity_classes=entity_classes,
+        property_sets=property_sets,
+        quantity_sets=quantity_sets,
+        cobie_pairs=cobie_pairs,
+        include_type_properties=include_type_properties,
+        include_spatial_fields=include_spatial_fields,
+        include_classifications=include_classifications,
+    )
+
+
+def scan_model_for_excel_preview(ifc_path: str, timer: Optional[StageTimer] = None) -> Dict[str, Any]:
+    timer = timer or StageTimer()
+    timer.start("model_load")
     ifc = ifcopenshell.open(ifc_path)
+    timer.stop("model_load")
 
-    def _spatial_context(elem):
+    timer.start("entity_index")
+    elements = list(ifc.by_type("IfcElement"))
+    type_cache: Dict[int, Any] = {}
+    pset_names: Dict[str, int] = {}
+    quantity_names: Dict[str, Dict[str, int]] = {}
+    property_names_by_pset: Dict[str, Dict[str, int]] = {}
+    class_counts: Dict[str, int] = {}
+    classification_names: Dict[str, int] = {}
+    classification_targets = {
+        "Uniclass Pr Products",
+        "Uniclass Ss Systems",
+        "Uniclass EF Elements Functions",
+        "Uniclass En Entities",
+    }
+    cobie_dynamic_pairs: Set[Tuple[str, str]] = set()
+    for elem in elements:
+        class_name = elem.is_a()
+        class_counts[class_name] = class_counts.get(class_name, 0) + 1
+
+        elem_id = elem.id()
+        type_obj = type_cache.get(elem_id)
+        if type_obj is None:
+            type_obj = ifcopenshell.util.element.get_type(elem)
+            type_cache[elem_id] = type_obj
+
+        psets_elem = _safe_get_psets(elem)
+        add_pset = psets_elem.get("Additional_Pset_GeneralCommon", {})
+        cobie_dynamic_pairs.update(parse_required_pairs(add_pset.get("RequiredForCOBie", "")))
+        cobie_dynamic_pairs.update(parse_required_pairs(add_pset.get("RequiredForCOBieComponent", "")))
+
+        for pset_name, values in psets_elem.items():
+            pset_names[pset_name] = pset_names.get(pset_name, 0) + 1
+            property_names_by_pset.setdefault(pset_name, {})
+            for prop_name in values.keys():
+                property_names_by_pset[pset_name][prop_name] = property_names_by_pset[pset_name].get(prop_name, 0) + 1
+
+        if type_obj:
+            type_psets = _safe_get_psets(type_obj)
+            add_pset_t = type_psets.get("Additional_Pset_GeneralCommon", {})
+            cobie_dynamic_pairs.update(parse_required_pairs(add_pset_t.get("RequiredForCOBie", "")))
+            cobie_dynamic_pairs.update(parse_required_pairs(add_pset_t.get("RequiredForCOBieComponent", "")))
+
+        for rel in getattr(elem, "IsDefinedBy", []) or []:
+            if not rel.is_a("IfcRelDefinesByProperties"):
+                continue
+            qset = rel.RelatingPropertyDefinition
+            if not qset or not qset.is_a("IfcElementQuantity"):
+                continue
+            q_name = getattr(qset, "Name", "") or ""
+            if not q_name:
+                continue
+            quantity_names.setdefault(q_name, {})
+            for qty in getattr(qset, "Quantities", []) or []:
+                q_prop = getattr(qty, "Name", "") or ""
+                if q_prop:
+                    quantity_names[q_name][q_prop] = quantity_names[q_name].get(q_prop, 0) + 1
+
+        for rel in getattr(elem, "HasAssociations", []) or []:
+            if not rel.is_a("IfcRelAssociatesClassification"):
+                continue
+            class_ref = rel.RelatingClassification
+            if class_ref and class_ref.is_a("IfcClassificationReference"):
+                src = getattr(class_ref, "ReferencedSource", None)
+                c_name = (getattr(src, "Name", "") or getattr(class_ref, "Name", "") or "").strip()
+                if c_name:
+                    classification_names[c_name] = classification_names.get(c_name, 0) + 1
+    timer.stop("entity_index")
+
+    timer.start("spatial_summary")
+    storeys = len(ifc.by_type("IfcBuildingStorey"))
+    spaces = len(ifc.by_type("IfcSpace"))
+    buildings = len(ifc.by_type("IfcBuilding"))
+    sites = len(ifc.by_type("IfcSite"))
+    timer.stop("spatial_summary")
+
+    mapping_pairs: List[Tuple[str, str]] = []
+    if COBIE_MAPPING:
+        for pset, info in COBIE_MAPPING.items():
+            for pname, _ in info["props"]:
+                mapping_pairs.append((pset, pname))
+    all_cobie_pairs = mapping_pairs + sorted(cobie_dynamic_pairs - set(mapping_pairs))
+
+    return {
+        "schema": ifc.schema,
+        "model_info": {
+            "projects": len(ifc.by_type("IfcProject")),
+            "sites": sites,
+            "buildings": buildings,
+            "storeys": storeys,
+            "spaces": spaces,
+            "elements": len(elements),
+        },
+        "available_classes": [{"name": name, "count": count} for name, count in sorted(class_counts.items(), key=lambda x: (-x[1], x[0]))],
+        "available_psets": [{"name": name, "count": count} for name, count in sorted(pset_names.items(), key=lambda x: (-x[1], x[0]))],
+        "properties_by_pset": {name: sorted(props.keys()) for name, props in sorted(property_names_by_pset.items())},
+        "quantities_by_set": {name: sorted(props.keys()) for name, props in sorted(quantity_names.items())},
+        "classification_systems": [{"name": name, "count": count, "is_uniclass_target": name in classification_targets} for name, count in sorted(classification_names.items(), key=lambda x: (-x[1], x[0]))],
+        "cobie_pairs": [{"pset": pset, "property": prop} for pset, prop in all_cobie_pairs],
+        "default_include_sheets": sorted(list(ExtractionPlan().include_sheets)),
+        "timings_ms": timer.as_payload(),
+    }
+
+
+def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[ExtractionPlan] = None) -> Dict[str, Any]:
+    plan = plan or ExtractionPlan()
+    timer = StageTimer()
+    timer.start("model_load")
+    ifc = ifcopenshell.open(ifc_path)
+    timer.stop("model_load")
+
+    timer.start("entity_index")
+    all_elements = list(ifc.by_type("IfcElement"))
+    elements = [e for e in all_elements if not plan.entity_classes or e.is_a() in plan.entity_classes]
+    type_by_elem_id: Dict[int, Any] = {}
+    psets_cache: Dict[int, Dict[str, Dict[str, Any]]] = {}
+    type_psets_cache: Dict[int, Dict[str, Dict[str, Any]]] = {}
+    spatial_cache: Dict[int, Tuple[str, str, str, str]] = {}
+
+    def _element_type_obj(elem: Any) -> Any:
+        elem_id = elem.id()
+        if elem_id not in type_by_elem_id:
+            type_by_elem_id[elem_id] = ifcopenshell.util.element.get_type(elem)
+        return type_by_elem_id[elem_id]
+
+    def _spatial_context(elem: Any) -> Tuple[str, str, str, str]:
+        elem_id = elem.id()
+        if elem_id in spatial_cache:
+            return spatial_cache[elem_id]
         container = ifcopenshell.util.element.get_container(elem)
         space = storey = building = site = None
         current = container
@@ -855,209 +1050,165 @@ def extract_to_excel(ifc_path: str, output_path: str) -> str:
             elif current.is_a("IfcSite"):
                 site = site or getattr(current, "Name", "")
             current = ifcopenshell.util.element.get_container(current)
-        return space or "", storey or "", building or "", site or ""
+        spatial_cache[elem_id] = (space or "", storey or "", building or "", site or "")
+        return spatial_cache[elem_id]
 
-    def _element_type_obj(elem):
-        for rel in elem.IsDefinedBy or []:
-            if rel.is_a("IfcRelDefinesByType"):
-                return rel.RelatingType
-        return None
+    def _resolved_psets(elem: Any) -> Dict[str, Dict[str, Any]]:
+        elem_id = elem.id()
+        if elem_id not in psets_cache:
+            psets_cache[elem_id] = _safe_get_psets(elem)
+        return psets_cache[elem_id]
 
+    def _resolved_type_psets(type_obj: Any) -> Dict[str, Dict[str, Any]]:
+        if not type_obj:
+            return {}
+        type_id = type_obj.id()
+        if type_id not in type_psets_cache:
+            type_psets_cache[type_id] = _safe_get_psets(type_obj)
+        return type_psets_cache[type_id]
+
+    def _get_pset_value(elem: Any, pset_name: str, prop_name: str) -> Any:
+        psets = _resolved_psets(elem)
+        if pset_name in psets and prop_name in psets[pset_name]:
+            return psets[pset_name][prop_name]
+        if not plan.include_type_properties:
+            return ""
+        type_obj = _element_type_obj(elem)
+        if type_obj is not None:
+            type_psets = _resolved_type_psets(type_obj)
+            if pset_name in type_psets and prop_name in type_psets[pset_name]:
+                return type_psets[pset_name][prop_name]
+        return ""
+    timer.stop("entity_index")
+
+    timer.start("project_data")
     project_data = []
-    project = ifc.by_type("IfcProject")[0]
-    site = ifc.by_type("IfcSite")[0] if ifc.by_type("IfcSite") else None
-    building = ifc.by_type("IfcBuilding")[0] if ifc.by_type("IfcBuilding") else None
-    elements = list(ifc.by_type("IfcElement"))
-
-    def extract_uniclass(entity, target_name, is_ifc2x3):
-        reference = ""
-        name = ""
-        for rel in getattr(entity, "HasAssociations", []) or []:
-            if rel.is_a("IfcRelAssociatesClassification"):
-                classification_ref = rel.RelatingClassification
-                if classification_ref and classification_ref.is_a("IfcClassificationReference"):
-                    if is_ifc2x3:
-                        if getattr(classification_ref, "Name", "") == target_name:
-                            return getattr(classification_ref, "ItemReference", ""), getattr(classification_ref, "Name", "")
-                    else:
-                        src = getattr(classification_ref, "ReferencedSource", None)
-                        if src and getattr(src, "Name", "") == target_name:
-                            return getattr(classification_ref, "ItemReference", ""), getattr(classification_ref, "Name", "")
-        return reference, name
-
+    projects = ifc.by_type("IfcProject")
+    project = projects[0] if projects else None
+    sites = ifc.by_type("IfcSite")
+    site = sites[0] if sites else None
+    buildings = ifc.by_type("IfcBuilding")
+    building = buildings[0] if buildings else None
     is_ifc2x3 = ifc.schema == "IFC2X3"
     b_en_ref, b_en_name = ("", "")
     if building is not None:
-        b_en_ref, b_en_name = extract_uniclass(building, "Uniclass En Entities", is_ifc2x3)
-
-    project_data.append({
-        "DataType": "Project",
-        "Name": getattr(project, "Name", ""),
-        "Description": getattr(project, "Description", ""),
-        "Phase": getattr(project, "Phase", ""),
-        "UniclassEnReference": "",
-        "UniclassEnName": "",
-    })
-    if site:
-        project_data.append({
-            "DataType": "Site",
-            "Name": getattr(site, "Name", ""),
-            "Description": getattr(site, "Description", ""),
-            "Phase": "",
-            "UniclassEnReference": "",
-            "UniclassEnName": "",
-        })
-    else:
-        project_data.append({"DataType": "Site", "Name": "", "Description": "", "Phase": "", "UniclassEnReference": "", "UniclassEnName": ""})
-    if building:
-        project_data.append({
-            "DataType": "Building",
-            "Name": getattr(building, "Name", ""),
-            "Description": getattr(building, "Description", ""),
-            "Phase": "",
-            "UniclassEnReference": b_en_ref,
-            "UniclassEnName": b_en_name,
-        })
+        b_en_ref, b_en_name = _extract_uniclass(building, "Uniclass En Entities", is_ifc2x3)
+    project_data.append({"DataType": "Project", "Name": getattr(project, "Name", "") if project else "", "Description": getattr(project, "Description", "") if project else "", "Phase": getattr(project, "Phase", "") if project else "", "UniclassEnReference": "", "UniclassEnName": ""})
+    project_data.append({"DataType": "Site", "Name": getattr(site, "Name", "") if site else "", "Description": getattr(site, "Description", "") if site else "", "Phase": "", "UniclassEnReference": "", "UniclassEnName": ""})
+    project_data.append({"DataType": "Building", "Name": getattr(building, "Name", "") if building else "", "Description": getattr(building, "Description", "") if building else "", "Phase": "", "UniclassEnReference": b_en_ref, "UniclassEnName": b_en_name})
     project_df = pd.DataFrame(project_data)
+    timer.stop("project_data")
 
-    element_data = []
-    for elem in elements:
-        elem_name = getattr(elem, "Name", "")
-        elem_type = getattr(elem, "ObjectType", "")
-        elem_desc = getattr(elem, "Description", "")
-        elem_layer = _get_layers_name(elem)
-        type_obj = _element_type_obj(elem)
-        type_name = type_obj.Name if type_obj else ""
-        element_data.append([
-            elem.GlobalId,
-            elem.is_a(),
-            elem_name,
-            elem_type,
-            type_name,
-            elem_desc,
-            elem_layer,
-        ])
-    elements_df = pd.DataFrame(
-        element_data,
-        columns=["GlobalId", "Class", "OccurrenceName", "OccurrenceType", "TypeName", "TypeDescription", "IFCPresentationLayer"]
-    )
+    timer.start("elements_table")
+    elements_df = pd.DataFrame([
+        [elem.GlobalId, elem.is_a(), getattr(elem, "Name", ""), getattr(elem, "ObjectType", ""), getattr(_element_type_obj(elem), "Name", "") if _element_type_obj(elem) else "", getattr(elem, "Description", ""), _get_layers_name(elem)] for elem in elements
+    ], columns=["GlobalId", "Class", "OccurrenceName", "OccurrenceType", "TypeName", "TypeDescription", "IFCPresentationLayer"])
+    timer.stop("elements_table")
 
-    prop_data = []
-    for elem in elements:
-        space_name, storey_name, building_name, site_name = _spatial_context(elem)
-        for definition in elem.IsDefinedBy or []:
-            if definition.is_a("IfcRelDefinesByProperties"):
+    timer.start("properties_table")
+    prop_rows: List[List[Any]] = []
+    if "Properties" in plan.include_sheets:
+        for elem in elements:
+            if plan.include_spatial_fields:
+                space_name, storey_name, building_name, site_name = _spatial_context(elem)
+            else:
+                space_name = storey_name = building_name = site_name = ""
+            for definition in elem.IsDefinedBy or []:
+                if not definition.is_a("IfcRelDefinesByProperties"):
+                    continue
                 pset = definition.RelatingPropertyDefinition
                 if pset.is_a("IfcPropertySet"):
+                    pset_name = getattr(pset, "Name", "") or ""
+                    if plan.property_sets and pset_name not in plan.property_sets:
+                        continue
                     for prop in pset.HasProperties:
                         val = None
-                        if prop.is_a("IfcPropertySingleValue"):
-                            if prop.NominalValue:
-                                val = prop.NominalValue.wrappedValue
-                        elif prop.is_a("IfcPropertyEnumeratedValue"):
-                            if prop.EnumerationValues:
-                                val = ", ".join(str(v.wrappedValue) for v in prop.EnumerationValues)
-                        prop_data.append([
-                            elem.GlobalId,
-                            elem.is_a(),
-                            getattr(elem, "Name", ""),
-                            getattr(elem, "ObjectType", ""),
-                            space_name,
-                            storey_name,
-                            building_name,
-                            site_name,
-                            pset.Name,
-                            prop.Name,
-                            val,
-                        ])
-    props_df = pd.DataFrame(
-        prop_data,
-        columns=[
-            "GlobalId",
-            "Class",
-            "ObjectName",
-            "ObjectType",
-            "ContainerSpace",
-            "ContainerStorey",
-            "ContainerBuilding",
-            "ContainerSite",
-            "PropertySet",
-            "Property",
-            "Value",
-        ],
-    )
+                        if prop.is_a("IfcPropertySingleValue") and prop.NominalValue:
+                            val = prop.NominalValue.wrappedValue
+                        elif prop.is_a("IfcPropertyEnumeratedValue") and prop.EnumerationValues:
+                            val = ", ".join(str(v.wrappedValue) for v in prop.EnumerationValues)
+                        prop_rows.append([elem.GlobalId, elem.is_a(), getattr(elem, "Name", ""), getattr(elem, "ObjectType", ""), space_name, storey_name, building_name, site_name, pset_name, prop.Name, val])
+                elif pset.is_a("IfcElementQuantity"):
+                    q_name = getattr(pset, "Name", "") or ""
+                    if plan.quantity_sets and q_name not in plan.quantity_sets:
+                        continue
+                    for qty in getattr(pset, "Quantities", []) or []:
+                        prop_rows.append([elem.GlobalId, elem.is_a(), getattr(elem, "Name", ""), getattr(elem, "ObjectType", ""), space_name, storey_name, building_name, site_name, q_name, getattr(qty, "Name", ""), getattr(qty, "NominalValue", "")])
+    props_df = pd.DataFrame(prop_rows, columns=["GlobalId", "Class", "ObjectName", "ObjectType", "ContainerSpace", "ContainerStorey", "ContainerBuilding", "ContainerSite", "PropertySet", "Property", "Value"])
+    timer.stop("properties_table")
 
-    cobie_cols = ["GlobalId", "IFCElement.Name", "IFCElementType.Name"]
-
-    dynamic_pairs = set()
-    for elem in elements:
-        psets_elem = ifcopenshell.util.element.get_psets(elem)
-        add_pset = psets_elem.get("Additional_Pset_GeneralCommon", {})
-        dynamic_pairs.update(parse_required_pairs(add_pset.get("RequiredForCOBie", "")))
-        dynamic_pairs.update(parse_required_pairs(add_pset.get("RequiredForCOBieComponent", "")))
-
-        type_obj = None
-        for rel in elem.IsDefinedBy or []:
-            if rel.is_a("IfcRelDefinesByType"):
-                type_obj = rel.RelatingType
-                break
-        if type_obj is not None:
-            psets_type = ifcopenshell.util.element.get_psets(type_obj)
-            add_pset_t = psets_type.get("Additional_Pset_GeneralCommon", {})
-            dynamic_pairs.update(parse_required_pairs(add_pset_t.get("RequiredForCOBie", "")))
-            dynamic_pairs.update(parse_required_pairs(add_pset_t.get("RequiredForCOBieComponent", "")))
-
-    mapping_pairs = []
-    if COBIE_MAPPING:
-        for pset, info in COBIE_MAPPING.items():
-            for pname, _ in info["props"]:
-                mapping_pairs.append((pset, pname))
-
-    all_pairs = mapping_pairs + sorted(dynamic_pairs - set(mapping_pairs))
-    for pset, pname in all_pairs:
-        cobie_cols.append(f"{pset}.{pname}")
-
-    cobie_rows = []
-    for elem in elements:
-        type_obj = _element_type_obj(elem)
-        type_name = getattr(type_obj, "Name", "") if type_obj else ""
-
-        row = {
-            "GlobalId": elem.GlobalId,
-            "IFCElement.Name": getattr(elem, "Name", ""),
-            "IFCElementType.Name": type_name
-        }
-
-        for pset, pname in all_pairs:
-            key = f"{pset}.{pname}"
-            row[key] = get_pset_value(elem, pset, pname)
-
-        cobie_rows.append(row)
-
-    cobie_df = pd.DataFrame(cobie_rows, columns=cobie_cols)
-
+    timer.start("classification_extract")
     pr_rows, ss_rows, ef_rows = [], [], []
-    for elem in elements:
-        pr_ref, pr_name = extract_uniclass(elem, "Uniclass Pr Products", is_ifc2x3)
-        ss_ref, ss_name = extract_uniclass(elem, "Uniclass Ss Systems", is_ifc2x3)
-        ef_ref, ef_name = extract_uniclass(elem, "Uniclass EF Elements Functions", is_ifc2x3)
-        pr_rows.append({"GlobalId": elem.GlobalId, "Reference": pr_ref, "Name": pr_name})
-        ss_rows.append({"GlobalId": elem.GlobalId, "Reference": ss_ref, "Name": ss_name})
-        ef_rows.append({"GlobalId": elem.GlobalId, "Reference": ef_ref, "Name": ef_name})
-
+    if plan.include_classifications and any(sheet in plan.include_sheets for sheet in {"Uniclass_Pr", "Uniclass_Ss", "Uniclass_EF"}):
+        for elem in elements:
+            pr_ref, pr_name = _extract_uniclass(elem, "Uniclass Pr Products", is_ifc2x3)
+            ss_ref, ss_name = _extract_uniclass(elem, "Uniclass Ss Systems", is_ifc2x3)
+            ef_ref, ef_name = _extract_uniclass(elem, "Uniclass EF Elements Functions", is_ifc2x3)
+            pr_rows.append({"GlobalId": elem.GlobalId, "Reference": pr_ref, "Name": pr_name})
+            ss_rows.append({"GlobalId": elem.GlobalId, "Reference": ss_ref, "Name": ss_name})
+            ef_rows.append({"GlobalId": elem.GlobalId, "Reference": ef_ref, "Name": ef_name})
     uniclass_pr_df = pd.DataFrame(pr_rows)
     uniclass_ss_df = pd.DataFrame(ss_rows)
     uniclass_ef_df = pd.DataFrame(ef_rows)
+    timer.stop("classification_extract")
 
+    timer.start("cobie_extract")
+    cobie_rows = []
+    if "COBieMapping" in plan.include_sheets:
+        mapping_pairs = []
+        if COBIE_MAPPING:
+            for pset, info in COBIE_MAPPING.items():
+                for pname, _ in info["props"]:
+                    mapping_pairs.append((pset, pname))
+        dynamic_pairs = set()
+        if plan.cobie_pairs:
+            dynamic_pairs = set(plan.cobie_pairs)
+        else:
+            for elem in elements:
+                add_pset = _resolved_psets(elem).get("Additional_Pset_GeneralCommon", {})
+                dynamic_pairs.update(parse_required_pairs(add_pset.get("RequiredForCOBie", "")))
+                dynamic_pairs.update(parse_required_pairs(add_pset.get("RequiredForCOBieComponent", "")))
+                type_obj = _element_type_obj(elem)
+                if type_obj is not None and plan.include_type_properties:
+                    add_pset_t = _resolved_type_psets(type_obj).get("Additional_Pset_GeneralCommon", {})
+                    dynamic_pairs.update(parse_required_pairs(add_pset_t.get("RequiredForCOBie", "")))
+                    dynamic_pairs.update(parse_required_pairs(add_pset_t.get("RequiredForCOBieComponent", "")))
+        all_pairs = mapping_pairs + sorted(dynamic_pairs - set(mapping_pairs))
+        cobie_cols = ["GlobalId", "IFCElement.Name", "IFCElementType.Name"] + [f"{pset}.{pname}" for pset, pname in all_pairs]
+        for elem in elements:
+            type_obj = _element_type_obj(elem)
+            row = {"GlobalId": elem.GlobalId, "IFCElement.Name": getattr(elem, "Name", ""), "IFCElementType.Name": getattr(type_obj, "Name", "") if type_obj else ""}
+            for pset, pname in all_pairs:
+                row[f"{pset}.{pname}"] = _get_pset_value(elem, pset, pname)
+            cobie_rows.append(row)
+        cobie_df = pd.DataFrame(cobie_rows, columns=cobie_cols)
+    else:
+        cobie_df = pd.DataFrame()
+    timer.stop("cobie_extract")
+
+    timer.start("excel_write")
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        project_df.to_excel(writer, sheet_name="ProjectData", index=False)
-        elements_df.to_excel(writer, sheet_name="Elements", index=False)
-        props_df.to_excel(writer, sheet_name="Properties", index=False)
-        cobie_df.to_excel(writer, sheet_name="COBieMapping", index=False)
-        uniclass_pr_df.to_excel(writer, sheet_name="Uniclass_Pr", index=False)
-        uniclass_ss_df.to_excel(writer, sheet_name="Uniclass_Ss", index=False)
-        uniclass_ef_df.to_excel(writer, sheet_name="Uniclass_EF", index=False)
-    return output_path
+        if "ProjectData" in plan.include_sheets:
+            project_df.to_excel(writer, sheet_name="ProjectData", index=False)
+        if "Elements" in plan.include_sheets:
+            elements_df.to_excel(writer, sheet_name="Elements", index=False)
+        if "Properties" in plan.include_sheets:
+            props_df.to_excel(writer, sheet_name="Properties", index=False)
+        if "COBieMapping" in plan.include_sheets:
+            cobie_df.to_excel(writer, sheet_name="COBieMapping", index=False)
+        if "Uniclass_Pr" in plan.include_sheets:
+            uniclass_pr_df.to_excel(writer, sheet_name="Uniclass_Pr", index=False)
+        if "Uniclass_Ss" in plan.include_sheets:
+            uniclass_ss_df.to_excel(writer, sheet_name="Uniclass_Ss", index=False)
+        if "Uniclass_EF" in plan.include_sheets:
+            uniclass_ef_df.to_excel(writer, sheet_name="Uniclass_EF", index=False)
+    timer.stop("excel_write")
+    return {"path": output_path, "timings_ms": timer.as_payload(), "counts": {"elements": len(elements), "properties": len(prop_rows), "cobie_rows": len(cobie_rows)}}
+
+
+def extract_to_excel(ifc_path: str, output_path: str, plan_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    plan = _parse_excel_extraction_plan(plan_payload)
+    return extract_to_excel_with_plan(ifc_path, output_path, plan=plan)
 
 
 def _set_element_presentation_layer(ifc, elem, target_layer_name: str):
@@ -5720,8 +5871,36 @@ def excel_extract(session_id: str, payload: Dict[str, Any] = Body(...)):
     base = os.path.splitext(os.path.basename(in_path))[0]
     out_name = f"{base}_extracted.xlsx"
     out_path = os.path.join(root, out_name)
-    extract_to_excel(in_path, out_path)
-    return {"excel": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"}}
+    plan_payload = payload.get("plan") if isinstance(payload.get("plan"), dict) else None
+    cache_key = f"{session_id}:{sanitize_filename(source)}"
+    cached_preview = EXCEL_SCAN_CACHE.get(cache_key)
+    if cached_preview is not None:
+        plan_payload = dict(plan_payload or {})
+        if "cobie_pairs" not in plan_payload and cached_preview.get("cobie_pairs"):
+            plan_payload["cobie_pairs"] = [f"{item.get('pset')}.{item.get('property')}" for item in cached_preview.get("cobie_pairs", [])]
+    result = extract_to_excel(in_path, out_path, plan_payload=plan_payload)
+    APP_LOGGER.info("excel_extract timings_ms=%s counts=%s source=%s", result.get("timings_ms", {}), result.get("counts", {}), source)
+    return {
+        "excel": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"},
+        "timings_ms": result.get("timings_ms", {}),
+        "counts": result.get("counts", {}),
+    }
+
+
+@app.post("/api/session/{session_id}/excel/scan")
+def excel_scan(session_id: str, payload: Dict[str, Any] = Body(...)):
+    root = SESSION_STORE.ensure(session_id)
+    source = payload.get("ifc_file")
+    if not source:
+        raise HTTPException(status_code=400, detail="No IFC file provided")
+    in_path = os.path.join(root, sanitize_filename(source))
+    if not os.path.isfile(in_path):
+        raise HTTPException(status_code=404, detail="IFC file not found")
+    timer = StageTimer()
+    preview = scan_model_for_excel_preview(in_path, timer=timer)
+    EXCEL_SCAN_CACHE[f"{session_id}:{sanitize_filename(source)}"] = preview
+    APP_LOGGER.info("excel_scan timings_ms=%s source=%s", preview.get("timings_ms", {}), source)
+    return {"preview": preview}
 
 
 @app.post("/api/session/{session_id}/excel/update")
