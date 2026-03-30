@@ -8,3 +8,4 @@ python-multipart
 pytest
 pyyaml
 psycopg[binary]
+requests
