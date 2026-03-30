@@ -91,6 +91,17 @@ def utc_now() -> datetime.datetime:
     return datetime.datetime.now(UTC)
 
 
+def resolve_server_host_port() -> tuple[str, int]:
+    host = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"
+    raw_port = (os.getenv("PORT", "").strip() or os.getenv("APP_PORT", "").strip() or "8000")
+    try:
+        port = int(raw_port)
+    except ValueError:
+        APP_LOGGER.warning("Invalid PORT value '%s'; falling back to 8000", raw_port)
+        port = 8000
+    return host, port
+
+
 def _resolve_git_commit_sha() -> str:
     env_sha = os.getenv("GIT_COMMIT_SHA", "").strip()
     if env_sha:
@@ -4911,10 +4922,13 @@ def _run_cobieqc_job(job_id: str) -> None:
 def startup_cleanup() -> None:
     SESSION_STORE.cleanup_stale()
     COBIEQC_JOB_STORE.cleanup_old_jobs()
+    host, port = resolve_server_host_port()
+    APP_LOGGER.info("Startup network binding host=%s port=%s", host, port)
     bootstrap_cobieqc_assets()
     runtime_diag = get_cobieqc_runtime_diagnostics()
     APP_LOGGER.info(
-        "COBieQC startup diagnostics jar_exists=%s resource_dir_exists=%s jar_path=%s resource_dir=%s xml_count=%s xsl_count=%s",
+        "COBieQC startup diagnostics enabled=%s jar_exists=%s resource_dir_exists=%s jar_path=%s resource_dir=%s xml_count=%s xsl_count=%s",
+        runtime_diag["enabled"],
         runtime_diag["jar_exists"],
         runtime_diag["resource_dir_exists"],
         runtime_diag["jar_path"],
@@ -4984,6 +4998,20 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="IFC Toolkit Hub", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+
+
+@app.get("/health")
+def health():
+    runtime_diag = get_cobieqc_runtime_diagnostics()
+    return {
+        "status": "ok",
+        "service": "ifc-tools",
+        "cobieqc": {
+            "enabled": runtime_diag["enabled"],
+            "jar_available": runtime_diag["jar_exists"],
+            "resources_available": runtime_diag["resource_dir_exists"],
+        },
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -5239,6 +5267,13 @@ async def cobieqc_run(
     file: UploadFile = File(...),
     stage: str = Form("D"),
 ):
+    runtime_diag = get_cobieqc_runtime_diagnostics()
+    if not runtime_diag["enabled"]:
+        raise HTTPException(
+            status_code=503,
+            detail="COBieQC runtime assets unavailable. Set COBIEQC_JAR_PATH and COBIEQC_RESOURCE_DIR (or COBIEQC_DATA_DIR).",
+        )
+
     stage = (stage or "D").upper()
     if stage not in {"D", "C"}:
         raise HTTPException(status_code=400, detail="Stage must be D or C")
@@ -6236,4 +6271,5 @@ def api_levels_batch(session_id: str, payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+    host, port = resolve_server_host_port()
+    uvicorn.run(app, host=host, port=port)

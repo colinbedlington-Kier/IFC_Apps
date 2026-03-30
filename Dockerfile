@@ -26,6 +26,6 @@ RUN echo "BUILD_MARKER=${BUILD_MARKER}"
 
 RUN chmod +x /app/scripts/bootstrap_cobieqc.sh
 
-EXPOSE 7860
+EXPOSE 8000
 
-CMD ["bash", "-lc", "/app/scripts/bootstrap_cobieqc.sh && uvicorn app:app --host 0.0.0.0 --port 7860"]
+CMD ["bash", "-lc", "/app/scripts/bootstrap_cobieqc.sh && uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
