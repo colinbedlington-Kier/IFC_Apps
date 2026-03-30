@@ -4,7 +4,7 @@ emoji: 🛰️
 colorFrom: blue
 colorTo: purple
 sdk: docker
-app_port: 7860
+app_port: 8000
 pinned: false
 ---
 
@@ -75,6 +75,8 @@ COBie QC is now a built-in IFC Toolkit page available at **/tools/cobieqc** (no 
 ### Runtime requirements
 
 - Java runtime is required because the backend executes `CobieQcReporter.jar`.
+- Railway/web runtimes must bind to `0.0.0.0:$PORT` (with local fallback `8000`).
+- A lightweight health endpoint is available at `GET /health` for platform healthchecks.
 - The reporter JAR is not committed in this repository. Configure its location with `COBIEQC_JAR_PATH`, or place it in one of:
   - `vendor/cobieqc/CobieQcReporter.jar` (repo-local)
   - `COBieQC/CobieQcReporter/CobieQcReporter.jar` (legacy in-repo path)
@@ -82,6 +84,7 @@ COBie QC is now a built-in IFC Toolkit page available at **/tools/cobieqc** (no 
   - `/app/CobieQcReporter/CobieQcReporter.jar`
   - `/opt/COBieQC/CobieQcReporter/CobieQcReporter.jar`
 - COBieQC resources (`xsl_xml`) are discovered from similar repo-local and absolute paths, or from `COBIEQC_RESOURCE_DIR`.
+- `COBIEQC_DATA_DIR` can be used to point both JAR/resources discovery and bootstrap copy destination to a stable runtime path.
 - Optional bootstrap source overrides are available:
   - `COBIEQC_JAR_SOURCE=/path/to/CobieQcReporter.jar`
   - `COBIEQC_RESOURCE_SOURCE=/path/to/xsl_xml`

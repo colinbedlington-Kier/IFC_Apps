@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 LOGGER = logging.getLogger("ifc_app.cobieqc")
 DEFAULT_TIMEOUT_SECONDS = int(os.getenv("COBIEQC_TIMEOUT_SECONDS", "300"))
 APP_ROOT = Path(__file__).resolve().parents[1]
+COBIEQC_DATA_ROOT = Path(os.getenv("COBIEQC_DATA_DIR", "/data/cobieqc")).expanduser()
 COBIEQC_RUNNER_BUILD_MARKER = "2026-03-24-flags-short-form"
 COBIEQC_RUNNER_FLAG_MARKER = "flags=-i,-o,-p"
 COBIEQC_INPUT_ARG = "-i"
@@ -48,6 +49,7 @@ def cobieqc_jar_candidates() -> List[Path]:
             Path.cwd() / "vendor" / "cobieqc" / "CobieQcReporter.jar",
             Path.cwd() / "CobieQcReporter" / "CobieQcReporter.jar",
             Path.cwd() / "COBieQC" / "CobieQcReporter" / "CobieQcReporter.jar",
+            COBIEQC_DATA_ROOT / "CobieQcReporter.jar",
             Path("/app/data/cobieqc/CobieQcReporter.jar"),
             Path("/app/data/CobieQcReporter.jar"),
             Path("/data/cobieqc/CobieQcReporter.jar"),
@@ -73,6 +75,7 @@ def cobieqc_resource_candidates() -> List[Path]:
             Path.cwd() / "vendor" / "cobieqc" / "xsl_xml",
             Path.cwd() / "CobieQcReporter" / "xsl_xml",
             Path.cwd() / "COBieQC" / "CobieQcReporter" / "xsl_xml",
+            COBIEQC_DATA_ROOT / "xsl_xml",
             Path("/app/data/xsl_xml"),
             Path("/data/xsl_xml"),
             Path("/data/cobieqc/xsl_xml"),
@@ -88,7 +91,7 @@ def _resolve_existing_path(candidates: List[Path], expected_kind: str, label: st
     for candidate in candidates:
         resolved = candidate.expanduser().resolve()
         exists = resolved.exists()
-        LOGGER.info("COBieQC %s check: %s (exists=%s)", label, resolved, exists)
+        LOGGER.debug("COBieQC %s check: %s (exists=%s)", label, resolved, exists)
         if not exists:
             continue
         if expected_kind == "file" and resolved.is_file():
@@ -178,7 +181,9 @@ def get_cobieqc_runtime_diagnostics() -> Dict[str, object]:
     if resource_dir:
         counts = _resource_file_counts(resource_dir)
 
+    enabled = bool(jar_path and resource_dir)
     return {
+        "enabled": enabled,
         "jar_exists": bool(jar_path),
         "resource_dir_exists": bool(resource_dir),
         "jar_path": str(jar_path) if jar_path else None,

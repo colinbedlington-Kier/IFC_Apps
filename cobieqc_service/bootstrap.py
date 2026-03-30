@@ -5,7 +5,7 @@ from pathlib import Path
 
 LOGGER = logging.getLogger("ifc_app.cobieqc.bootstrap")
 
-DATA_ROOT = Path("/data/cobieqc")
+DATA_ROOT = Path(os.getenv("COBIEQC_DATA_DIR", "/data/cobieqc")).expanduser()
 DATA_JAR = DATA_ROOT / "CobieQcReporter.jar"
 DATA_RESOURCES = DATA_ROOT / "xsl_xml"
 
@@ -77,9 +77,8 @@ def bootstrap_cobieqc_assets() -> None:
             LOGGER.info("COBieQC bootstrap: copied JAR from %s to %s", jar_source, DATA_JAR)
         else:
             LOGGER.warning(
-                "COBieQC bootstrap: JAR missing at %s and no source found in %s",
+                "COBieQC bootstrap: JAR missing at %s (set COBIEQC_JAR_SOURCE or COBIEQC_JAR_PATH to enable COBieQC)",
                 DATA_JAR,
-                [str(p) for p in jar_candidates],
             )
 
     if DATA_RESOURCES.exists():
@@ -95,9 +94,8 @@ def bootstrap_cobieqc_assets() -> None:
             )
         else:
             LOGGER.warning(
-                "COBieQC bootstrap: resource dir missing at %s and no source found in %s",
+                "COBieQC bootstrap: resource dir missing at %s (set COBIEQC_RESOURCE_SOURCE or COBIEQC_RESOURCE_DIR to enable COBieQC)",
                 DATA_RESOURCES,
-                [str(p) for p in resource_candidates],
             )
 
 
