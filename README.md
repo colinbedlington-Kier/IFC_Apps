@@ -77,17 +77,19 @@ COBie QC is now a built-in IFC Toolkit page available at **/tools/cobieqc** (no 
 - Java runtime is required because the backend executes `CobieQcReporter.jar`.
 - Railway/web runtimes must bind to `0.0.0.0:$PORT` (with local fallback `8000`).
 - A lightweight health endpoint is available at `GET /health` for platform healthchecks.
-- The reporter JAR is not committed in this repository. Configure its location with `COBIEQC_JAR_PATH`, or place it in one of:
-  - `vendor/cobieqc/CobieQcReporter.jar` (repo-local)
-  - `COBieQC/CobieQcReporter/CobieQcReporter.jar` (legacy in-repo path)
-  - `/app/COBieQC/CobieQcReporter/CobieQcReporter.jar`
-  - `/app/CobieQcReporter/CobieQcReporter.jar`
-  - `/opt/COBieQC/CobieQcReporter/CobieQcReporter.jar`
-- COBieQC resources (`xsl_xml`) are discovered from similar repo-local and absolute paths, or from `COBIEQC_RESOURCE_DIR`.
-- `COBIEQC_DATA_DIR` can be used to point both JAR/resources discovery and bootstrap copy destination to a stable runtime path.
-- Optional bootstrap source overrides are available:
-  - `COBIEQC_JAR_SOURCE=/path/to/CobieQcReporter.jar`
-  - `COBIEQC_RESOURCE_SOURCE=/path/to/xsl_xml`
+- Railway production deployments should mount a persistent volume at `/data`.
+- On startup, COBieQC assets are auto-restored into `/data/cobieqc` when missing:
+  - `/data/cobieqc/CobieQcReporter.jar`
+  - `/data/cobieqc/xsl_xml/`
+- The repository does not include COBieQC runtime assets. Bootstrap uses Google Drive sources (env-overridable):
+  - `COBIEQC_JAR_SOURCE_URL` (default: Google Drive JAR share link)
+  - `COBIEQC_XML_ZIP_SOURCE_URL` (default: Google Drive ZIP share link)
+- Bootstrap accepts Google Drive share links and converts them internally to direct download URLs.
+- The Google Drive folder link for `xsl_xml` is a manual backup/reference source only (`COBIEQC_XML_FOLDER_SOURCE_URL` default).
+- Runtime path env vars (recommended on Railway):
+  - `COBIEQC_DATA_DIR=/data/cobieqc`
+  - `COBIEQC_JAR_PATH=/data/cobieqc/CobieQcReporter.jar`
+  - `COBIEQC_RESOURCE_DIR=/data/cobieqc/xsl_xml`
 - Hugging Face Docker Spaces install Java from `packages.txt` (`openjdk-21-jre-headless`).
 - The repo `Dockerfile` (used for local/containerized runs) also installs `openjdk-21-jre-headless`.
 - Reports are generated into per-job data directories (`$IFC_APP_DATA_DIR/jobs/cobieqc/<job_id>/`) instead of `COBieQC/reports/`.

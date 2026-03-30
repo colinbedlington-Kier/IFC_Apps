@@ -49,7 +49,7 @@ from cobieqc_service.jobs import (
     STATUS_RUNNING,
     CobieQcJobStore,
 )
-from cobieqc_service.bootstrap import bootstrap_cobieqc_assets
+from cobieqc_service.bootstrap import bootstrap_cobieqc_assets, get_cobieqc_bootstrap_status
 from cobieqc_service import runner as cobieqc_runner_module
 from cobieqc_service.runner import get_cobieqc_runtime_diagnostics, resolve_java_executable, run_cobieqc
 from cobieqc_service.security import sanitize_filename as sanitize_upload_filename
@@ -5003,15 +5003,22 @@ templates = Jinja2Templates(directory="templates")
 @app.get("/health")
 def health():
     runtime_diag = get_cobieqc_runtime_diagnostics()
-    return {
+    bootstrap_status = get_cobieqc_bootstrap_status()
+    payload = {
         "status": "ok",
         "service": "ifc-tools",
         "cobieqc": {
             "enabled": runtime_diag["enabled"],
-            "jar_available": runtime_diag["jar_exists"],
-            "resources_available": runtime_diag["resource_dir_exists"],
+            "jar_exists": runtime_diag["jar_exists"],
+            "resource_dir_exists": runtime_diag["resource_dir_exists"],
+            "jar_path": runtime_diag.get("jar_path"),
+            "resource_dir": runtime_diag.get("resource_dir"),
         },
     }
+    last_error = bootstrap_status.get("last_error") or runtime_diag.get("jar_error") or runtime_diag.get("resource_error")
+    if last_error:
+        payload["cobieqc"]["last_error"] = last_error
+    return payload
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -5271,7 +5278,7 @@ async def cobieqc_run(
     if not runtime_diag["enabled"]:
         raise HTTPException(
             status_code=503,
-            detail="COBieQC runtime assets unavailable. Set COBIEQC_JAR_PATH and COBIEQC_RESOURCE_DIR (or COBIEQC_DATA_DIR).",
+            detail="COBieQC runtime package is not installed or could not be restored from configured asset sources.",
         )
 
     stage = (stage or "D").upper()

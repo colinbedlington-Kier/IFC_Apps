@@ -13,6 +13,9 @@
   const downloadEl = document.getElementById("cobieqcDownload");
   const errorEl = document.getElementById("cobieqcError");
 
+  const missingRuntimeMessage =
+    "COBieQC runtime package is not installed or could not be restored from configured asset sources.";
+
   let pollTimer = null;
 
   function setProgress(value, message) {
@@ -26,6 +29,22 @@
     const file = fileInput.files && fileInput.files[0];
     runBtn.disabled = !file;
   });
+
+  async function checkRuntimeAvailability() {
+    try {
+      const resp = await fetch("/health");
+      if (!resp.ok) return;
+      const payload = await resp.json();
+      if (!payload?.cobieqc?.enabled) {
+        runBtn.disabled = true;
+        fileInput.disabled = true;
+        errorEl.style.display = "block";
+        errorEl.textContent = payload?.cobieqc?.last_error || missingRuntimeMessage;
+      }
+    } catch (_err) {
+      // Best effort only.
+    }
+  }
 
   async function pollJob(jobId) {
     if (pollTimer) clearTimeout(pollTimer);
@@ -102,4 +121,6 @@
       runBtn.disabled = false;
     }
   });
+
+  checkRuntimeAvailability();
 })();
