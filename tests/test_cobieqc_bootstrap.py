@@ -55,6 +55,7 @@ def test_bootstrap_skips_when_assets_already_exist(monkeypatch, tmp_path):
 
     assert called["value"] is False
     assert status["enabled"] is True
+    assert status["resource_source"] == "existing_dir"
 
 
 def test_bootstrap_installs_jar_and_xml_when_missing(monkeypatch, tmp_path):
@@ -82,6 +83,7 @@ def test_bootstrap_installs_jar_and_xml_when_missing(monkeypatch, tmp_path):
     status = bootstrap.get_cobieqc_bootstrap_status()
 
     assert status["enabled"] is True
+    assert status["resource_source"] == "zip_extract"
     assert (root / "CobieQcReporter.jar").exists()
     assert (root / "xsl_xml").exists()
     assert any(p.is_file() for p in (root / "xsl_xml").rglob("*"))
@@ -98,3 +100,62 @@ def test_bootstrap_degrades_gracefully_when_download_fails(monkeypatch, tmp_path
 
     assert status["enabled"] is False
     assert "failed" in status["last_error"]
+    assert status["resource_source"] == "missing"
+
+
+def test_bootstrap_uses_preferred_data_resources_without_zip(monkeypatch, tmp_path):
+    root = tmp_path / "cobie"
+    preferred = root / "xsl_xml"
+    preferred.mkdir(parents=True)
+    (root / "CobieQcReporter.jar").write_bytes(b"jar")
+    (preferred / "template.xml").write_text("<xml/>", encoding="utf-8")
+
+    monkeypatch.setenv("COBIEQC_DATA_DIR", str(root))
+    monkeypatch.setenv("COBIEQC_JAR_PATH", str(root / "CobieQcReporter.jar"))
+    monkeypatch.setenv("COBIEQC_RESOURCE_DIR", str(tmp_path / "unused" / "xsl_xml"))
+
+    called = {"value": False}
+
+    def _fail_get(*_args, **_kwargs):
+        called["value"] = True
+        raise AssertionError("zip install should not run")
+
+    monkeypatch.setattr(bootstrap, "_install_xml_from_zip", _fail_get)
+
+    bootstrap.bootstrap_cobieqc_assets()
+    status = bootstrap.get_cobieqc_bootstrap_status()
+
+    assert called["value"] is False
+    assert status["enabled"] is True
+    assert status["resource_source"] == "existing_dir"
+    assert Path(status["resource_dir"]) == preferred.resolve()
+
+
+def test_bootstrap_falls_back_to_vendor_resource_dir(monkeypatch, tmp_path):
+    root = tmp_path / "cobie"
+    root.mkdir(parents=True)
+    fallback = tmp_path / "vendor" / "cobieqc" / "xsl_xml"
+    fallback.mkdir(parents=True)
+    (fallback / "rules.xml").write_text("x", encoding="utf-8")
+    (root / "CobieQcReporter.jar").write_bytes(b"jar")
+
+    monkeypatch.setenv("COBIEQC_DATA_DIR", str(root))
+    monkeypatch.setenv("COBIEQC_JAR_PATH", str(root / "CobieQcReporter.jar"))
+    monkeypatch.setenv("COBIEQC_RESOURCE_DIR", str(root / "xsl_xml"))
+    monkeypatch.chdir(tmp_path)
+
+    called = {"value": False}
+
+    def _fail_get(*_args, **_kwargs):
+        called["value"] = True
+        raise AssertionError("zip install should not run")
+
+    monkeypatch.setattr(bootstrap, "_install_xml_from_zip", _fail_get)
+
+    bootstrap.bootstrap_cobieqc_assets()
+    status = bootstrap.get_cobieqc_bootstrap_status()
+
+    assert called["value"] is False
+    assert status["enabled"] is True
+    assert status["resource_source"] == "fallback_dir"
+    assert Path(status["resource_dir"]) == fallback.resolve()

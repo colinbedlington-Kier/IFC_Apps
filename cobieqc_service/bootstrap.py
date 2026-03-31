@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
+from cobieqc_service.runner import cobieqc_resource_candidates
+
 try:
     import requests  # type: ignore
 except Exception:  # pragma: no cover - fallback for minimal runtimes
@@ -27,6 +29,7 @@ class CobieQcBootstrapStatus:
     resource_dir_exists: bool
     jar_path: str
     resource_dir: str
+    resource_source: str = "missing"
     last_error: str = ""
 
 
@@ -77,6 +80,43 @@ def _is_non_empty_file(path: Path) -> bool:
 
 def _dir_has_files(path: Path) -> bool:
     return path.exists() and path.is_dir() and any(child.is_file() for child in path.rglob("*"))
+
+
+def is_nonempty_directory(path: Path) -> bool:
+    return _dir_has_files(path)
+
+
+def _resource_dir_resolution_candidates(preferred_resource_dir: Path, configured_resource_dir: Path) -> list[Path]:
+    candidates: list[Path] = [preferred_resource_dir]
+    if configured_resource_dir != preferred_resource_dir:
+        candidates.append(configured_resource_dir)
+    candidates.extend(cobieqc_resource_candidates())
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate.expanduser())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def _resolve_existing_resource_dir(preferred_resource_dir: Path, configured_resource_dir: Path) -> tuple[Optional[Path], str]:
+    for idx, candidate in enumerate(_resource_dir_resolution_candidates(preferred_resource_dir, configured_resource_dir)):
+        resolved = candidate.expanduser().resolve()
+        if not resolved.exists():
+            continue
+        if not resolved.is_dir():
+            LOGGER.info("COBieQC bootstrap: skipping non-directory resource candidate %s", resolved)
+            continue
+        if not is_nonempty_directory(resolved):
+            LOGGER.info("COBieQC bootstrap: resource directory exists but is empty at %s", resolved)
+            continue
+        source = "existing_dir" if idx == 0 else "fallback_dir"
+        return resolved, source
+    return None, "missing"
 
 
 def _download_to_temp(source_url: str, suffix: str, purpose: str) -> Path:
@@ -161,17 +201,22 @@ def _install_xml_from_zip(zip_url: str, resource_dir: Path) -> None:
             shutil.rmtree(extract_temp_dir, ignore_errors=True)
 
 
-def _build_status(last_error: str = "") -> CobieQcBootstrapStatus:
+def _build_status(
+    last_error: str = "",
+    resolved_resource_dir: Optional[Path] = None,
+    resource_source: str = "missing",
+) -> CobieQcBootstrapStatus:
     jar_path = _jar_path()
-    resource_dir = _resource_dir()
+    resource_dir = (resolved_resource_dir or _resource_dir()).expanduser().resolve()
     jar_exists = _is_non_empty_file(jar_path)
-    resource_exists = _dir_has_files(resource_dir)
+    resource_exists = is_nonempty_directory(resource_dir)
     return CobieQcBootstrapStatus(
         enabled=jar_exists and resource_exists,
         jar_exists=jar_exists,
         resource_dir_exists=resource_exists,
         jar_path=str(jar_path),
         resource_dir=str(resource_dir),
+        resource_source=resource_source if resource_exists else "missing",
         last_error=last_error,
     )
 
@@ -189,6 +234,7 @@ def bootstrap_cobieqc_assets() -> None:
     data_root = _data_root()
     jar_path = _jar_path()
     resource_dir = _resource_dir()
+    preferred_resource_dir = (_data_root() / "xsl_xml").expanduser()
     jar_source_url = os.getenv("COBIEQC_JAR_SOURCE_URL", DEFAULT_JAR_SOURCE_URL).strip() or DEFAULT_JAR_SOURCE_URL
     xml_zip_source_url = os.getenv("COBIEQC_XML_ZIP_SOURCE_URL", DEFAULT_XML_ZIP_SOURCE_URL).strip() or DEFAULT_XML_ZIP_SOURCE_URL
 
@@ -209,26 +255,55 @@ def bootstrap_cobieqc_assets() -> None:
         errors.append(f"JAR download/install failed: {exc}")
         LOGGER.error("COBieQC bootstrap JAR install failed: %s", exc)
 
-    try:
-        if _dir_has_files(resource_dir):
-            LOGGER.info("COBieQC bootstrap: existing resources kept at %s", resource_dir)
-        else:
+    resolved_resource_dir, resource_source = _resolve_existing_resource_dir(preferred_resource_dir, resource_dir)
+    if resolved_resource_dir:
+        LOGGER.info("COBieQC bootstrap: using existing extracted resources at %s", resolved_resource_dir)
+    elif xml_zip_source_url:
+        try:
             LOGGER.info("COBieQC bootstrap: downloading XML ZIP and extracting to %s", resource_dir)
             _install_xml_from_zip(xml_zip_source_url, resource_dir)
             LOGGER.info("COBieQC bootstrap: resources installed at %s", resource_dir)
-    except Exception as exc:
-        errors.append(f"XML ZIP download/extract failed: {exc}")
-        LOGGER.error("COBieQC bootstrap XML install failed: %s", exc)
+            if is_nonempty_directory(resource_dir):
+                resolved_resource_dir = resource_dir.expanduser().resolve()
+                resource_source = "zip_extract"
+            else:
+                resource_source = "missing"
+                LOGGER.warning(
+                    "COBieQC bootstrap: ZIP extraction completed but resource directory is missing/empty at %s",
+                    resource_dir,
+                )
+        except Exception as exc:
+            fallback_resource_dir, fallback_source = _resolve_existing_resource_dir(preferred_resource_dir, resource_dir)
+            if fallback_resource_dir:
+                resolved_resource_dir = fallback_resource_dir
+                resource_source = fallback_source
+                LOGGER.warning(
+                    "COBieQC bootstrap XML install failed, but existing extracted resources remain available at %s: %s",
+                    fallback_resource_dir,
+                    exc,
+                )
+            else:
+                resource_source = "missing"
+                errors.append(f"XML ZIP download/extract failed: {exc}")
+                LOGGER.error("COBieQC bootstrap XML install failed: %s", exc)
+    else:
+        resource_source = "missing"
+        LOGGER.warning("COBieQC bootstrap: XML ZIP source is not configured and no extracted resource directory is available")
 
     last_error = " | ".join(errors)
-    _LAST_STATUS = _build_status(last_error=last_error)
+    _LAST_STATUS = _build_status(
+        last_error=last_error,
+        resolved_resource_dir=resolved_resource_dir,
+        resource_source=resource_source,
+    )
     LOGGER.info(
-        "COBieQC bootstrap complete enabled=%s jar_exists=%s resource_dir_exists=%s jar_path=%s resource_dir=%s",
+        "COBieQC bootstrap complete enabled=%s jar_exists=%s jar_path=%s resource_dir_exists=%s resource_dir=%s resource_source=%s",
         _LAST_STATUS.enabled,
         _LAST_STATUS.jar_exists,
-        _LAST_STATUS.resource_dir_exists,
         _LAST_STATUS.jar_path,
+        _LAST_STATUS.resource_dir_exists,
         _LAST_STATUS.resource_dir,
+        _LAST_STATUS.resource_source,
     )
 
 
