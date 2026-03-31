@@ -263,16 +263,28 @@ def _regex_extract(pattern: str, value: str) -> str:
     return match.group(0)
 
 
-def _get_layers_name(entity: Any) -> str:
+def _get_layers_name(entity: Any, model: Optional[ifcopenshell.file] = None) -> str:
     try:
-        layers = ifcopenshell.util.element.get_layers(entity) or []
+        if model is not None:
+            layers = ifcopenshell.util.element.get_layers(model, entity) or []
+        else:
+            try:
+                layers = ifcopenshell.util.element.get_layers(entity) or []
+            except TypeError:
+                owner = getattr(entity, "file", None)
+                if callable(owner):
+                    owner = owner()
+                layers = ifcopenshell.util.element.get_layers(owner, entity) if owner is not None else []
     except Exception:
         return ""
+    names: List[str] = []
+    seen: Set[str] = set()
     for layer in layers:
-        name = getattr(layer, "Name", "") or ""
-        if name:
-            return name
-    return ""
+        name = (getattr(layer, "Name", "") or "").strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return "; ".join(names)
 
 
 def _get_object_xyz(entity: Any) -> str:
@@ -771,6 +783,33 @@ COBIE_MAPPING = {
 
 RE_SPLIT_LIST = re.compile(r"[;,|\n]+|\s{2,}")
 
+CIVIL3D_EXTENDED_FIELDS: Tuple[str, ...] = (
+    "Classification.Uniclass.Pr.Description",
+    "Classification.Uniclass.Pr.Number",
+    "ClassificationCode",
+    "ExtObject",
+    "IFC_Enumeration",
+    "IFC Name",
+    "IFCPresentationLayer",
+    "Name",
+    "Structural Material",
+    "SystemCategory",
+    "SystemDescription",
+    "SystemName",
+    "Type (User Defined)",
+    "Uniclass2015_Pr",
+)
+
+EXTRACTION_PROFILES: Dict[str, Dict[str, Any]] = {
+    "civil3d_extended": {
+        "include_sheets": {"ProjectData", "Elements", "Properties", "COBieMapping", "Uniclass_Pr", "Uniclass_Ss", "Uniclass_EF"},
+        "include_type_properties": True,
+        "include_spatial_fields": True,
+        "include_classifications": True,
+        "civil3d_extended": True,
+    }
+}
+
 
 def path_of(f):
     return f if isinstance(f, str) else getattr(f, "name", f)
@@ -844,6 +883,7 @@ class ExtractionPlan:
     include_type_properties: bool = True
     include_spatial_fields: bool = True
     include_classifications: bool = True
+    civil3d_extended: bool = False
 
 
 class StageTimer:
@@ -883,13 +923,28 @@ def _extract_uniclass(entity: Any, target_name: str, is_ifc2x3: bool) -> Tuple[s
 def _parse_excel_extraction_plan(payload: Optional[Dict[str, Any]]) -> ExtractionPlan:
     if not payload:
         return ExtractionPlan()
+    profile_name = (payload.get("profile") or "").strip()
+    if profile_name:
+        profile = EXTRACTION_PROFILES.get(profile_name)
+        if not profile:
+            APP_LOGGER.warning("Unknown Excel extraction profile '%s'; using defaults", profile_name)
+            profile = {}
+    else:
+        profile = {}
     include_sheets = set(payload.get("include_sheets") or []) or ExtractionPlan().include_sheets
+    include_sheets = set(profile.get("include_sheets", include_sheets))
     entity_classes = set(payload.get("entity_classes") or [])
     property_sets = set(payload.get("property_sets") or [])
     quantity_sets = set(payload.get("quantity_sets") or [])
     include_type_properties = bool(payload.get("include_type_properties", True))
     include_spatial_fields = bool(payload.get("include_spatial_fields", True))
     include_classifications = bool(payload.get("include_classifications", True))
+    if "include_type_properties" in profile:
+        include_type_properties = bool(profile["include_type_properties"])
+    if "include_spatial_fields" in profile:
+        include_spatial_fields = bool(profile["include_spatial_fields"])
+    if "include_classifications" in profile:
+        include_classifications = bool(profile["include_classifications"])
     raw_pairs = payload.get("cobie_pairs") or []
     cobie_pairs: Set[Tuple[str, str]] = set()
     for item in raw_pairs:
@@ -911,7 +966,85 @@ def _parse_excel_extraction_plan(payload: Optional[Dict[str, Any]]) -> Extractio
         include_type_properties=include_type_properties,
         include_spatial_fields=include_spatial_fields,
         include_classifications=include_classifications,
+        civil3d_extended=bool(payload.get("civil3d_extended", profile.get("civil3d_extended", False))),
     )
+
+
+def _normalize_field_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").strip().lower())
+
+
+def _resolve_field_value(
+    elem: Any,
+    type_obj: Any,
+    field_name: str,
+    get_pset_value: Callable[[Any, str, str], Any],
+) -> str:
+    if field_name == "IFCPresentationLayer":
+        return _get_layers_name(elem, None)
+    if field_name == "Name":
+        return getattr(elem, "Name", "") or ""
+    if field_name == "IFC Name":
+        candidates = ["IFC Name", "IFC_Name", "IfcName"]
+        for pset_name in ("Additional_Pset_GeneralCommon", "Additional_Pset_SystemCommon", "Pset_ManufacturerTypeInformation", "Pset_ManufacturerOccurrence"):
+            for candidate in candidates:
+                val = get_pset_value(elem, pset_name, candidate)
+                if clean_value(val) is not None:
+                    return str(val)
+        direct = getattr(elem, "Name", "") or ""
+        if direct:
+            return direct
+    if field_name == "Type (User Defined)":
+        return getattr(elem, "ObjectType", "") or (getattr(type_obj, "ObjectType", "") if type_obj else "") or ""
+    if field_name == "ClassificationCode":
+        candidates = ["ClassificationCode", "Classification Code"]
+    elif field_name == "Classification.Uniclass.Pr.Number":
+        candidates = ["Classification.Uniclass.Pr.Number", "Uniclass2015_Pr", "Uniclass Pr Number"]
+    elif field_name == "Classification.Uniclass.Pr.Description":
+        candidates = ["Classification.Uniclass.Pr.Description", "Uniclass Pr Description"]
+    else:
+        candidates = [field_name]
+
+    for pset_name in ("Additional_Pset_GeneralCommon", "Additional_Pset_SystemCommon", "Pset_ManufacturerTypeInformation", "Pset_ManufacturerOccurrence"):
+        for candidate in candidates:
+            val = get_pset_value(elem, pset_name, candidate)
+            if clean_value(val) is not None:
+                return str(val)
+
+    psets = _safe_get_psets(elem)
+    if type_obj is not None:
+        t_psets = _safe_get_psets(type_obj)
+    else:
+        t_psets = {}
+    target_keys = {_normalize_field_key(c) for c in candidates}
+    for source_psets in (psets, t_psets):
+        for _, props in source_psets.items():
+            for prop_name, prop_value in (props or {}).items():
+                if _normalize_field_key(prop_name) in target_keys and clean_value(prop_value) is not None:
+                    return str(prop_value)
+    return ""
+
+
+def _resolve_name_with_priority(elem: Any, type_obj: Any, get_pset_value: Callable[[Any, str, str], Any]) -> str:
+    for source in ("IFC Name", "Name"):
+        value = _resolve_field_value(elem, type_obj, source, get_pset_value)
+        if clean_value(value) is not None:
+            APP_LOGGER.info("Name resolution for %s used source '%s'", getattr(elem, "GlobalId", elem.id()), source)
+            return str(value)
+    fallback = getattr(type_obj, "Name", "") if type_obj else ""
+    APP_LOGGER.info("Name resolution for %s fell back to legacy type/block name", getattr(elem, "GlobalId", elem.id()))
+    return fallback or ""
+
+
+def _resolve_type_name_with_priority(elem: Any, type_obj: Any, get_pset_value: Callable[[Any, str, str], Any]) -> str:
+    for source in ("IFC Name", "Type (User Defined)", "Name"):
+        value = _resolve_field_value(elem, type_obj, source, get_pset_value)
+        if clean_value(value) is not None:
+            APP_LOGGER.info("IFCElementType.Name resolution for %s used source '%s'", getattr(elem, "GlobalId", elem.id()), source)
+            return str(value)
+    fallback = getattr(type_obj, "Name", "") if type_obj else ""
+    APP_LOGGER.info("IFCElementType.Name for %s fell back to legacy type/block name", getattr(elem, "GlobalId", elem.id()))
+    return fallback or ""
 
 
 def scan_model_for_excel_preview(ifc_path: str, timer: Optional[StageTimer] = None) -> Dict[str, Any]:
@@ -1104,16 +1237,42 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
     b_en_ref, b_en_name = ("", "")
     if building is not None:
         b_en_ref, b_en_name = _extract_uniclass(building, "Uniclass En Entities", is_ifc2x3)
-    project_data.append({"DataType": "Project", "Name": getattr(project, "Name", "") if project else "", "Description": getattr(project, "Description", "") if project else "", "Phase": getattr(project, "Phase", "") if project else "", "UniclassEnReference": "", "UniclassEnName": ""})
-    project_data.append({"DataType": "Site", "Name": getattr(site, "Name", "") if site else "", "Description": getattr(site, "Description", "") if site else "", "Phase": "", "UniclassEnReference": "", "UniclassEnName": ""})
-    project_data.append({"DataType": "Building", "Name": getattr(building, "Name", "") if building else "", "Description": getattr(building, "Description", "") if building else "", "Phase": "", "UniclassEnReference": b_en_ref, "UniclassEnName": b_en_name})
+    project_number = ""
+    if project is not None:
+        project_number = getattr(project, "LongName", "") or ""
+        for pset_name in ("Additional_Pset_ProjectCommon", "Pset_ProjectCommon"):
+            psets = _safe_get_psets(project)
+            values = psets.get(pset_name, {})
+            for key in ("Project Number", "ProjectNumber", "ProjectNo"):
+                if clean_value(values.get(key)) is not None:
+                    project_number = str(values.get(key))
+                    break
+            if project_number:
+                break
+    project_data.append({"DataType": "Project", "Name": getattr(project, "Name", "") if project else "", "Description": getattr(project, "Description", "") if project else "", "Phase": getattr(project, "Phase", "") if project else "", "ProjectNumber": project_number, "UniclassEnReference": "", "UniclassEnName": ""})
+    project_data.append({"DataType": "Site", "Name": getattr(site, "Name", "") if site else "", "Description": getattr(site, "Description", "") if site else "", "Phase": "", "ProjectNumber": "", "UniclassEnReference": "", "UniclassEnName": ""})
+    project_data.append({"DataType": "Building", "Name": getattr(building, "Name", "") if building else "", "Description": getattr(building, "Description", "") if building else "", "Phase": "", "ProjectNumber": "", "UniclassEnReference": b_en_ref, "UniclassEnName": b_en_name})
     project_df = pd.DataFrame(project_data)
     timer.stop("project_data")
 
     timer.start("elements_table")
-    elements_df = pd.DataFrame([
-        [elem.GlobalId, elem.is_a(), getattr(elem, "Name", ""), getattr(elem, "ObjectType", ""), getattr(_element_type_obj(elem), "Name", "") if _element_type_obj(elem) else "", getattr(elem, "Description", ""), _get_layers_name(elem)] for elem in elements
-    ], columns=["GlobalId", "Class", "OccurrenceName", "OccurrenceType", "TypeName", "TypeDescription", "IFCPresentationLayer"])
+    element_rows: List[Dict[str, Any]] = []
+    for elem in elements:
+        type_obj = _element_type_obj(elem)
+        row = {
+            "GlobalId": elem.GlobalId,
+            "Class": elem.is_a(),
+            "OccurrenceName": getattr(elem, "Name", ""),
+            "OccurrenceType": getattr(elem, "ObjectType", ""),
+            "TypeName": getattr(type_obj, "Name", "") if type_obj else "",
+            "TypeDescription": getattr(elem, "Description", ""),
+            "IFCPresentationLayer": _get_layers_name(elem, ifc),
+        }
+        if plan.civil3d_extended:
+            for field_name in CIVIL3D_EXTENDED_FIELDS:
+                row[field_name] = _resolve_field_value(elem, type_obj, field_name, _get_pset_value)
+        element_rows.append(row)
+    elements_df = pd.DataFrame(element_rows)
     timer.stop("elements_table")
 
     timer.start("properties_table")
@@ -1185,10 +1344,17 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
                     dynamic_pairs.update(parse_required_pairs(add_pset_t.get("RequiredForCOBie", "")))
                     dynamic_pairs.update(parse_required_pairs(add_pset_t.get("RequiredForCOBieComponent", "")))
         all_pairs = mapping_pairs + sorted(dynamic_pairs - set(mapping_pairs))
-        cobie_cols = ["GlobalId", "IFCElement.Name", "IFCElementType.Name"] + [f"{pset}.{pname}" for pset, pname in all_pairs]
+        extra_cols = list(CIVIL3D_EXTENDED_FIELDS) if plan.civil3d_extended else []
+        cobie_cols = ["GlobalId", "IFCElement.Name", "IFCElementType.Name"] + extra_cols + [f"{pset}.{pname}" for pset, pname in all_pairs]
         for elem in elements:
             type_obj = _element_type_obj(elem)
-            row = {"GlobalId": elem.GlobalId, "IFCElement.Name": getattr(elem, "Name", ""), "IFCElementType.Name": getattr(type_obj, "Name", "") if type_obj else ""}
+            row = {
+                "GlobalId": elem.GlobalId,
+                "IFCElement.Name": _resolve_name_with_priority(elem, type_obj, _get_pset_value),
+                "IFCElementType.Name": _resolve_type_name_with_priority(elem, type_obj, _get_pset_value),
+            }
+            for field_name in extra_cols:
+                row[field_name] = _resolve_field_value(elem, type_obj, field_name, _get_pset_value)
             for pset, pname in all_pairs:
                 row[f"{pset}.{pname}"] = _get_pset_value(elem, pset, pname)
             cobie_rows.append(row)
@@ -1310,6 +1476,52 @@ def _set_element_presentation_layer(ifc, elem, target_layer_name: str):
     layer.AssignedItems = assigned
 
 
+def validate_excel_import_data(
+    ifc: ifcopenshell.file,
+    elements_df: pd.DataFrame,
+    cobie_df: pd.DataFrame,
+    project_df: pd.DataFrame,
+) -> List[str]:
+    issues: List[str] = []
+    if "DataType" not in project_df.columns:
+        issues.append("ProjectData sheet is missing DataType column.")
+    else:
+        project_rows = project_df[project_df["DataType"] == "Project"]
+        if project_rows.empty:
+            issues.append("ProjectData sheet does not contain a Project row.")
+        elif "ProjectNumber" in project_df.columns:
+            project_number = clean_value(project_rows.iloc[0].get("ProjectNumber"))
+            if project_number is None:
+                issues.append("ProjectData.ProjectNumber is blank for Project row.")
+        else:
+            issues.append("ProjectData sheet is missing ProjectNumber column.")
+
+    if "GlobalId" not in elements_df.columns:
+        issues.append("Elements sheet is missing GlobalId column.")
+    else:
+        missing_guid_count = int(elements_df["GlobalId"].isna().sum())
+        if missing_guid_count:
+            issues.append(f"Elements sheet has {missing_guid_count} rows with blank GlobalId.")
+
+    for col in ("IFCElement.Name", "IFCElementType.Name"):
+        if col in cobie_df.columns and cobie_df[col].isna().any():
+            issues.append(f"COBieMapping.{col} has blank values.")
+    return issues
+
+
+def _resolve_class_mapping_candidate(elem: Any, row: pd.Series) -> Tuple[str, str]:
+    ext_object = clean_value(row.get("ExtObject")) or clean_value(row.get("Ext Object"))
+    if ext_object:
+        return str(ext_object), "ExtObject"
+    ifc_enum = clean_value(row.get("IFC_Enumeration"))
+    if ifc_enum:
+        return str(ifc_enum), "IFC_Enumeration"
+    object_type = clean_value(row.get("OccurrenceType")) or clean_value(getattr(elem, "ObjectType", ""))
+    if object_type:
+        return str(object_type), "existing_proxy_mapping"
+    return "IfcBuildingElementProxy", "fallback_proxy"
+
+
 def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="update", add_new="no"):
     ifc_path = path_of(ifc_file)
     xls_path = path_of(excel_file)
@@ -1334,6 +1546,10 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
             uniclass_ef_df = pd.read_excel(xls, "Uniclass_En")
         except Exception:
             uniclass_ef_df = None
+
+    validation_issues = validate_excel_import_data(ifc, elements_df, cobie_df, project_df)
+    if validation_issues:
+        raise ValueError("Excel validation failed: " + "; ".join(validation_issues))
 
     project = ifc.by_type("IfcProject")[0]
     site = ifc.by_type("IfcSite")[0] if ifc.by_type("IfcSite") else None
@@ -1396,6 +1612,11 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
                 project.Description = clean_value(row["Description"]) or project.Description
             if pd.notna(row.get("Phase")):
                 project.Phase = clean_value(row["Phase"]) or project.Phase
+            if pd.notna(row.get("ProjectNumber")):
+                project_number = clean_value(row.get("ProjectNumber"))
+                if project_number is not None:
+                    project.LongName = str(project_number)
+                    APP_LOGGER.info("Updated project metadata ProjectNumber=%s", project_number)
         elif dt == "Site":
             name = clean_value(row.get("Name"))
             desc = clean_value(row.get("Description"))
@@ -1467,6 +1688,13 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
                 ifcopenshell.api.run("type.assign_type", ifc, related_objects=[elem], relating_type=type_obj)
             elif type_obj:
                 type_obj.Name = type_name
+        class_candidate, source = _resolve_class_mapping_candidate(elem, row)
+        APP_LOGGER.info(
+            "Class mapping candidate for %s resolved to %s via %s",
+            getattr(elem, "GlobalId", ""),
+            class_candidate,
+            source,
+        )
 
     if cobie_df is not None:
         mapping_keys = set()
@@ -1517,6 +1745,24 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
                         ifcopenshell.api.run("pset.edit_pset", ifc, pset=pset_entity, properties={pname: val})
                     except Exception:
                         pass
+            for field_name in CIVIL3D_EXTENDED_FIELDS:
+                if field_name not in row or pd.isna(row.get(field_name)):
+                    continue
+                val = row.get(field_name)
+                try:
+                    psets = ifcopenshell.util.element.get_psets(elem)
+                    if "Additional_Pset_GeneralCommon" not in psets and add_new == "yes":
+                        pset_entity = ifcopenshell.api.run("pset.add_pset", ifc, product=elem, name="Additional_Pset_GeneralCommon")
+                    else:
+                        pset_entity = None
+                        for rel in elem.IsDefinedBy or []:
+                            if rel.is_a("IfcRelDefinesByProperties") and getattr(rel.RelatingPropertyDefinition, "Name", "") == "Additional_Pset_GeneralCommon":
+                                pset_entity = rel.RelatingPropertyDefinition
+                                break
+                    if pset_entity:
+                        ifcopenshell.api.run("pset.edit_pset", ifc, pset=pset_entity, properties={field_name: val})
+                except Exception as exc:
+                    APP_LOGGER.warning("Failed to write Civil3D field %s on %s: %s", field_name, guid, exc)
 
     def set_uniclass(df, source_name):
         if df is None:
@@ -5959,7 +6205,10 @@ def excel_apply(session_id: str, payload: Dict[str, Any] = Body(...)):
     base = os.path.splitext(os.path.basename(in_path))[0]
     out_name = f"{base}_updated.ifc"
     out_path = os.path.join(root, out_name)
-    update_ifc_from_excel(in_path, xls_path, out_path, update_mode=payload.get("update_mode", "update"), add_new=payload.get("add_new", "no"))
+    try:
+        update_ifc_from_excel(in_path, xls_path, out_path, update_mode=payload.get("update_mode", "update"), add_new=payload.get("add_new", "no"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ifc": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"}}
 
 
