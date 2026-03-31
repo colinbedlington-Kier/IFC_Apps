@@ -234,6 +234,78 @@ def _clean_value(value: Any) -> str:
     return str(value)
 
 
+def _normalize_ifc_value(
+    value: Any,
+    *,
+    prop_name: str = "",
+    entity_type: str = "",
+    _depth: int = 0,
+) -> Any:
+    if _depth > 8:
+        APP_LOGGER.warning(
+            "IFC value normalization max depth reached property=%s entity_type=%s python_type=%s fallback_conversion=%s",
+            prop_name,
+            entity_type,
+            type(value).__name__,
+            True,
+        )
+        return str(value) if value is not None else None
+    if value is None:
+        return None
+    if hasattr(value, "wrappedValue"):
+        try:
+            return getattr(value, "wrappedValue")
+        except Exception:
+            APP_LOGGER.warning(
+                "IFC wrappedValue read failed property=%s entity_type=%s python_type=%s fallback_conversion=%s",
+                prop_name,
+                entity_type,
+                type(value).__name__,
+                True,
+            )
+    if isinstance(value, tuple):
+        return " | ".join("" if v is None else str(_normalize_ifc_value(v, prop_name=prop_name, entity_type=entity_type, _depth=_depth + 1)) for v in value)
+    if isinstance(value, list):
+        return " | ".join("" if v is None else str(_normalize_ifc_value(v, prop_name=prop_name, entity_type=entity_type, _depth=_depth + 1)) for v in value)
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    for attr in ("value", "Value", "NominalValue"):
+        if hasattr(value, attr):
+            try:
+                nested = getattr(value, attr)
+                if nested is not value:
+                    return _normalize_ifc_value(nested, prop_name=prop_name, entity_type=entity_type, _depth=_depth + 1)
+            except Exception:
+                continue
+    try:
+        APP_LOGGER.warning(
+            "IFC value fallback string conversion property=%s entity_type=%s python_type=%s fallback_conversion=%s",
+            prop_name,
+            entity_type,
+            type(value).__name__,
+            True,
+        )
+        return str(value)
+    except Exception:
+        APP_LOGGER.warning(
+            "IFC value conversion failed property=%s entity_type=%s python_type=%s fallback_conversion=%s",
+            prop_name,
+            entity_type,
+            type(value).__name__,
+            True,
+        )
+        return None
+
+
+def _extract_nominal_value(prop: Any) -> Any:
+    nominal = getattr(prop, "NominalValue", None)
+    return _normalize_ifc_value(
+        nominal,
+        prop_name=getattr(prop, "Name", "") or "",
+        entity_type=prop.is_a() if hasattr(prop, "is_a") else type(prop).__name__,
+    )
+
+
 def _line_ref(entity: Any) -> str:
     if entity is None:
         return ""
@@ -363,27 +435,64 @@ def _safe_get_psets(entity: Any) -> Dict[str, Dict[str, Any]]:
 def _extract_property_single_value(prop: Any) -> Tuple[str, str]:
     if not prop:
         return "", ""
-    if prop.is_a("IfcPropertySingleValue"):
-        value = getattr(prop, "NominalValue", None)
-        return _clean_value(getattr(value, "wrappedValue", value)), "IfcPropertySingleValue"
-    if prop.is_a("IfcPropertyEnumeratedValue"):
-        values = getattr(prop, "EnumerationValues", None) or []
-        clean = [_clean_value(getattr(v, "wrappedValue", v)) for v in values]
-        return ", ".join([v for v in clean if v]), "IfcPropertyEnumeratedValue"
-    if prop.is_a("IfcPropertyListValue"):
-        values = getattr(prop, "ListValues", None) or []
-        clean = [_clean_value(getattr(v, "wrappedValue", v)) for v in values]
-        return ", ".join([v for v in clean if v]), "IfcPropertyListValue"
-    if prop.is_a("IfcPropertyBoundedValue"):
-        lower = getattr(getattr(prop, "LowerBoundValue", None), "wrappedValue", getattr(prop, "LowerBoundValue", None))
-        upper = getattr(getattr(prop, "UpperBoundValue", None), "wrappedValue", getattr(prop, "UpperBoundValue", None))
-        return f"{_clean_value(lower)}..{_clean_value(upper)}", "IfcPropertyBoundedValue"
-    if prop.is_a("IfcPropertyReferenceValue"):
-        value = getattr(prop, "PropertyReference", None)
-        return _clean_value(value), "IfcPropertyReferenceValue"
-    if prop.is_a("IfcComplexProperty"):
-        return _clean_value(getattr(prop, "UsageName", "")), "IfcComplexProperty"
-    return "", prop.is_a()
+    try:
+        if prop.is_a("IfcPropertySingleValue"):
+            return _clean_value(_extract_nominal_value(prop)), "IfcPropertySingleValue"
+        if prop.is_a("IfcPropertyEnumeratedValue"):
+            values = getattr(prop, "EnumerationValues", None) or []
+            clean = [
+                _clean_value(
+                    _normalize_ifc_value(
+                        v,
+                        prop_name=getattr(prop, "Name", "") or "",
+                        entity_type=prop.is_a(),
+                    )
+                )
+                for v in values
+            ]
+            return ", ".join([v for v in clean if v]), "IfcPropertyEnumeratedValue"
+        if prop.is_a("IfcPropertyListValue"):
+            values = getattr(prop, "ListValues", None) or []
+            clean = [
+                _clean_value(
+                    _normalize_ifc_value(
+                        v,
+                        prop_name=getattr(prop, "Name", "") or "",
+                        entity_type=prop.is_a(),
+                    )
+                )
+                for v in values
+            ]
+            return ", ".join([v for v in clean if v]), "IfcPropertyListValue"
+        if prop.is_a("IfcPropertyBoundedValue"):
+            lower = _normalize_ifc_value(
+                getattr(prop, "LowerBoundValue", None),
+                prop_name=getattr(prop, "Name", "") or "",
+                entity_type=prop.is_a(),
+            )
+            upper = _normalize_ifc_value(
+                getattr(prop, "UpperBoundValue", None),
+                prop_name=getattr(prop, "Name", "") or "",
+                entity_type=prop.is_a(),
+            )
+            return f"{_clean_value(lower)}..{_clean_value(upper)}", "IfcPropertyBoundedValue"
+        if prop.is_a("IfcPropertyReferenceValue"):
+            value = _normalize_ifc_value(
+                getattr(prop, "PropertyReference", None),
+                prop_name=getattr(prop, "Name", "") or "",
+                entity_type=prop.is_a(),
+            )
+            return _clean_value(value), "IfcPropertyReferenceValue"
+        if prop.is_a("IfcComplexProperty"):
+            return _clean_value(getattr(prop, "UsageName", "")), "IfcComplexProperty"
+        return "", prop.is_a()
+    except Exception:
+        APP_LOGGER.exception(
+            "Failed to extract IFC property value property=%s entity_type=%s",
+            getattr(prop, "Name", "") or "",
+            prop.is_a() if hasattr(prop, "is_a") else type(prop).__name__,
+        )
+        return "", prop.is_a() if hasattr(prop, "is_a") else type(prop).__name__
 
 
 def _extract_quantity_value(quantity: Any) -> Tuple[str, str]:
@@ -401,7 +510,13 @@ def _extract_quantity_value(quantity: Any) -> Tuple[str, str]:
                 return _clean_value(value), quantity.is_a()
     if hasattr(quantity, "NominalValue"):
         value = getattr(quantity, "NominalValue", None)
-        return _clean_value(getattr(value, "wrappedValue", value)), quantity.is_a()
+        return _clean_value(
+            _normalize_ifc_value(
+                value,
+                prop_name=getattr(quantity, "Name", "") or "",
+                entity_type=quantity.is_a(),
+            )
+        ), quantity.is_a()
     return "", quantity.is_a()
 
 
@@ -1293,10 +1408,38 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
                         continue
                     for prop in pset.HasProperties:
                         val = None
-                        if prop.is_a("IfcPropertySingleValue") and prop.NominalValue:
-                            val = prop.NominalValue.wrappedValue
-                        elif prop.is_a("IfcPropertyEnumeratedValue") and prop.EnumerationValues:
-                            val = ", ".join(str(v.wrappedValue) for v in prop.EnumerationValues)
+                        try:
+                            if prop.is_a("IfcPropertySingleValue"):
+                                val = _extract_nominal_value(prop)
+                            elif prop.is_a("IfcPropertyEnumeratedValue") and prop.EnumerationValues:
+                                val = ", ".join(
+                                    _clean_value(
+                                        _normalize_ifc_value(
+                                            v,
+                                            prop_name=getattr(prop, "Name", "") or "",
+                                            entity_type=prop.is_a(),
+                                        )
+                                    )
+                                    for v in prop.EnumerationValues
+                                )
+                            elif prop.is_a("IfcPropertyListValue") and getattr(prop, "ListValues", None):
+                                val = ", ".join(
+                                    _clean_value(
+                                        _normalize_ifc_value(
+                                            v,
+                                            prop_name=getattr(prop, "Name", "") or "",
+                                            entity_type=prop.is_a(),
+                                        )
+                                    )
+                                    for v in prop.ListValues
+                                )
+                        except Exception:
+                            APP_LOGGER.exception(
+                                "Best-effort property extraction failed property=%s entity_type=%s",
+                                getattr(prop, "Name", "") or "",
+                                prop.is_a() if hasattr(prop, "is_a") else type(prop).__name__,
+                            )
+                            val = None
                         prop_rows.append([elem.GlobalId, elem.is_a(), getattr(elem, "Name", ""), getattr(elem, "ObjectType", ""), space_name, storey_name, building_name, site_name, pset_name, prop.Name, val])
                 elif pset.is_a("IfcElementQuantity"):
                     q_name = getattr(pset, "Name", "") or ""
@@ -3391,10 +3534,7 @@ def build_layer_review(ifc_path: str, allowed_values: List[str], confidence_thre
 def _extract_property_value(prop: ifcopenshell.entity_instance) -> Optional[str]:
     if not prop or not prop.is_a("IfcPropertySingleValue"):
         return None
-    nominal = getattr(prop, "NominalValue", None)
-    if nominal is None:
-        return None
-    return getattr(nominal, "wrappedValue", nominal)
+    return _extract_nominal_value(prop)
 
 
 def find_layer_properties(element: ifcopenshell.entity_instance) -> List[Dict[str, Any]]:
