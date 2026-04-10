@@ -1,6 +1,7 @@
 import logging
 import os
 import shutil
+import shlex
 import subprocess
 import threading
 from pathlib import Path
