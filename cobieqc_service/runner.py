@@ -17,10 +17,9 @@ COBIEQC_INPUT_ARG = "-i"
 COBIEQC_OUTPUT_ARG = "-o"
 COBIEQC_PHASE_ARG = "-p"
 COBIEQC_JAVA_LOCK = threading.Lock()
-COBIEQC_DEFAULT_JAVA_XMS = "256m"
+COBIEQC_DEFAULT_JAVA_XMS = "128m"
 COBIEQC_DEFAULT_JAVA_XMX = "512m"
-COBIEQC_DEFAULT_MAX_RAM_PERCENT = "50"
-COBIEQC_DEFAULT_CONTAINER_FLAGS = "-XX:+UseContainerSupport"
+COBIEQC_DEFAULT_CONTAINER_SUPPORT_FLAG = "-XX:+UseContainerSupport"
 COBIEQC_JAVA_DIAGNOSTIC_FLAGS = [
     "-XX:+PrintGCDetails",
     "-XX:+PrintGCDateStamps",
@@ -216,7 +215,7 @@ def _build_cobieqc_cmd(
     output_html_path: Path,
     stage: str,
 ) -> List[str]:
-    jvm_args = _effective_jvm_args()
+    jvm_args, _, _ = _effective_jvm_args()
     cmd = [
         java_bin,
         *jvm_args,
@@ -252,56 +251,39 @@ def _read_container_memory_bytes() -> Optional[int]:
     return None
 
 
-def _split_jvm_opts(raw: str) -> List[str]:
-    if not raw.strip():
-        return []
-    return shlex.split(raw)
+def _java_mem_to_bytes(value: str) -> int:
+    raw = (value or "").strip().lower()
+    if not raw:
+        raise ValueError("empty memory value")
+    multipliers = {
+        "k": 1024,
+        "m": 1024**2,
+        "g": 1024**3,
+        "t": 1024**4,
+    }
+    suffix = raw[-1]
+    if suffix in multipliers:
+        return int(raw[:-1]) * multipliers[suffix]
+    return int(raw)
 
 
-def _effective_jvm_args() -> List[str]:
-    configured_opts_raw = os.getenv("JAVA_TOOL_OPTIONS", "").strip() or os.getenv("JAVA_OPTS", "").strip()
-    configured_opts = _split_jvm_opts(configured_opts_raw)
+def _effective_jvm_args() -> Tuple[List[str], str, str]:
     xms = os.getenv("COBIEQC_JAVA_XMS", COBIEQC_DEFAULT_JAVA_XMS).strip() or COBIEQC_DEFAULT_JAVA_XMS
     xmx = os.getenv("COBIEQC_JAVA_XMX", COBIEQC_DEFAULT_JAVA_XMX).strip() or COBIEQC_DEFAULT_JAVA_XMX
-    max_ram_percent = (
-        os.getenv("COBIEQC_JAVA_MAX_RAM_PERCENT", COBIEQC_DEFAULT_MAX_RAM_PERCENT).strip()
-        or COBIEQC_DEFAULT_MAX_RAM_PERCENT
+    xms_bytes = _java_mem_to_bytes(xms)
+    xmx_bytes = _java_mem_to_bytes(xmx)
+    if xms_bytes > xmx_bytes:
+        raise ValueError(f"Invalid COBieQC JVM heap settings: Xms ({xms}) must be <= Xmx ({xmx}).")
+    return (
+        [
+            f"-Xms{xms}",
+            f"-Xmx{xmx}",
+            COBIEQC_DEFAULT_CONTAINER_SUPPORT_FLAG,
+            *COBIEQC_JAVA_DIAGNOSTIC_FLAGS,
+        ],
+        xms,
+        xmx,
     )
-    container_flags = (
-        os.getenv("COBIEQC_JAVA_CONTAINER_FLAGS", COBIEQC_DEFAULT_CONTAINER_FLAGS).strip()
-        or COBIEQC_DEFAULT_CONTAINER_FLAGS
-    )
-
-    def _has_prefix(prefix: str) -> bool:
-        return any(opt.startswith(prefix) for opt in configured_opts)
-
-    enforced_opts: List[str] = []
-    if not _has_prefix("-Xms"):
-        enforced_opts.append(f"-Xms{xms}")
-    if not _has_prefix("-Xmx"):
-        enforced_opts.append(f"-Xmx{xmx}")
-    if not _has_prefix("-XX:MaxRAMPercentage"):
-        enforced_opts.append(f"-XX:MaxRAMPercentage={max_ram_percent}")
-
-    if container_flags:
-        for flag in _split_jvm_opts(container_flags):
-            if flag not in configured_opts and flag not in enforced_opts:
-                enforced_opts.append(flag)
-
-    for flag in COBIEQC_JAVA_DIAGNOSTIC_FLAGS:
-        if flag not in configured_opts and flag not in enforced_opts:
-            enforced_opts.append(flag)
-
-    return [*configured_opts, *enforced_opts]
-
-
-def _child_java_env(jvm_args: List[str]) -> Dict[str, str]:
-    env = dict(os.environ)
-    joined = " ".join(jvm_args)
-    env["JAVA_TOOL_OPTIONS"] = joined
-    if not os.getenv("JAVA_TOOL_OPTIONS", "").strip():
-        env["JAVA_OPTS"] = joined
-    return env
 
 
 def _java_executable() -> str:
@@ -360,15 +342,25 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
 
     _log_preflight_diagnostics(jar_candidates, resource_candidates, resolved_resource_dir=resource_dir)
 
+    try:
+        _, configured_xms, configured_xmx = _effective_jvm_args()
+    except ValueError as exc:
+        LOGGER.error("COBieQC JVM configuration error: %s", exc)
+        return {
+            "ok": False,
+            "stdout": "",
+            "stderr": "",
+            "error": str(exc),
+        }
+
     java_bin = _java_executable()
     cmd = _build_cobieqc_cmd(java_bin, jar_path, input_path, output_html_path, stage)
     jvm_args = cmd[1 : cmd.index("-jar")]
     container_memory_bytes = _read_container_memory_bytes()
-    env = _child_java_env(jvm_args)
 
     LOGGER.info(
         "COBieQC execution context stage=%s java=%s jar=%s resources=%s input=%s cwd=%s "
-        "container_memory_bytes=%s jvm_args=%s cmd=%s runner_file=%s build_marker=%s",
+        "container_memory_bytes=%s xms=%s xmx=%s jvm_args=%s cmd=%s runner_file=%s build_marker=%s",
         stage,
         java_bin,
         jar_path,
@@ -376,11 +368,14 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
         input_path,
         resource_dir.parent,
         container_memory_bytes,
+        configured_xms,
+        configured_xmx,
         jvm_args,
         cmd,
         __file__,
         COBIEQC_RUNNER_BUILD_MARKER,
     )
+    LOGGER.info("COBieQC java launch command: %s", " ".join(cmd))
     LOGGER.info(
         "COBieQC final argv=%s runner_file=%s COBIEQC_RUNNER_BUILD_MARKER=%s flag_marker=%s",
         cmd,
@@ -396,7 +391,6 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(resource_dir.parent),
-                env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
