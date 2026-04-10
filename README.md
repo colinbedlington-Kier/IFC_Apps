@@ -90,6 +90,12 @@ COBie QC is now a built-in IFC Toolkit page available at **/tools/cobieqc** (no 
   - `COBIEQC_DATA_DIR=/data/cobieqc`
   - `COBIEQC_JAR_PATH=/data/cobieqc/CobieQcReporter.jar`
   - `COBIEQC_RESOURCE_DIR=/data/cobieqc/xsl_xml`
+- JVM memory guardrail env vars (recommended defaults for ~1GB containers):
+  - `COBIEQC_JAVA_XMS=128m`
+  - `COBIEQC_JAVA_XMX=512m`
+  - These are applied only to the COBieQC subprocess invocation (`java -Xms... -Xmx... -XX:+UseContainerSupport -jar ...`).
+  - `Xms` must be less than or equal to `Xmx`; invalid values fail fast with an explicit runtime error.
+- COBieQC Java runs are serialized with a process lock so only one JVM executes at a time per app container.
 - Hugging Face Docker Spaces install Java from `packages.txt` (`openjdk-21-jre-headless`).
 - The repo `Dockerfile` (used for local/containerized runs) also installs `openjdk-21-jre-headless`.
 - Reports are generated into per-job data directories (`$IFC_APP_DATA_DIR/jobs/cobieqc/<job_id>/`) instead of `COBieQC/reports/`.

@@ -5,6 +5,8 @@ ARG BUILD_MARKER=dev
 
 ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
+ENV COBIEQC_JAVA_XMS=128m
+ENV COBIEQC_JAVA_XMX=512m
 
 COPY requirements.txt packages.txt ./
 

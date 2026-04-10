@@ -2,6 +2,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -9,11 +10,20 @@ LOGGER = logging.getLogger("ifc_app.cobieqc")
 DEFAULT_TIMEOUT_SECONDS = int(os.getenv("COBIEQC_TIMEOUT_SECONDS", "300"))
 APP_ROOT = Path(__file__).resolve().parents[1]
 COBIEQC_DATA_ROOT = Path(os.getenv("COBIEQC_DATA_DIR", "/data/cobieqc")).expanduser()
-COBIEQC_RUNNER_BUILD_MARKER = "2026-03-24-flags-short-form"
+COBIEQC_RUNNER_BUILD_MARKER = "2026-04-10-jvm-memory-guardrails"
 COBIEQC_RUNNER_FLAG_MARKER = "flags=-i,-o,-p"
 COBIEQC_INPUT_ARG = "-i"
 COBIEQC_OUTPUT_ARG = "-o"
 COBIEQC_PHASE_ARG = "-p"
+COBIEQC_JAVA_LOCK = threading.Lock()
+COBIEQC_DEFAULT_JAVA_XMS = "128m"
+COBIEQC_DEFAULT_JAVA_XMX = "512m"
+COBIEQC_DEFAULT_CONTAINER_SUPPORT_FLAG = "-XX:+UseContainerSupport"
+COBIEQC_JAVA_DIAGNOSTIC_FLAGS = [
+    "-XX:+PrintGCDetails",
+    "-XX:+PrintGCDateStamps",
+    "-XX:+HeapDumpOnOutOfMemoryError",
+]
 
 LOGGER.info(
     "COBieQC runner version marker: %s build_marker=%s file=%s",
@@ -204,8 +214,10 @@ def _build_cobieqc_cmd(
     output_html_path: Path,
     stage: str,
 ) -> List[str]:
+    jvm_args, _, _ = _effective_jvm_args()
     cmd = [
         java_bin,
+        *jvm_args,
         "-jar",
         str(jar_path),
         COBIEQC_INPUT_ARG,
@@ -216,6 +228,61 @@ def _build_cobieqc_cmd(
         stage,
     ]
     return cmd
+
+
+def _read_container_memory_bytes() -> Optional[int]:
+    candidates = [
+        Path("/sys/fs/cgroup/memory.max"),
+        Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    ]
+    for candidate in candidates:
+        try:
+            if not candidate.exists() or not candidate.is_file():
+                continue
+            raw = candidate.read_text(encoding="utf-8").strip()
+            if not raw or raw == "max":
+                continue
+            value = int(raw)
+            if value > 0:
+                return value
+        except (ValueError, OSError):
+            continue
+    return None
+
+
+def _java_mem_to_bytes(value: str) -> int:
+    raw = (value or "").strip().lower()
+    if not raw:
+        raise ValueError("empty memory value")
+    multipliers = {
+        "k": 1024,
+        "m": 1024**2,
+        "g": 1024**3,
+        "t": 1024**4,
+    }
+    suffix = raw[-1]
+    if suffix in multipliers:
+        return int(raw[:-1]) * multipliers[suffix]
+    return int(raw)
+
+
+def _effective_jvm_args() -> Tuple[List[str], str, str]:
+    xms = os.getenv("COBIEQC_JAVA_XMS", COBIEQC_DEFAULT_JAVA_XMS).strip() or COBIEQC_DEFAULT_JAVA_XMS
+    xmx = os.getenv("COBIEQC_JAVA_XMX", COBIEQC_DEFAULT_JAVA_XMX).strip() or COBIEQC_DEFAULT_JAVA_XMX
+    xms_bytes = _java_mem_to_bytes(xms)
+    xmx_bytes = _java_mem_to_bytes(xmx)
+    if xms_bytes > xmx_bytes:
+        raise ValueError(f"Invalid COBieQC JVM heap settings: Xms ({xms}) must be <= Xmx ({xmx}).")
+    return (
+        [
+            f"-Xms{xms}",
+            f"-Xmx{xmx}",
+            COBIEQC_DEFAULT_CONTAINER_SUPPORT_FLAG,
+            *COBIEQC_JAVA_DIAGNOSTIC_FLAGS,
+        ],
+        xms,
+        xmx,
+    )
 
 
 def _java_executable() -> str:
@@ -274,21 +341,40 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
 
     _log_preflight_diagnostics(jar_candidates, resource_candidates, resolved_resource_dir=resource_dir)
 
+    try:
+        _, configured_xms, configured_xmx = _effective_jvm_args()
+    except ValueError as exc:
+        LOGGER.error("COBieQC JVM configuration error: %s", exc)
+        return {
+            "ok": False,
+            "stdout": "",
+            "stderr": "",
+            "error": str(exc),
+        }
+
     java_bin = _java_executable()
     cmd = _build_cobieqc_cmd(java_bin, jar_path, input_path, output_html_path, stage)
+    jvm_args = cmd[1 : cmd.index("-jar")]
+    container_memory_bytes = _read_container_memory_bytes()
 
     LOGGER.info(
-        "COBieQC execution context stage=%s java=%s jar=%s resources=%s input=%s cwd=%s cmd=%s runner_file=%s build_marker=%s",
+        "COBieQC execution context stage=%s java=%s jar=%s resources=%s input=%s cwd=%s "
+        "container_memory_bytes=%s xms=%s xmx=%s jvm_args=%s cmd=%s runner_file=%s build_marker=%s",
         stage,
         java_bin,
         jar_path,
         resource_dir,
         input_path,
         resource_dir.parent,
+        container_memory_bytes,
+        configured_xms,
+        configured_xmx,
+        jvm_args,
         cmd,
         __file__,
         COBIEQC_RUNNER_BUILD_MARKER,
     )
+    LOGGER.info("COBieQC java launch command: %s", " ".join(cmd))
     LOGGER.info(
         "COBieQC final argv=%s runner_file=%s COBIEQC_RUNNER_BUILD_MARKER=%s flag_marker=%s",
         cmd,
@@ -298,14 +384,28 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
     )
 
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(resource_dir.parent),
-            capture_output=True,
-            text=True,
-            timeout=DEFAULT_TIMEOUT_SECONDS,
-            check=False,
-        )
+        if COBIEQC_JAVA_LOCK.locked():
+            LOGGER.info("COBieQC java lock busy; waiting for active process to finish")
+        with COBIEQC_JAVA_LOCK:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(resource_dir.parent),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            LOGGER.info("COBieQC java process started pid=%s", proc.pid)
+            try:
+                stdout, stderr = proc.communicate(timeout=DEFAULT_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                return {
+                    "ok": False,
+                    "stdout": stdout or "",
+                    "stderr": stderr or "",
+                    "error": f"COBieQC timed out after {DEFAULT_TIMEOUT_SECONDS} seconds.",
+                }
     except FileNotFoundError:
         return {
             "ok": False,
@@ -313,16 +413,9 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
             "stderr": "",
             "error": "Java runtime not found. Ensure java is installed and available in PATH.",
         }
-    except subprocess.TimeoutExpired as exc:
-        return {
-            "ok": False,
-            "stdout": exc.stdout or "",
-            "stderr": exc.stderr or "",
-            "error": f"COBieQC timed out after {DEFAULT_TIMEOUT_SECONDS} seconds.",
-        }
 
-    stdout = proc.stdout or ""
-    stderr = proc.stderr or ""
+    stdout = stdout or ""
+    stderr = stderr or ""
     LOGGER.info(
         "COBieQC process completed exit_code=%s stdout=%s stderr=%s",
         proc.returncode,
