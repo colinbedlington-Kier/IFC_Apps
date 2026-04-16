@@ -11,11 +11,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import traceback
 import time
 import uuid
 import zipfile
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -65,6 +66,13 @@ from backend.ifc_file_size_reducer import (
 from backend.ifc_move_rotate import TransformRequest, transform_ifc_file
 from backend.project_tables import get_tables_for_project_slug
 
+try:
+    import gc
+    import psutil  # type: ignore
+except Exception:  # pragma: no cover - optional runtime dependency
+    gc = None  # type: ignore
+    psutil = None  # type: ignore
+
 STEP2IFC_ROOT = Path(__file__).resolve().parent / "step2ifc"
 if STEP2IFC_ROOT.exists():
     sys.path.append(str(STEP2IFC_ROOT))
@@ -86,6 +94,11 @@ QA_RESOURCE_DIR = Path(__file__).resolve().parent / "app" / "resources" / "ifc_q
 DATA_DIR = Path(__file__).resolve().parent / "data"
 IFC_QA_REFERENCE_DIR = Path(__file__).resolve().parent / "backend" / "ifc_qa" / "reference"
 UTC = datetime.timezone.utc
+HEAVY_JOB_SEMAPHORE = threading.Semaphore(1)
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
+MAX_IFC_BYTES = int(os.getenv("MAX_IFC_BYTES", str(80 * 1024 * 1024)))
+MAX_EXCEL_BYTES = int(os.getenv("MAX_EXCEL_BYTES", str(25 * 1024 * 1024)))
+HEAVY_JOB_TIMEOUT_SECONDS = int(os.getenv("HEAVY_JOB_TIMEOUT_SECONDS", "900"))
 
 def utc_now() -> datetime.datetime:
     return datetime.datetime.now(UTC)
@@ -138,6 +151,83 @@ def human_size(n: int) -> str:
             return f"{n:.0f} {unit}"
         n /= 1024
     return f"{n:.1f} TB"
+
+
+def _rss_mb() -> Optional[float]:
+    if psutil is None:
+        return None
+    try:
+        process = psutil.Process(os.getpid())
+        return round(process.memory_info().rss / (1024 * 1024), 2)
+    except Exception:
+        return None
+
+
+def log_memory_stage(
+    *,
+    stage: str,
+    session_id: Optional[str],
+    file_name: Optional[str],
+    file_size: Optional[int],
+    endpoint: str,
+    started_at: float,
+) -> None:
+    APP_LOGGER.info(
+        "memory_stage stage=%s rss_mb=%s session_id=%s file_name=%s file_size_bytes=%s endpoint=%s elapsed_s=%.3f",
+        stage,
+        _rss_mb(),
+        session_id or "-",
+        file_name or "-",
+        file_size if file_size is not None else -1,
+        endpoint,
+        time.monotonic() - started_at,
+    )
+
+
+def enforce_upload_limits(file_path: str, *, endpoint: str) -> None:
+    size = os.path.getsize(file_path)
+    if size > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds MAX_UPLOAD_BYTES ({human_size(MAX_UPLOAD_BYTES)}): {os.path.basename(file_path)}",
+        )
+    if file_path.lower().endswith(".ifc") and size > MAX_IFC_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"IFC exceeds MAX_IFC_BYTES ({human_size(MAX_IFC_BYTES)}); use a smaller model or worker tier.",
+        )
+    if file_path.lower().endswith((".xlsx", ".xlsm", ".xls")) and size > MAX_EXCEL_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Excel exceeds MAX_EXCEL_BYTES ({human_size(MAX_EXCEL_BYTES)}).",
+        )
+    APP_LOGGER.info("upload_limit_check endpoint=%s file=%s bytes=%s", endpoint, file_path, size)
+
+
+@contextmanager
+def single_flight_heavy_job(endpoint: str):
+    acquired = HEAVY_JOB_SEMAPHORE.acquire(blocking=False)
+    if not acquired:
+        raise HTTPException(status_code=429, detail="Another heavy IFC job is already running. Please retry shortly.")
+    try:
+        yield
+    finally:
+        HEAVY_JOB_SEMAPHORE.release()
+
+
+def assert_heavy_capacity(endpoint: str) -> None:
+    acquired = HEAVY_JOB_SEMAPHORE.acquire(blocking=False)
+    if not acquired:
+        raise HTTPException(status_code=429, detail=f"{endpoint} is busy; another heavy IFC job is already running.")
+    HEAVY_JOB_SEMAPHORE.release()
+
+
+def has_active_ifc_qa_job() -> bool:
+    jobs = getattr(IFC_QA_V2_REGISTRY, "jobs", {})
+    for job in jobs.values():
+        if job.get("status") in {"queued", "running"}:
+            return True
+    return False
 
 
 class SessionStore:
@@ -1665,15 +1755,42 @@ def _resolve_class_mapping_candidate(elem: Any, row: pd.Series) -> Tuple[str, st
     return "IfcBuildingElementProxy", "fallback_proxy"
 
 
-def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="update", add_new="no"):
+def _check_heavy_timeout(started_at: float, endpoint: str) -> None:
+    elapsed = time.monotonic() - started_at
+    if elapsed > HEAVY_JOB_TIMEOUT_SECONDS:
+        raise TimeoutError(f"{endpoint} exceeded HEAVY_JOB_TIMEOUT_SECONDS ({HEAVY_JOB_TIMEOUT_SECONDS}s)")
+
+
+def update_ifc_from_excel(
+    ifc_file,
+    excel_file,
+    output_path: str,
+    update_mode="update",
+    add_new="no",
+    *,
+    session_id: Optional[str] = None,
+    endpoint: str = "excel/update",
+):
+    started_at = time.monotonic()
     ifc_path = path_of(ifc_file)
     xls_path = path_of(excel_file)
+    file_size = os.path.getsize(ifc_path) if os.path.exists(ifc_path) else None
+    log_memory_stage(stage="file upload received", session_id=session_id, file_name=os.path.basename(ifc_path), file_size=file_size, endpoint=endpoint, started_at=started_at)
+    enforce_upload_limits(ifc_path, endpoint=endpoint)
+    enforce_upload_limits(xls_path, endpoint=endpoint)
+
     ifc = ifcopenshell.open(ifc_path)
+    log_memory_stage(stage="IFC file open", session_id=session_id, file_name=os.path.basename(ifc_path), file_size=file_size, endpoint=endpoint, started_at=started_at)
+    _check_heavy_timeout(started_at, endpoint)
+
     xls = pd.ExcelFile(xls_path)
-    elements_df = pd.read_excel(xls, "Elements")
+    elements_df = pd.read_excel(xls, "Elements", usecols=lambda c: c is not None)
     props_df = pd.read_excel(xls, "Properties")
     cobie_df = pd.read_excel(xls, "COBieMapping")
     project_df = pd.read_excel(xls, "ProjectData")
+    log_memory_stage(stage="workbook load", session_id=session_id, file_name=os.path.basename(xls_path), file_size=os.path.getsize(xls_path), endpoint=endpoint, started_at=started_at)
+    _check_heavy_timeout(started_at, endpoint)
+
     try:
         uniclass_pr_df = pd.read_excel(xls, "Uniclass_Pr")
     except Exception:
@@ -1797,7 +1914,14 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
                 )
 
     for _, row in elements_df.iterrows():
-        elem = ifc.by_guid(row["GlobalId"]) if pd.notna(row.get("GlobalId")) else None
+        guid = row.get("GlobalId")
+        if pd.isna(guid):
+            continue
+        try:
+            elem = ifc.by_guid(guid)
+        except Exception as exc:
+            APP_LOGGER.warning("IFC by_guid failed guid=%s error=%s", guid, exc)
+            continue
         if not elem:
             continue
         if pd.notna(row.get("OccurrenceName")):
@@ -1839,6 +1963,9 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
             source,
         )
 
+    log_memory_stage(stage="row iteration/update", session_id=session_id, file_name=os.path.basename(ifc_path), file_size=file_size, endpoint=endpoint, started_at=started_at)
+    _check_heavy_timeout(started_at, endpoint)
+
     if cobie_df is not None:
         mapping_keys = set()
         if COBIE_MAPPING is not None:
@@ -1856,7 +1983,11 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
             guid = row.get("GlobalId")
             if pd.isna(guid):
                 continue
-            elem = ifc.by_guid(guid)
+            try:
+                elem = ifc.by_guid(guid)
+            except Exception as exc:
+                APP_LOGGER.warning("IFC by_guid failed during COBie mapping guid=%s error=%s", guid, exc)
+                continue
             if not elem:
                 continue
 
@@ -1926,7 +2057,11 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
             guid = r.get("GlobalId")
             if pd.isna(guid):
                 continue
-            elem = ifc.by_guid(guid)
+            try:
+                elem = ifc.by_guid(guid)
+            except Exception as exc:
+                APP_LOGGER.warning("IFC by_guid failed during Uniclass mapping guid=%s error=%s", guid, exc)
+                continue
             if not elem:
                 continue
             ref = clean_value(r.get("Reference"))
@@ -1966,6 +2101,11 @@ def update_ifc_from_excel(ifc_file, excel_file, output_path: str, update_mode="u
     set_uniclass(uniclass_ef_df, "Uniclass EF Elements Functions")
 
     ifc.write(output_path)
+    log_memory_stage(stage="IFC write/export", session_id=session_id, file_name=os.path.basename(output_path), file_size=os.path.getsize(output_path), endpoint=endpoint, started_at=started_at)
+
+    xls.close()
+    if gc is not None:
+        gc.collect()
     return output_path
 
 
@@ -5254,20 +5394,22 @@ def _tail_text(value: str, max_chars: int = 4000) -> str:
 
 
 def _run_cobieqc_job(job_id: str) -> None:
+    started_at = time.monotonic()
     try:
-        job = COBIEQC_JOB_STORE.update_job(
-            job_id,
-            status=STATUS_RUNNING,
-            progress=0.1,
-            started_at=utc_now().isoformat() + "Z",
-            message="Running COBieQC reporter",
-        )
-        job_dir = COBIEQC_JOB_STORE.get_job_dir(job_id)
-        input_path = job_dir / job.get("input_filename", "input.xlsx")
-        stage = str(job.get("stage", "D")).upper()
-        COBIEQC_JOB_STORE.append_log(job_id, f"Running stage {stage} for {input_path.name}")
-
-        result = run_cobieqc(str(input_path), stage, str(job_dir))
+        with single_flight_heavy_job("/api/tools/cobieqc/run"):
+            job = COBIEQC_JOB_STORE.update_job(
+                job_id,
+                status=STATUS_RUNNING,
+                progress=0.1,
+                started_at=utc_now().isoformat() + "Z",
+                message="Running COBieQC reporter",
+            )
+            job_dir = COBIEQC_JOB_STORE.get_job_dir(job_id)
+            input_path = job_dir / job.get("input_filename", "input.xlsx")
+            stage = str(job.get("stage", "D")).upper()
+            COBIEQC_JOB_STORE.append_log(job_id, f"Running stage {stage} for {input_path.name}")
+            log_memory_stage(stage="COBieQC launch", session_id=job_id, file_name=input_path.name, file_size=input_path.stat().st_size if input_path.exists() else None, endpoint="/api/tools/cobieqc/run", started_at=started_at)
+            result = run_cobieqc(str(input_path), stage, str(job_dir))
         COBIEQC_JOB_STORE.append_log(job_id, "--- STDOUT ---")
         COBIEQC_JOB_STORE.append_log(job_id, result.get("stdout", ""))
         COBIEQC_JOB_STORE.append_log(job_id, "--- STDERR ---")
@@ -5282,6 +5424,7 @@ def _run_cobieqc_job(job_id: str) -> None:
                 finished_at=utc_now().isoformat() + "Z",
                 output_filename=result.get("output_filename", "report.html"),
             )
+            log_memory_stage(stage="response complete", session_id=job_id, file_name=result.get("output_filename", "report.html"), file_size=None, endpoint="/api/tools/cobieqc/run", started_at=started_at)
         else:
             COBIEQC_JOB_STORE.update_job(
                 job_id,
@@ -5312,13 +5455,15 @@ def startup_cleanup() -> None:
     APP_LOGGER.info("Startup network binding host=%s port=%s", host, port)
     bootstrap_cobieqc_assets()
     runtime_diag = get_cobieqc_runtime_diagnostics()
+    java_xmx_mb = os.getenv("COBIEQC_JAVA_XMX_MB", "512")
     APP_LOGGER.info(
-        "COBieQC startup diagnostics enabled=%s jar_exists=%s resource_dir_exists=%s jar_path=%s resource_dir=%s xml_count=%s xsl_count=%s",
+        "COBieQC startup health enabled=%s jar_exists=%s resource_dir_exists=%s jar_path=%s resource_dir=%s java_xmx_mb=%s xml_count=%s xsl_count=%s",
         runtime_diag["enabled"],
         runtime_diag["jar_exists"],
         runtime_diag["resource_dir_exists"],
         runtime_diag["jar_path"],
         runtime_diag["resource_dir"],
+        java_xmx_mb,
         runtime_diag["xml_count"],
         runtime_diag["xsl_count"],
     )
@@ -5660,6 +5805,7 @@ async def cobieqc_run(
     file: UploadFile = File(...),
     stage: str = Form("D"),
 ):
+    assert_heavy_capacity("/api/tools/cobieqc/run")
     runtime_diag = get_cobieqc_runtime_diagnostics()
     if not runtime_diag["enabled"]:
         raise HTTPException(
@@ -5671,18 +5817,28 @@ async def cobieqc_run(
     if stage not in {"D", "C"}:
         raise HTTPException(status_code=400, detail="Stage must be D or C")
 
-    data = await file.read()
     safe_name = sanitize_upload_filename(file.filename or "input.xlsx")
-    try:
-        validate_upload(safe_name, len(data))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
     job = COBIEQC_JOB_STORE.create_job(stage=stage, original_filename=safe_name)
     job_dir = COBIEQC_JOB_STORE.get_job_dir(job["job_id"])
     input_path = job_dir / "input.xlsx"
-    input_path.write_bytes(data)
-    COBIEQC_JOB_STORE.append_log(job["job_id"], f"Saved input file {safe_name} ({len(data)} bytes)")
+    written = 0
+    with input_path.open("wb") as dst:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > MAX_UPLOAD_BYTES:
+                input_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail=f"Upload exceeds MAX_UPLOAD_BYTES ({human_size(MAX_UPLOAD_BYTES)})")
+            dst.write(chunk)
+    try:
+        validate_upload(safe_name, written)
+    except ValueError as exc:
+        input_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    enforce_upload_limits(str(input_path), endpoint="/api/tools/cobieqc/run")
+    COBIEQC_JOB_STORE.append_log(job["job_id"], f"Saved input file {safe_name} ({written} bytes)")
 
     background_tasks.add_task(_run_cobieqc_job, job["job_id"])
     return {"job_id": job["job_id"], "status": "queued"}
@@ -5810,9 +5966,19 @@ async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
     for f in files:
         safe = sanitize_filename(os.path.basename(f.filename))
         dest = os.path.join(root, safe)
+        written = 0
         with open(dest, "wb") as dst:
-            content = await f.read()
-            dst.write(content)
+            while True:
+                chunk = await f.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    dst.close()
+                    os.remove(dest)
+                    raise HTTPException(status_code=413, detail=f"Upload exceeds MAX_UPLOAD_BYTES ({human_size(MAX_UPLOAD_BYTES)}): {safe}")
+                dst.write(chunk)
+        enforce_upload_limits(dest, endpoint="/api/session/{session_id}/upload")
         saved.append({"name": safe, "size": os.path.getsize(dest)})
     return {"files": saved}
 
@@ -5823,6 +5989,8 @@ async def ifc_qa_run(
     options_json: Optional[str] = Form(None),
     config_override_json: Optional[str] = Form(None),
 ):
+    if has_active_ifc_qa_job():
+        raise HTTPException(status_code=429, detail="An IFC QA job is already running on this replica. Please retry shortly.")
     if not files:
         raise HTTPException(status_code=400, detail="At least one IFC file is required")
 
@@ -5832,12 +6000,24 @@ async def ifc_qa_run(
         original_name = upload.filename or "upload.ifc"
         dest = upload_dir / sanitize_filename(original_name)
         with open(dest, "wb") as handle:
-            handle.write(await upload.read())
+            written = 0
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    handle.close()
+                    dest.unlink(missing_ok=True)
+                    raise HTTPException(status_code=413, detail=f"Upload exceeds MAX_UPLOAD_BYTES ({human_size(MAX_UPLOAD_BYTES)}): {original_name}")
+                handle.write(chunk)
+        enforce_upload_limits(str(dest), endpoint="/api/ifc-qa/run")
         file_records.append((original_name, str(dest)))
 
     options: Dict[str, Any] = {}
     if options_json:
         options = json.loads(options_json)
+    options["max_workers"] = 1
     cfg = default_config_from_dir(IFC_QA_REFERENCE_DIR)
     if config_override_json:
         override = json.loads(config_override_json)
@@ -6306,7 +6486,8 @@ def excel_extract(session_id: str, payload: Dict[str, Any] = Body(...)):
         plan_payload = dict(plan_payload or {})
         if "cobie_pairs" not in plan_payload and cached_preview.get("cobie_pairs"):
             plan_payload["cobie_pairs"] = [f"{item.get('pset')}.{item.get('property')}" for item in cached_preview.get("cobie_pairs", [])]
-    result = extract_to_excel(in_path, out_path, plan_payload=plan_payload)
+    with single_flight_heavy_job("/api/session/{session_id}/excel/extract"):
+        result = extract_to_excel(in_path, out_path, plan_payload=plan_payload)
     APP_LOGGER.info("excel_extract timings_ms=%s counts=%s source=%s", result.get("timings_ms", {}), result.get("counts", {}), source)
     return {
         "excel": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"},
@@ -6325,7 +6506,8 @@ def excel_scan(session_id: str, payload: Dict[str, Any] = Body(...)):
     if not os.path.isfile(in_path):
         raise HTTPException(status_code=404, detail="IFC file not found")
     timer = StageTimer()
-    preview = scan_model_for_excel_preview(in_path, timer=timer)
+    with single_flight_heavy_job("/api/session/{session_id}/excel/scan"):
+        preview = scan_model_for_excel_preview(in_path, timer=timer)
     EXCEL_SCAN_CACHE[f"{session_id}:{sanitize_filename(source)}"] = preview
     APP_LOGGER.info("excel_scan timings_ms=%s source=%s", preview.get("timings_ms", {}), source)
     return {"preview": preview}
@@ -6333,6 +6515,7 @@ def excel_scan(session_id: str, payload: Dict[str, Any] = Body(...)):
 
 @app.post("/api/session/{session_id}/excel/update")
 def excel_apply(session_id: str, payload: Dict[str, Any] = Body(...)):
+    started_at = time.monotonic()
     root = SESSION_STORE.ensure(session_id)
     ifc_name = payload.get("ifc_file")
     excel_name = payload.get("excel_file")
@@ -6342,13 +6525,27 @@ def excel_apply(session_id: str, payload: Dict[str, Any] = Body(...)):
     xls_path = os.path.join(root, sanitize_filename(excel_name))
     if not os.path.isfile(in_path) or not os.path.isfile(xls_path):
         raise HTTPException(status_code=404, detail="Input file(s) not found")
+    enforce_upload_limits(in_path, endpoint="/api/session/{session_id}/excel/update")
+    enforce_upload_limits(xls_path, endpoint="/api/session/{session_id}/excel/update")
     base = os.path.splitext(os.path.basename(in_path))[0]
     out_name = f"{base}_updated.ifc"
     out_path = os.path.join(root, out_name)
-    try:
-        update_ifc_from_excel(in_path, xls_path, out_path, update_mode=payload.get("update_mode", "update"), add_new=payload.get("add_new", "no"))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with single_flight_heavy_job("/api/session/{session_id}/excel/update"):
+        try:
+            update_ifc_from_excel(
+                in_path,
+                xls_path,
+                out_path,
+                update_mode=payload.get("update_mode", "update"),
+                add_new=payload.get("add_new", "no"),
+                session_id=session_id,
+                endpoint="/api/session/{session_id}/excel/update",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except TimeoutError as exc:
+            raise HTTPException(status_code=408, detail=str(exc)) from exc
+    log_memory_stage(stage="response complete", session_id=session_id, file_name=out_name, file_size=os.path.getsize(out_path), endpoint="/api/session/{session_id}/excel/update", started_at=started_at)
     return {"ifc": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"}}
 
 

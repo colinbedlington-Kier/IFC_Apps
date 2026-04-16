@@ -18,7 +18,7 @@ COBIEQC_OUTPUT_ARG = "-o"
 COBIEQC_PHASE_ARG = "-p"
 COBIEQC_JAVA_LOCK = threading.Lock()
 COBIEQC_DEFAULT_JAVA_XMS = "128m"
-COBIEQC_DEFAULT_JAVA_XMX = "512m"
+COBIEQC_DEFAULT_JAVA_XMX_MB = int(os.getenv("COBIEQC_JAVA_XMX_MB", "512"))
 COBIEQC_DEFAULT_CONTAINER_SUPPORT_FLAG = "-XX:+UseContainerSupport"
 COBIEQC_JAVA_DIAGNOSTIC_FLAGS = [
     "-XX:+PrintGCDetails",
@@ -269,9 +269,29 @@ def _java_mem_to_bytes(value: str) -> int:
 
 def _effective_jvm_args() -> Tuple[List[str], str, str]:
     xms = os.getenv("COBIEQC_JAVA_XMS", COBIEQC_DEFAULT_JAVA_XMS).strip() or COBIEQC_DEFAULT_JAVA_XMS
-    xmx = os.getenv("COBIEQC_JAVA_XMX", COBIEQC_DEFAULT_JAVA_XMX).strip() or COBIEQC_DEFAULT_JAVA_XMX
+    configured_xmx = os.getenv("COBIEQC_JAVA_XMX", "").strip()
+    explicit_xmx = bool(configured_xmx)
+    if not configured_xmx:
+        xmx_mb_raw = os.getenv("COBIEQC_JAVA_XMX_MB", str(COBIEQC_DEFAULT_JAVA_XMX_MB)).strip()
+        xmx = f"{int(xmx_mb_raw)}m"
+    else:
+        xmx = configured_xmx
     xms_bytes = _java_mem_to_bytes(xms)
     xmx_bytes = _java_mem_to_bytes(xmx)
+    container_memory_bytes = _read_container_memory_bytes()
+    if container_memory_bytes and not explicit_xmx:
+        safe_cap = int(container_memory_bytes * 0.75)
+        if xmx_bytes > safe_cap:
+            LOGGER.warning(
+                "COBieQC Xmx (%s bytes) exceeds 75%% of container memory (%s bytes); clamping.",
+                xmx_bytes,
+                container_memory_bytes,
+            )
+            xmx_bytes = safe_cap
+            xmx = f"{max(256, xmx_bytes // (1024 * 1024))}m"
+        if xms_bytes > xmx_bytes:
+            xms_bytes = min(xms_bytes, xmx_bytes)
+            xms = f"{max(128, xms_bytes // (1024 * 1024))}m"
     if xms_bytes > xmx_bytes:
         raise ValueError(f"Invalid COBieQC JVM heap settings: Xms ({xms}) must be <= Xmx ({xmx}).")
     return (
