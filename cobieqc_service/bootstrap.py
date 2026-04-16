@@ -119,14 +119,16 @@ def _resolve_existing_resource_dir(preferred_resource_dir: Path, configured_reso
     return None, "missing"
 
 
-def _download_to_temp(source_url: str, suffix: str, purpose: str) -> Path:
+def _download_to_temp(source_url: str, suffix: str, purpose: str) -> tuple[Path, str]:
     direct_url = google_drive_direct_download_url(source_url) if "drive.google.com" in source_url else source_url
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
         temp_path = Path(temp_file.name)
+    content_type = ""
     try:
         if requests is not None:
             with requests.get(direct_url, stream=True, timeout=120) as response:
                 response.raise_for_status()
+                content_type = response.headers.get("content-type", "")
                 with temp_path.open("wb") as handle:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
@@ -143,7 +145,7 @@ def _download_to_temp(source_url: str, suffix: str, purpose: str) -> Path:
     if temp_path.stat().st_size == 0:
         temp_path.unlink(missing_ok=True)
         raise RuntimeError(f"Downloaded {purpose} is empty")
-    return temp_path
+    return temp_path, content_type
 
 
 def _replace_file_atomically(source_file: Path, destination_file: Path) -> None:
@@ -187,9 +189,15 @@ def _replace_dir_atomically(source_dir: Path, destination_dir: Path) -> None:
 
 
 def _install_xml_from_zip(zip_url: str, resource_dir: Path) -> None:
-    zip_temp = _download_to_temp(zip_url, ".zip", "COBieQC XML ZIP")
+    download_result = _download_to_temp(zip_url, ".zip", "COBieQC XML ZIP")
+    if isinstance(download_result, tuple):
+        zip_temp, content_type = download_result
+    else:
+        zip_temp, content_type = download_result, ""
     extract_temp_dir: Optional[Path] = None
     try:
+        if "zip" not in (content_type or "").lower() and not zipfile.is_zipfile(zip_temp):
+            raise RuntimeError(f"COBieQC XML payload is not a ZIP archive (content-type={content_type!r})")
         extract_temp_dir = Path(tempfile.mkdtemp(prefix="cobieqc-xml-"))
         with zipfile.ZipFile(zip_temp) as archive:
             archive.extractall(extract_temp_dir)
@@ -248,7 +256,8 @@ def bootstrap_cobieqc_assets() -> None:
             LOGGER.info("COBieQC bootstrap: existing JAR kept at %s", jar_path)
         else:
             LOGGER.info("COBieQC bootstrap: downloading JAR to %s", jar_path)
-            jar_temp = _download_to_temp(jar_source_url, ".jar", "COBieQC JAR")
+            jar_download = _download_to_temp(jar_source_url, ".jar", "COBieQC JAR")
+            jar_temp = jar_download[0] if isinstance(jar_download, tuple) else jar_download
             _replace_file_atomically(jar_temp, jar_path)
             LOGGER.info("COBieQC bootstrap: JAR installed at %s", jar_path)
     except Exception as exc:
