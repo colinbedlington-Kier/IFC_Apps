@@ -523,28 +523,28 @@ def _get_xslt_engine() -> str:
     return os.getenv("COBIEQC_XSLT_ENGINE", "saxon").strip().lower() or "saxon"
 
 
+def _resolve_required_jar_path(env_name: str) -> Path:
+    configured = os.getenv(env_name, "").strip()
+    if not configured:
+        raise RuntimeError(f"Saxon configuration error: environment variable '{env_name}' is required but was not set.")
+    jar_path = Path(configured).expanduser().resolve()
+    if not jar_path.exists() or not jar_path.is_file():
+        raise RuntimeError(
+            f"Saxon configuration error: {env_name} points to a missing or non-file path: {jar_path}"
+        )
+    return jar_path
+
+
 def _resolve_saxon_command() -> List[str]:
     configured = os.getenv("COBIEQC_SAXON_CMD", "").strip()
     if configured:
         return shlex.split(configured)
-    jar_candidates = [
-        os.getenv("COBIEQC_SAXON_JAR_PATH", "").strip(),
-        str(APP_ROOT / "vendor" / "saxon" / "Saxon-HE.jar"),
-        str(APP_ROOT / "vendor" / "saxon" / "saxon-he.jar"),
-        "/usr/share/java/Saxon-HE.jar",
-        "/usr/share/java/saxon-he.jar",
-    ]
-    for candidate in jar_candidates:
-        if not candidate:
-            continue
-        jar_path = Path(candidate).expanduser().resolve()
-        if jar_path.exists() and jar_path.is_file():
-            java_bin = os.getenv("JAVA_BIN", "java").strip() or "java"
-            return [java_bin, "-jar", str(jar_path)]
-    raise RuntimeError(
-        "Saxon HE is required for COBieQC XSLT 2.0 execution but was not found. "
-        "Set COBIEQC_SAXON_JAR_PATH or COBIEQC_SAXON_CMD."
-    )
+    java_bin = os.getenv("JAVA_BIN", "java").strip() or "java"
+    saxon_jar = _resolve_required_jar_path("COBIEQC_SAXON_JAR_PATH")
+    xmlresolver_jar = _resolve_required_jar_path("COBIEQC_SAXON_XMLRESOLVER_JAR_PATH")
+    xmlresolver_data_jar = _resolve_required_jar_path("COBIEQC_SAXON_XMLRESOLVER_DATA_JAR_PATH")
+    classpath = os.pathsep.join([str(saxon_jar), str(xmlresolver_jar), str(xmlresolver_data_jar)])
+    return [java_bin, "-cp", classpath, "net.sf.saxon.Transform"]
 
 
 def _run_saxon_xslt(
@@ -554,15 +554,43 @@ def _run_saxon_xslt(
     params: Dict[str, str],
     logs: List[str],
 ) -> Tuple[str, str]:
-    command = [
-        *_resolve_saxon_command(),
-        f"-s:{xml_input_path}",
-        f"-xsl:{stylesheet_path}",
-        f"-o:{output_path}",
-    ]
+    logs.append("xslt_engine=saxon")
+    logs.append("saxon_main_class=net.sf.saxon.Transform")
+    configured_override = os.getenv("COBIEQC_SAXON_CMD", "").strip()
+    if configured_override:
+        command = [
+            *shlex.split(configured_override),
+            f"-s:{xml_input_path}",
+            f"-xsl:{stylesheet_path}",
+            f"-o:{output_path}",
+        ]
+        logs.append("saxon_command_source=override:COBIEQC_SAXON_CMD")
+    else:
+        saxon_jar = _resolve_required_jar_path("COBIEQC_SAXON_JAR_PATH")
+        xmlresolver_jar = _resolve_required_jar_path("COBIEQC_SAXON_XMLRESOLVER_JAR_PATH")
+        xmlresolver_data_jar = _resolve_required_jar_path("COBIEQC_SAXON_XMLRESOLVER_DATA_JAR_PATH")
+        logs.append(f"saxon_jar_path={saxon_jar}")
+        logs.append(f"saxon_jar_size_bytes={saxon_jar.stat().st_size}")
+        logs.append(f"xmlresolver_jar_path={xmlresolver_jar}")
+        logs.append(f"xmlresolver_jar_size_bytes={xmlresolver_jar.stat().st_size}")
+        logs.append(f"xmlresolver_data_jar_path={xmlresolver_data_jar}")
+        logs.append(f"xmlresolver_data_jar_size_bytes={xmlresolver_data_jar.stat().st_size}")
+        classpath = os.pathsep.join([str(saxon_jar), str(xmlresolver_jar), str(xmlresolver_data_jar)])
+        java_bin = os.getenv("JAVA_BIN", "java").strip() or "java"
+        command = [
+            java_bin,
+            "-cp",
+            classpath,
+            "net.sf.saxon.Transform",
+            f"-s:{xml_input_path}",
+            f"-xsl:{stylesheet_path}",
+            f"-o:{output_path}",
+        ]
+        logs.append(f"computed_classpath={classpath}")
+        logs.append("saxon_command_source=classpath_env_vars")
     for key, value in params.items():
         command.append(f"{key}={value}")
-    logs.append(f"xslt_engine=saxon command={' '.join(shlex.quote(part) for part in command)}")
+    logs.append(f"saxon_argv={command}")
     logs.append(f"xslt_engine=saxon input_xml_path={xml_input_path}")
     logs.append(f"xslt_engine=saxon stylesheet_path={stylesheet_path}")
     logs.append(f"xslt_engine=saxon output_path={output_path}")
