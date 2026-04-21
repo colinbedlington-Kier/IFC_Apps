@@ -1,9 +1,11 @@
 from pathlib import Path
+import os
+import subprocess
 
 import pytest
 from openpyxl import Workbook
 
-from ifc_app.cobieqc_native.engine import _resolve_saxon_command, run_cobieqc_native
+from ifc_app.cobieqc_native.engine import _resolve_saxon_command, _run_saxon_xslt, run_cobieqc_native
 from cobieqc_service import runner
 
 REQUIRED_RESOURCE_FILES = [
@@ -243,3 +245,53 @@ def test_saxon_executes_compiled_xslt_with_quantified_expression(monkeypatch, tm
     svrl_text = (job_dir / "validation_result.svrl.xml").read_text(encoding="utf-8")
     assert "quantifier_ok" in svrl_text
     assert "some $comp" in (job_dir / "compiled_validation.xsl").read_text(encoding="utf-8")
+
+
+def test_saxon_uses_explicit_classpath_env_vars(monkeypatch, tmp_path):
+    input_xml = tmp_path / "input.xml"
+    stylesheet = tmp_path / "stylesheet.xsl"
+    output_file = tmp_path / "result.xml"
+    saxon_jar = tmp_path / "saxon-he-12.9.jar"
+    xmlresolver_jar = tmp_path / "xmlresolver.jar"
+    xmlresolver_data_jar = tmp_path / "xmlresolver-data.jar"
+    input_xml.write_text("<root/>", encoding="utf-8")
+    stylesheet.write_text("<xsl:stylesheet version='3.0' xmlns:xsl='http://www.w3.org/1999/XSL/Transform'/>", encoding="utf-8")
+    saxon_jar.write_bytes(b"saxon")
+    xmlresolver_jar.write_bytes(b"resolver")
+    xmlresolver_data_jar.write_bytes(b"resolver-data")
+    output_file.write_text("<ok/>", encoding="utf-8")
+
+    monkeypatch.setenv("COBIEQC_SAXON_JAR_PATH", str(saxon_jar))
+    monkeypatch.setenv("COBIEQC_SAXON_XMLRESOLVER_JAR_PATH", str(xmlresolver_jar))
+    monkeypatch.setenv("COBIEQC_SAXON_XMLRESOLVER_DATA_JAR_PATH", str(xmlresolver_data_jar))
+    monkeypatch.delenv("COBIEQC_SAXON_CMD", raising=False)
+
+    captured: dict[str, object] = {}
+
+    def _fake_run(command, capture_output, text):
+        captured["command"] = command
+        return subprocess.CompletedProcess(command, 0, stdout="saxon ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    logs: list[str] = []
+    _run_saxon_xslt(input_xml, stylesheet, output_file, params={}, logs=logs)
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[0] == "java"
+    assert command[1] == "-cp"
+    assert command[3] == "net.sf.saxon.Transform"
+    expected_classpath = f"{saxon_jar}{os.pathsep}{xmlresolver_jar}{os.pathsep}{xmlresolver_data_jar}"
+    assert command[2] == expected_classpath
+    assert any(line.startswith("computed_classpath=") for line in logs)
+    assert any(line.startswith("saxon_argv=") for line in logs)
+
+
+def test_saxon_missing_jar_path_fails_with_named_env_var(monkeypatch, tmp_path):
+    monkeypatch.setenv("COBIEQC_SAXON_JAR_PATH", str(tmp_path / "missing-saxon.jar"))
+    monkeypatch.setenv("COBIEQC_SAXON_XMLRESOLVER_JAR_PATH", str(tmp_path / "xmlresolver.jar"))
+    monkeypatch.setenv("COBIEQC_SAXON_XMLRESOLVER_DATA_JAR_PATH", str(tmp_path / "xmlresolver-data.jar"))
+    monkeypatch.delenv("COBIEQC_SAXON_CMD", raising=False)
+
+    with pytest.raises(RuntimeError, match="COBIEQC_SAXON_JAR_PATH"):
+        _resolve_saxon_command()
