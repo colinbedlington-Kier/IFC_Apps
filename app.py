@@ -56,7 +56,14 @@ from cobieqc_service.runner import get_cobieqc_runtime_diagnostics, get_cobieqc_
 from cobieqc_service.security import sanitize_filename as sanitize_upload_filename
 from cobieqc_service.security import validate_upload
 from ifc_qa_service import REGISTRY as IFC_QA_V2_REGISTRY
-from ifc_qa_service import default_config_from_dir, start_job as start_ifc_qa_v2_job
+from ifc_qa_service import start_job as start_ifc_qa_v2_job
+from backend.ifc_qa.config_loader import (
+    REQUIRED_TOP_LEVEL_KEYS,
+    build_config_indexes,
+    load_default_config as load_ifc_qa_default_config,
+    merge_config_override,
+    validate_config_structure,
+)
 from backend.ifc_jobs import create_job as create_ifc_job, get_job as get_ifc_job, update_job as update_ifc_job
 from backend.ifc_file_size_reducer import (
     IfcFileSizeReducerError,
@@ -92,7 +99,6 @@ APP_LOGGER = logging.getLogger("ifc_app")
 RESOURCE_DIR = Path(__file__).resolve().parent / "resources"
 QA_RESOURCE_DIR = Path(__file__).resolve().parent / "app" / "resources" / "ifc_qa"
 DATA_DIR = Path(__file__).resolve().parent / "data"
-IFC_QA_REFERENCE_DIR = Path(__file__).resolve().parent / "backend" / "ifc_qa" / "reference"
 UTC = datetime.timezone.utc
 HEAVY_JOB_SEMAPHORE = threading.Semaphore(1)
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
@@ -6025,6 +6031,10 @@ async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
     return {"files": saved}
 
 
+def _public_ifc_qa_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: config.get(key) for key in REQUIRED_TOP_LEVEL_KEYS}
+
+
 @app.post("/api/ifc-qa/run")
 async def ifc_qa_run(
     files: List[UploadFile] = File(...),
@@ -6060,11 +6070,12 @@ async def ifc_qa_run(
     if options_json:
         options = json.loads(options_json)
     options["max_workers"] = 1
-    cfg = default_config_from_dir(IFC_QA_REFERENCE_DIR)
+    cfg = load_ifc_qa_default_config()
     if config_override_json:
         override = json.loads(config_override_json)
         if isinstance(override, dict):
-            cfg.update(override)
+            cfg = merge_config_override(cfg, override)
+            cfg["_indexes"] = build_config_indexes(cfg)
 
     job_id = start_ifc_qa_v2_job(file_records, options, cfg)
     return {"job_id": job_id}
@@ -6103,27 +6114,39 @@ def ifc_qa_result(job_id: str):
     return FileResponse(path, media_type="application/zip", filename="IFC Output.zip")
 
 
+@app.get("/api/ifc-qa/config")
+def ifc_qa_config():
+    return _public_ifc_qa_config(load_ifc_qa_default_config())
+
+
+@app.post("/api/ifc-qa/config/validate")
+def ifc_qa_config_validate(config: Dict[str, Any] = Body(...)):
+    errors = validate_config_structure(config)
+    return {"valid": len(errors) == 0, "errors": errors}
+
+
+@app.post("/api/ifc-qa/config/merge")
+def ifc_qa_config_merge(override_config: Dict[str, Any] = Body(...)):
+    default_config = load_ifc_qa_default_config()
+    merged = merge_config_override(default_config, override_config)
+    return _public_ifc_qa_config(merged)
+
+
 @app.get("/api/ifc-qa/config/default")
 def ifc_qa_default_config():
-    return default_config_from_dir(IFC_QA_REFERENCE_DIR)
+    return _public_ifc_qa_config(load_ifc_qa_default_config())
 
 
 @app.get("/api/ifc-qa/config/{session_id}")
 def ifc_qa_config_session(session_id: str):
-    return {
-        "session_id": session_id,
-        "config": default_config_from_dir(IFC_QA_REFERENCE_DIR),
-        "overrides": {},
-    }
+    return {"session_id": session_id, "config": _public_ifc_qa_config(load_ifc_qa_default_config()), "overrides": {}}
 
 
 @app.get("/api/ifc-qa/config/{session_id}/regex")
 def ifc_qa_config_regex_compat(session_id: str):
     return {
         "regex": [],
-        "patterns": [],
-        "overrides": {},
-        "message": "Regex extractor deprecated; using IFCOpenShell config.",
+        "message": "Regex extractor deprecated; using baked-in JSON config.",
     }
 
 

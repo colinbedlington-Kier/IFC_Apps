@@ -9,6 +9,7 @@ const qaState = {
     psetTemplate: {},
   },
   warning: "",
+  configLoaded: false,
 };
 
 const DEFAULT_SHEETS = [
@@ -54,23 +55,19 @@ async function ensureSession() {
 }
 
 async function loadQaConfig() {
-  const urls = [];
-  if (qaState.sessionId) urls.push(`/api/ifc-qa/config/${qaState.sessionId}`);
-  urls.push("/api/ifc-qa/config/default", "/api/ifc-qa/config");
-
-  for (const url of urls) {
-    try {
-      const resp = await fetch(url);
-      if (!resp.ok) continue;
-      const data = await resp.json();
-      qaState.qaConfig = normalizeConfig(data);
-      qaState.warning = "";
-      return;
-    } catch (err) {
-      console.warn(`Failed to load IFC QA config from ${url}`, err);
-    }
+  try {
+    const resp = await fetch("/api/ifc-qa/config");
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    qaState.qaConfig = normalizeConfig(data);
+    qaState.warning = "";
+    qaState.configLoaded = true;
+    return;
+  } catch (err) {
+    console.warn("Failed to load IFC QA config", err);
   }
-  qaState.warning = "Config unavailable; using defaults";
+  qaState.warning = "Failed to load IFC QA config. Extraction is disabled until config loads.";
+  qaState.configLoaded = false;
 }
 
 function warningBanner() {
@@ -79,6 +76,7 @@ function warningBanner() {
 }
 
 function extractorTemplate() {
+  const disabledAttr = qaState.configLoaded ? "" : "disabled";
   return `
   ${warningBanner()}
   <div class="stack">
@@ -90,8 +88,8 @@ function extractorTemplate() {
     <div id="qaSheetChecks" class="qa-grid"></div>
 
     <div class="inline">
-      <button class="btn secondary" id="qaConfigureBtn" type="button">Configure</button>
-      <button class="btn" id="qaStartBtn" type="button">Start QA Extraction</button>
+      <button class="btn secondary" id="qaConfigureBtn" type="button" ${disabledAttr}>Configure</button>
+      <button class="btn" id="qaStartBtn" type="button" ${disabledAttr}>Start QA Extraction</button>
       <button class="btn secondary" id="qaDownloadBtn" type="button" disabled>Download ZIP</button>
     </div>
 
@@ -202,6 +200,7 @@ function importConfig(ev) {
 }
 
 async function startRun() {
+  if (!qaState.configLoaded) return alert("Config is not loaded yet. Please reload and try again.");
   const input = qs("#qaIfcFiles");
   const files = Array.from(input?.files || []);
   if (!files.length) return alert("Please select IFC files");
