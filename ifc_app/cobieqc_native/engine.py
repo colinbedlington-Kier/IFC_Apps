@@ -2,7 +2,7 @@ import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from openpyxl import load_workbook
 from xml.etree import ElementTree as ET
@@ -85,47 +85,156 @@ class SchematronPipeline:
         self.resources_dir = resources_dir
         self.stage = stage
 
-    def validate(self, cobie_xml_path: Path, svrl_output_path: Path) -> Tuple[Dict[str, int], List[str], str]:
+    def validate(
+        self,
+        cobie_xml_path: Path,
+        svrl_output_path: Path,
+        compiled_xslt_output_path: Path,
+    ) -> Tuple[Dict[str, int], List[str], str, List[str]]:
         warnings: List[str] = []
+        logs: List[str] = []
         try:
             from lxml import etree
-            from lxml import isoschematron
         except Exception as exc:
             warnings.append(f"lxml unavailable for Schematron validation: {exc}")
             self._write_fallback_svrl(svrl_output_path, warnings, [])
-            return {"failed_asserts": 0, "successful_reports": 0, "diagnostics": 1}, warnings, ""
+            return {"failed_asserts": 0, "successful_reports": 0, "diagnostics": 1}, warnings, "", logs
 
         sch_path = self.resources_dir / "COBieRules.sch"
+        compile_xslt_path = self.resources_dir / "iso_svrl_for_xslt2.xsl"
+        skeleton_path = self.resources_dir / "iso_schematron_skeleton_for_saxon.xsl"
+        functions_path = self.resources_dir / "COBieRules_Functions.xsl"
         if not sch_path.exists():
             warnings.append("COBieRules.sch missing; generated fallback SVRL")
             self._write_fallback_svrl(svrl_output_path, warnings, [])
-            return {"failed_asserts": 0, "successful_reports": 0, "diagnostics": 1}, warnings, ""
-
-        xml_doc = etree.parse(str(cobie_xml_path))
-        sch_doc = etree.parse(str(sch_path))
+            return {"failed_asserts": 0, "successful_reports": 0, "diagnostics": 1}, warnings, "", logs
+        if not compile_xslt_path.exists():
+            warnings.append("iso_svrl_for_xslt2.xsl missing; generated fallback SVRL")
+            self._write_fallback_svrl(svrl_output_path, warnings, [])
+            return {"failed_asserts": 0, "successful_reports": 0, "diagnostics": 1}, warnings, "", logs
 
         try:
-            schema = isoschematron.Schematron(sch_doc, store_report=True, phase=self.stage)
-            schema.validate(xml_doc)
-            report_doc = schema.validation_report
-            svrl_output_path.write_bytes(etree.tostring(report_doc, encoding="utf-8", pretty_print=True, xml_declaration=True))
-            root = report_doc.getroot()
-            failed_asserts = len(root.xpath("//*[local-name()='failed-assert']"))
-            successful_reports = len(root.xpath("//*[local-name()='successful-report']"))
-            diagnostics = len(root.xpath("//*[local-name()='diagnostic-reference']"))
-            return (
-                {
-                    "failed_asserts": failed_asserts,
-                    "successful_reports": successful_reports,
-                    "diagnostics": diagnostics,
-                },
-                warnings,
-                "",
-            )
+            sch_doc = etree.parse(str(sch_path))
         except Exception as exc:
-            warnings.append(f"Schematron execution fallback used: {exc}")
+            warnings.append(f"Schematron execution fallback used: compilation failed during schematron compile: {exc}")
+            warnings.extend(self._safe_artifact_preview(sch_path))
             self._write_fallback_svrl(svrl_output_path, warnings, [str(exc)])
-            return {"failed_asserts": 0, "successful_reports": 0, "diagnostics": len(warnings)}, warnings, str(exc)
+            return {"failed_asserts": 0, "successful_reports": 0, "diagnostics": len(warnings)}, warnings, str(exc), logs
+        logs.append(self._phase_log("schematron_source_loaded", sch_path))
+        if skeleton_path.exists():
+            logs.append(self._phase_log("schematron_skeleton_loaded", skeleton_path))
+        if functions_path.exists():
+            logs.append(self._phase_log("schematron_functions_loaded", functions_path))
+
+        phase_id = self._resolve_phase_id(sch_doc)
+        if phase_id:
+            logs.append(f"schematron_phase_selected stage={self.stage} phase={phase_id}")
+        else:
+            warnings.append(
+                f"No explicit phase mapping found for stage '{self.stage}'. Running with default Schematron phase."
+            )
+
+        compile_step = "schematron compile"
+        try:
+            compiler_doc = etree.parse(str(compile_xslt_path))
+            compiler = etree.XSLT(compiler_doc)
+            compile_args = {"phase": etree.XSLT.strparam(phase_id)} if phase_id else {}
+            compiled_validation_doc = compiler(sch_doc, **compile_args)
+            compiled_xslt_bytes = etree.tostring(
+                compiled_validation_doc, encoding="utf-8", pretty_print=True, xml_declaration=True
+            )
+            compiled_xslt_output_path.write_bytes(compiled_xslt_bytes)
+            logs.append(self._phase_log("schematron_compiled_to_xslt", compiled_xslt_output_path))
+        except Exception as exc:
+            diagnostics = self._collect_schematron_diagnostics(sch_doc)
+            warnings.append(
+                f"Schematron execution fallback used: compilation failed during {compile_step}: {exc}"
+            )
+            warnings.extend(diagnostics)
+            self._write_fallback_svrl(svrl_output_path, warnings, [str(exc)])
+            return (
+                {"failed_asserts": 0, "successful_reports": 0, "diagnostics": len(warnings)},
+                warnings,
+                str(exc),
+                logs,
+            )
+
+        validation_step = "XML validation"
+        try:
+            xml_doc = etree.parse(str(cobie_xml_path))
+            validation_doc = etree.parse(str(compiled_xslt_output_path))
+            validation_transform = etree.XSLT(validation_doc)
+            svrl_doc = validation_transform(xml_doc)
+            svrl_bytes = etree.tostring(svrl_doc, encoding="utf-8", pretty_print=True, xml_declaration=True)
+            svrl_output_path.write_bytes(svrl_bytes)
+            logs.append(self._phase_log("validation_xslt_applied", compiled_xslt_output_path))
+            logs.append(self._phase_log("svrl_generated", svrl_output_path))
+        except Exception as exc:
+            warnings.append(f"Schematron execution fallback used: validation failed during {validation_step}: {exc}")
+            warnings.extend(self._safe_artifact_preview(compiled_xslt_output_path))
+            self._write_fallback_svrl(svrl_output_path, warnings, [str(exc)])
+            return (
+                {"failed_asserts": 0, "successful_reports": 0, "diagnostics": len(warnings)},
+                warnings,
+                str(exc),
+                logs,
+            )
+
+        root = etree.parse(str(svrl_output_path)).getroot()
+        failed_asserts = len(root.xpath("//*[local-name()='failed-assert']"))
+        successful_reports = len(root.xpath("//*[local-name()='successful-report']"))
+        diagnostics = len(root.xpath("//*[local-name()='diagnostic-reference']"))
+        return (
+            {
+                "failed_asserts": failed_asserts,
+                "successful_reports": successful_reports,
+                "diagnostics": diagnostics,
+            },
+            warnings,
+            "",
+            logs,
+        )
+
+    def _resolve_phase_id(self, sch_doc: Any) -> Optional[str]:
+        ns = {"sch": "http://purl.oclc.org/dsdl/schematron"}
+        stage_value = (self.stage or "").strip().upper()
+        phase_ids = [str(v) for v in sch_doc.xpath("/sch:schema/sch:phase/@id", namespaces=ns)]
+        if not phase_ids:
+            return None
+        if stage_value in phase_ids:
+            return stage_value
+        stage_keywords = {"D": "design", "C": "construction"}
+        keyword = stage_keywords.get(stage_value, stage_value.lower())
+        for candidate in phase_ids:
+            if keyword and keyword in candidate.lower():
+                return candidate
+        return phase_ids[0]
+
+    def _collect_schematron_diagnostics(self, sch_doc: Any) -> List[str]:
+        ns = {"sch": "http://purl.oclc.org/dsdl/schematron"}
+        pattern_ids = [str(v) for v in sch_doc.xpath("/sch:schema/sch:pattern/@id", namespaces=ns)]
+        rule_ids = [str(v) for v in sch_doc.xpath("//sch:rule/@id", namespaces=ns)]
+        phase_refs = [str(v) for v in sch_doc.xpath("/sch:schema/sch:phase/sch:active/@pattern", namespaces=ns)]
+        unresolved_refs = sorted(set(ref for ref in phase_refs if ref not in pattern_ids))
+        details = [
+            f"Schematron diagnostics: pattern_ids={','.join(pattern_ids) or '(none)'}",
+            f"Schematron diagnostics: rule_ids={','.join(rule_ids) or '(none)'}",
+            f"Schematron diagnostics: phase_pattern_refs={','.join(phase_refs) or '(none)'}",
+        ]
+        if unresolved_refs:
+            details.append(f"Schematron diagnostics: unresolved_pattern_refs={','.join(unresolved_refs)}")
+        return details
+
+    def _phase_log(self, phase: str, artifact: Path) -> str:
+        size = artifact.stat().st_size if artifact.exists() else 0
+        return f"{phase} path={artifact} size_bytes={size}"
+
+    def _safe_artifact_preview(self, artifact: Path) -> List[str]:
+        if not artifact.exists():
+            return [f"artifact_preview unavailable path={artifact} reason=missing"]
+        lines = artifact.read_text(encoding="utf-8", errors="replace").splitlines()[:20]
+        preview = " | ".join(lines)
+        return [f"artifact_preview path={artifact} lines_1_20={preview}"]
 
     def _write_fallback_svrl(self, output_path: Path, warnings: List[str], errors: List[str]) -> None:
         root = ET.Element("svrl:schematron-output", {"xmlns:svrl": "http://purl.oclc.org/dsdl/svrl"})
@@ -145,17 +254,27 @@ class SvrlHtmlRenderer:
     def __init__(self, resources_dir: Path) -> None:
         self.resources_dir = resources_dir
 
-    def render(self, svrl_path: Path, html_output_path: Path, summary: Dict[str, Any], warnings: List[str]) -> None:
+    def render(
+        self,
+        svrl_path: Path,
+        html_output_path: Path,
+        summary: Dict[str, Any],
+        warnings: List[str],
+    ) -> Tuple[List[str], str]:
+        logs: List[str] = []
+        error = ""
         css_path = self.resources_dir / "SpaceReport.css"
         target_css = html_output_path.parent / "SpaceReport.css"
         if css_path.exists():
             shutil.copy2(css_path, target_css)
+            logs.append(f"html_css_copied path={target_css} size_bytes={target_css.stat().st_size}")
 
         try:
             from lxml import etree
         except Exception:
             self._write_fallback_html(html_output_path, summary, warnings)
-            return
+            logs.append(f"html_generated path={html_output_path} size_bytes={html_output_path.stat().st_size}")
+            return logs, error
 
         xslt_candidates = [
             self.resources_dir / "SVRL_HTML_altLocation.xslt",
@@ -171,11 +290,18 @@ class SvrlHtmlRenderer:
                 transform = etree.XSLT(xslt_doc)
                 html_doc = transform(svrl_doc)
                 html_output_path.write_bytes(etree.tostring(html_doc, encoding="utf-8", pretty_print=True, method="html"))
-                return
-            except Exception:
+                logs.append(f"html_generated path={html_output_path} size_bytes={html_output_path.stat().st_size}")
+                return logs, error
+            except Exception as exc:
+                error = f"SVRL-to-HTML transform failed: {exc}"
                 continue
 
         self._write_fallback_html(html_output_path, summary, warnings)
+        logs.append(f"html_generated path={html_output_path} size_bytes={html_output_path.stat().st_size}")
+        if error and svrl_path.exists():
+            preview = svrl_path.read_text(encoding="utf-8", errors="replace").splitlines()[:20]
+            warnings.append(f"svrl_preview_first_20={' | '.join(preview)}")
+        return logs, error
 
     def _write_fallback_html(self, html_output_path: Path, summary: Dict[str, Any], warnings: List[str]) -> None:
         warning_items = "".join(f"<li>{_xml_escape(w)}</li>" for w in warnings)
@@ -206,9 +332,10 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
     out_dir = Path(job_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cobie_xml_path = out_dir / "cobie.xml"
-    svrl_xml_path = out_dir / "report.svrl.xml"
-    html_path = out_dir / "report.html"
+    cobie_xml_path = out_dir / "generated_cobie.xml"
+    compiled_validation_xslt_path = out_dir / "compiled_validation.xsl"
+    svrl_xml_path = out_dir / "validation_result.svrl.xml"
+    html_path = out_dir / "final_report.html"
     logs: List[str] = []
 
     try:
@@ -220,20 +347,26 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
         )
         cobie_xml_bytes, parse_warnings = builder.build()
         cobie_xml_path.write_bytes(cobie_xml_bytes)
+        logs.append(f"generated_cobie_xml path={cobie_xml_path} size_bytes={cobie_xml_path.stat().st_size}")
 
         logs.append("XML generated")
         validator = SchematronPipeline(resources_dir=resources_dir, stage=stage)
-        summary, svrl_warnings, svrl_error = validator.validate(cobie_xml_path, svrl_xml_path)
-        logs.append("schematron compiled")
-        logs.append("SVRL produced")
+        summary, svrl_warnings, svrl_error, schematron_logs = validator.validate(
+            cobie_xml_path,
+            svrl_xml_path,
+            compiled_validation_xslt_path,
+        )
+        logs.extend(schematron_logs)
 
         warnings = [*parse_warnings, *svrl_warnings]
         summary["warnings"] = warnings
         summary["stage"] = stage
 
         renderer = SvrlHtmlRenderer(resources_dir=resources_dir)
-        renderer.render(svrl_xml_path, html_path, summary, warnings)
-        logs.append("HTML produced")
+        html_logs, html_error = renderer.render(svrl_xml_path, html_path, summary, warnings)
+        logs.extend(html_logs)
+        if html_error:
+            warnings.append(f"Schematron execution fallback used: html generation failed during SVRL-to-HTML transform: {html_error}")
 
         return CobieQcNativeResult(
             ok=True,
