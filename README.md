@@ -84,6 +84,8 @@ COBie QC is now a built-in IFC Toolkit page available at **/tools/cobieqc** (no 
 - The repository does not include COBieQC runtime assets. Bootstrap uses:
   - `COBIEQC_JAR_SOURCE_URL` (default: Google Drive JAR share link)
   - `COBIEQC_XML_SOURCE_URL` (folder reference; default: Google Drive folder link)
+  - `COBIEQC_FORCE_JAR_REFRESH=true` to always replace the persisted JAR during startup.
+  - If `COBIEQC_XML_FILE_URLS_JSON` is set, `COBIEQC_XML_SOURCE_URL` is ignored.
 - `COBIEQC_XML_ZIP_SOURCE_URL` is deprecated and ignored for XML/XSL resources.
 - XML/XSL bootstrap no longer downloads/extracts ZIP archives; it validates a local resource folder and optionally performs folder sync only via folder-source handling.
 - For Railway, the most reliable setup is to mount/copy the unzipped `xsl_xml` folder directly at `COBIEQC_RESOURCE_DIR`.
