@@ -12,6 +12,7 @@
   const previewEl = document.getElementById("cobieqcPreview");
   const downloadEl = document.getElementById("cobieqcDownload");
   const errorEl = document.getElementById("cobieqcError");
+  const runtimeStatusEl = document.getElementById("cobieqcRuntimeStatus");
 
   const missingRuntimeMessage =
     "COBieQC runtime package is not installed or could not be restored from configured asset sources.";
@@ -35,11 +36,39 @@
       const resp = await fetch("/health");
       if (!resp.ok) return;
       const payload = await resp.json();
-      if (!payload?.cobieqc?.enabled) {
+      const qc = payload?.cobieqc || {};
+      const missingFiles = Array.isArray(qc.missing_files) ? qc.missing_files : [];
+      const warnings = Array.isArray(qc.warnings) ? qc.warnings : [];
+      const sourceMode = qc.source_mode || "unknown";
+      const resourcesReady = Boolean(qc.resources_ready);
+      const jarReady = Boolean(qc.jar_ready);
+
+      if (!resourcesReady || !jarReady || !payload?.cobieqc?.enabled) {
         runBtn.disabled = true;
-        fileInput.disabled = true;
+        fileInput.disabled = !resourcesReady;
         errorEl.style.display = "block";
         errorEl.textContent = payload?.cobieqc?.last_error || missingRuntimeMessage;
+
+        runtimeStatusEl.style.display = "block";
+        const lines = [
+          `<strong>COBieQC runtime status:</strong>`,
+          `Source mode: <code>${sourceMode}</code>`,
+          `JAR ready: <code>${jarReady}</code>`,
+          `Resources ready: <code>${resourcesReady}</code>`,
+        ];
+        if (missingFiles.length) {
+          lines.push(`Missing files: <code>${missingFiles.join(", ")}</code>`);
+        }
+        if (warnings.length) {
+          lines.push(`Warnings: <code>${warnings.join(" | ")}</code>`);
+        }
+        if ((qc.errors || []).length) {
+          lines.push(`Errors: <code>${qc.errors.join(" | ")}</code>`);
+        }
+        if (sourceMode === "unsupported_google_drive_folder") {
+          lines.push("Google Drive folder URLs are unsupported. Configure COBIEQC_XML_FILE_URLS_JSON with direct file URLs.");
+        }
+        runtimeStatusEl.innerHTML = lines.join("<br/>");
       }
     } catch (_err) {
       // Best effort only.

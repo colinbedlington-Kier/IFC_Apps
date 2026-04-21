@@ -3,6 +3,17 @@ from pathlib import Path
 import app
 from cobieqc_service import runner
 
+REQUIRED_FILES = [
+    "SpaceReport.css",
+    "iso_svrl_for_xslt2.xsl",
+    "COBieExcelTemplate.xml",
+    "COBieRules.sch",
+    "iso_schematron_skeleton_for_saxon.xsl",
+    "SVRL_HTML_altLocation.xslt",
+    "COBieRules_Functions.xsl",
+    "_SVRL_HTML_altLocation.xslt",
+]
+
 
 def test_health_endpoint_returns_200_and_status_ok():
     health_route = next(route for route in app.app.routes if getattr(route, "path", None) == "/health")
@@ -11,6 +22,9 @@ def test_health_endpoint_returns_200_and_status_ok():
     assert payload['status'] == 'ok'
     assert payload['service'] == 'ifc-tools'
     assert 'cobieqc' in payload
+    assert 'jar_ready' in payload['cobieqc']
+    assert 'resources_ready' in payload['cobieqc']
+    assert 'missing_files' in payload['cobieqc']
 
 
 def test_resolve_server_host_port_uses_env_port(monkeypatch):
@@ -39,8 +53,8 @@ def test_cobieqc_runtime_uses_env_specified_paths(monkeypatch, tmp_path):
     resource_dir = cobie_root / 'xsl_xml'
     resource_dir.mkdir(parents=True)
     jar_path.write_bytes(b'jar-binary-placeholder')
-    (resource_dir / 'template.xml').write_text('<xml />', encoding='utf-8')
-    (resource_dir / 'style.xsl').write_text('<xsl:stylesheet version="1.0"/>', encoding='utf-8')
+    for filename in REQUIRED_FILES:
+        (resource_dir / filename).write_text('x', encoding='utf-8')
 
     monkeypatch.setenv('COBIEQC_JAR_PATH', str(jar_path))
     monkeypatch.setenv('COBIEQC_RESOURCE_DIR', str(resource_dir))

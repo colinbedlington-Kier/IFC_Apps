@@ -25,6 +25,16 @@ COBIEQC_JAVA_DIAGNOSTIC_FLAGS = [
     "-XX:+PrintGCDateStamps",
     "-XX:+HeapDumpOnOutOfMemoryError",
 ]
+COBIEQC_REQUIRED_RESOURCE_FILES = [
+    "SpaceReport.css",
+    "iso_svrl_for_xslt2.xsl",
+    "COBieExcelTemplate.xml",
+    "COBieRules.sch",
+    "iso_schematron_skeleton_for_saxon.xsl",
+    "SVRL_HTML_altLocation.xslt",
+    "COBieRules_Functions.xsl",
+    "_SVRL_HTML_altLocation.xslt",
+]
 
 LOGGER.info(
     "COBieQC runner version marker: %s build_marker=%s file=%s",
@@ -145,8 +155,10 @@ def validate_cobieqc_resource_dir(path: Path) -> Dict[str, object]:
         "xsl_count": 0,
         "valid": False,
         "missing": [],
+        "missing_required_files": [],
     }
     missing: List[str] = []
+    missing_required_files: List[str] = []
     if not resolved.exists():
         missing.append("directory not found")
     elif not resolved.is_dir():
@@ -163,7 +175,16 @@ def validate_cobieqc_resource_dir(path: Path) -> Dict[str, object]:
             missing.append("missing *.xml resource files")
         if counts["xsl_count"] == 0:
             missing.append("missing *.xsl resource files")
+        for required_file in COBIEQC_REQUIRED_RESOURCE_FILES:
+            required_path = resolved / required_file
+            if not required_path.exists() or not required_path.is_file() or required_path.stat().st_size == 0:
+                missing_required_files.append(required_file)
+        if missing_required_files:
+            missing.append(
+                "missing required COBieQC resources: " + ", ".join(missing_required_files)
+            )
     result["missing"] = missing
+    result["missing_required_files"] = missing_required_files
     result["valid"] = len(missing) == 0
     return result
 
