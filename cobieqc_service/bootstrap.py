@@ -1,8 +1,9 @@
 import logging
+import json
 import os
 import shutil
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
@@ -19,6 +20,7 @@ LOGGER = logging.getLogger("ifc_app.cobieqc.bootstrap")
 DEFAULT_JAR_SOURCE_URL = "https://drive.google.com/file/d/19wRbk-TNoHNOmRgqqDP4AjbRqawzE7wq/view?usp=drive_link"
 DEFAULT_XML_SOURCE_URL = "https://drive.google.com/drive/folders/13ZYp5lb1B57nmPpLMZnCS3zP7I--zFjg?usp=drive_link"
 DEFAULT_XML_FOLDER_SOURCE_URL = DEFAULT_XML_SOURCE_URL
+COBIEQC_XML_FILE_URLS_JSON_ENV = "COBIEQC_XML_FILE_URLS_JSON"
 DEPRECATED_XML_ZIP_SOURCE_ENV = "COBIEQC_XML_ZIP_SOURCE_URL"
 _ZIP_DEPRECATION_LOGGED = False
 
@@ -27,11 +29,17 @@ _ZIP_DEPRECATION_LOGGED = False
 class CobieQcBootstrapStatus:
     enabled: bool
     jar_exists: bool
+    jar_ready: bool
     resource_dir_exists: bool
     resource_dir_populated: bool
+    resources_ready: bool
     jar_path: str
     resource_dir: str
     resource_source: str = "missing"
+    source_mode: str = "none"
+    missing_files: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
     last_error: str = ""
 
 
@@ -98,6 +106,23 @@ def _is_non_empty_file(path: Path) -> bool:
 
 def _validate_resource_dir(path: Path) -> dict:
     return validate_cobieqc_resource_dir(path)
+
+
+def _is_html_like(content_type: str, content_prefix: bytes) -> bool:
+    lowered = (content_type or "").lower()
+    if "text/html" in lowered:
+        return True
+    snippet = (content_prefix or b"").lstrip()[:200].lower()
+    return snippet.startswith(b"<!doctype html") or snippet.startswith(b"<html")
+
+
+def _force_resource_download_enabled() -> bool:
+    value = (
+        os.getenv("COBIEQC_XML_FORCE_DOWNLOAD", "")
+        or os.getenv("COBIEQC_FORCE_DOWNLOAD", "")
+        or os.getenv("FORCE", "")
+    ).strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def _resource_dir_resolution_candidates(preferred_resource_dir: Path, configured_resource_dir: Path) -> list[Path]:
@@ -180,7 +205,7 @@ def _download_to_temp(source_url: str, suffix: str, purpose: str) -> tuple[Path,
     content_type = ""
     try:
         if requests is not None:
-            with requests.get(direct_url, stream=True, timeout=120) as response:
+            with requests.get(direct_url, stream=True, timeout=120, allow_redirects=True) as response:
                 response.raise_for_status()
                 content_type = response.headers.get("content-type", "")
                 with temp_path.open("wb") as handle:
@@ -196,10 +221,38 @@ def _download_to_temp(source_url: str, suffix: str, purpose: str) -> tuple[Path,
         temp_path.unlink(missing_ok=True)
         raise
 
-    if temp_path.stat().st_size == 0:
+    file_size = temp_path.stat().st_size
+    if file_size == 0:
         temp_path.unlink(missing_ok=True)
         raise RuntimeError(f"Downloaded {purpose} is empty")
+    with temp_path.open("rb") as handle:
+        prefix = handle.read(1024)
+    if _is_html_like(content_type, prefix):
+        text_prefix = prefix.decode("utf-8", errors="ignore").lower()
+        if "drive.google.com" in direct_url and ("google drive" in text_prefix or "confirm" in text_prefix):
+            temp_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Downloaded {purpose} appears to be a Google Drive viewer/confirmation page, not the file content"
+            )
+        temp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Downloaded {purpose} appears to be HTML content instead of a file")
     return temp_path, content_type
+
+
+def _load_xml_file_urls_mapping(raw_json: str) -> dict[str, str]:
+    if not raw_json.strip():
+        return {}
+    parsed = json.loads(raw_json)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{COBIEQC_XML_FILE_URLS_JSON_ENV} must be a JSON object")
+    normalized: dict[str, str] = {}
+    for key, value in parsed.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(f"{COBIEQC_XML_FILE_URLS_JSON_ENV} contains an invalid filename key")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{COBIEQC_XML_FILE_URLS_JSON_ENV} entry '{key}' has an invalid URL")
+        normalized[key.strip()] = value.strip()
+    return normalized
 
 
 def _copy_packaged_resource_dir(preferred_resource_dir: Path, configured_resource_dir: Path) -> tuple[Optional[Path], str]:
@@ -243,6 +296,9 @@ def _build_status(
     last_error: str = "",
     resolved_resource_dir: Optional[Path] = None,
     resource_source: str = "missing",
+    source_mode: str = "none",
+    warnings: Optional[list[str]] = None,
+    errors: Optional[list[str]] = None,
 ) -> CobieQcBootstrapStatus:
     jar_path = _jar_path()
     resource_dir = (resolved_resource_dir or _resource_dir()).expanduser().resolve()
@@ -250,14 +306,27 @@ def _build_status(
     resource_validation = _validate_resource_dir(resource_dir)
     resource_exists = bool(resource_validation["exists"] and resource_validation["is_dir"])
     resource_populated = bool(resource_validation["valid"])
+    jar_ready = jar_exists
+    missing_files = list(resource_validation.get("missing_required_files") or [])
+    resources_ready = resource_exists and resource_populated and not missing_files
+    status_warnings = list(warnings or [])
+    status_errors = list(errors or [])
+    if last_error and last_error not in status_errors:
+        status_errors.append(last_error)
     return CobieQcBootstrapStatus(
-        enabled=jar_exists and resource_populated,
+        enabled=jar_ready and resources_ready,
         jar_exists=jar_exists,
+        jar_ready=jar_ready,
         resource_dir_exists=resource_exists,
         resource_dir_populated=resource_populated,
+        resources_ready=resources_ready,
         jar_path=str(jar_path),
         resource_dir=str(resource_dir),
-        resource_source=resource_source if resource_populated else "missing",
+        resource_source=resource_source if resources_ready else "missing",
+        source_mode=source_mode,
+        missing_files=missing_files,
+        warnings=status_warnings,
+        errors=status_errors,
         last_error=last_error,
     )
 
@@ -279,19 +348,27 @@ def bootstrap_cobieqc_assets() -> None:
     preferred_resource_dir = (_data_root() / "xsl_xml").expanduser()
     jar_source_url = os.getenv("COBIEQC_JAR_SOURCE_URL", DEFAULT_JAR_SOURCE_URL).strip() or DEFAULT_JAR_SOURCE_URL
     xml_source_url = os.getenv("COBIEQC_XML_SOURCE_URL", DEFAULT_XML_SOURCE_URL).strip() or DEFAULT_XML_SOURCE_URL
+    xml_file_urls_raw = os.getenv(COBIEQC_XML_FILE_URLS_JSON_ENV, "").strip()
+    xml_file_urls: dict[str, str] = {}
     legacy_xml_zip_source_url = os.getenv(DEPRECATED_XML_ZIP_SOURCE_ENV, "").strip()
 
     data_root.mkdir(parents=True, exist_ok=True)
     LOGGER.info("COBieQC bootstrap: data root ready at %s", data_root)
 
+    warnings: list[str] = []
     errors: list[str] = []
 
     if legacy_xml_zip_source_url and not _ZIP_DEPRECATION_LOGGED:
-        LOGGER.warning(
-            "COBieQC bootstrap: %s is deprecated and ignored; XML ZIP bootstrap is disabled",
-            DEPRECATED_XML_ZIP_SOURCE_ENV,
-        )
+        message = f"{DEPRECATED_XML_ZIP_SOURCE_ENV} is deprecated and ignored; XML ZIP bootstrap is disabled"
+        LOGGER.warning("COBieQC bootstrap: %s", message)
+        warnings.append(message)
         _ZIP_DEPRECATION_LOGGED = True
+
+    if xml_file_urls_raw:
+        try:
+            xml_file_urls = _load_xml_file_urls_mapping(xml_file_urls_raw)
+        except Exception as exc:
+            errors.append(f"Invalid {COBIEQC_XML_FILE_URLS_JSON_ENV}: {exc}")
 
     try:
         if _is_non_empty_file(jar_path):
@@ -307,15 +384,17 @@ def bootstrap_cobieqc_assets() -> None:
         LOGGER.error("COBieQC bootstrap JAR install failed: %s", exc)
 
     resolved_resource_dir, resource_source = _resolve_existing_resource_dir(preferred_resource_dir, resource_dir)
+    source_mode = "existing"
 
     if not resolved_resource_dir:
         fallback_dir, fallback_source = _copy_packaged_resource_dir(preferred_resource_dir, resource_dir)
         if fallback_dir:
             resolved_resource_dir, resource_source = fallback_dir, fallback_source
             LOGGER.info("COBieQC bootstrap: copied packaged fallback resources into %s", resolved_resource_dir)
+            source_mode = "packaged_fallback"
 
     xml_source_kind = _classify_xml_source_url(xml_source_url)
-    remote_folder_sync_supported = xml_source_kind in {"local_folder", "remote_folder_reference"}
+    remote_folder_sync_supported = False
     LOGGER.info(
         "COBieQC bootstrap: xml_source_kind=%s xml_source_url_present=%s remote_folder_sync_supported=%s",
         xml_source_kind,
@@ -323,30 +402,50 @@ def bootstrap_cobieqc_assets() -> None:
         remote_folder_sync_supported,
     )
 
+    if _is_google_drive_folder_url(xml_source_url):
+        warning = (
+            "Google Drive folder URLs in COBIEQC_XML_SOURCE_URL are unsupported; "
+            f"use {COBIEQC_XML_FILE_URLS_JSON_ENV} with direct file download URLs"
+        )
+        warnings.append(warning)
+        LOGGER.warning("COBieQC bootstrap: %s", warning)
+        if not resolved_resource_dir and not xml_file_urls:
+            errors.append("resource bootstrap unsupported for Google Drive folder URL source mode")
+            source_mode = "unsupported_google_drive_folder"
+
+    if xml_file_urls:
+        resource_dir.mkdir(parents=True, exist_ok=True)
+        source_mode = "file_urls_json"
+        force_download = _force_resource_download_enabled()
+        for filename, file_url in xml_file_urls.items():
+            destination = resource_dir / filename
+            needs_download = force_download or (not destination.exists()) or destination.stat().st_size == 0
+            if not needs_download:
+                continue
+            try:
+                LOGGER.info("COBieQC bootstrap: downloading resource %s -> %s", filename, destination)
+                temp_file, _ = _download_to_temp(file_url, destination.suffix or ".bin", f"COBieQC resource '{filename}'")
+                _replace_file_atomically(temp_file, destination)
+            except Exception as exc:
+                errors.append(f"resource download failed for {filename}: {exc}")
+                LOGGER.error("COBieQC bootstrap: resource download failed for %s: %s", filename, exc)
+        validation = _validate_resource_dir(resource_dir)
+        if validation["valid"]:
+            resolved_resource_dir = resource_dir.expanduser().resolve()
+            resource_source = "file_urls_json"
+        else:
+            missing_required_files = validation.get("missing_required_files", [])
+            errors.append(
+                "COBieQC resource directory missing required files after download: "
+                + ", ".join(missing_required_files or validation["missing"])
+            )
+    elif not resolved_resource_dir and not _is_google_drive_folder_url(xml_source_url):
+        source_mode = "unconfigured"
+
     if resolved_resource_dir:
         LOGGER.info("COBieQC bootstrap: using COBieQC resource folder at %s", resolved_resource_dir)
-    elif xml_source_url:
-        sync_ok, sync_message = _sync_resource_folder_from_source(xml_source_url, resource_dir)
-        if sync_ok:
-            validation = _validate_resource_dir(resource_dir)
-            if validation["valid"]:
-                resolved_resource_dir = resource_dir.expanduser().resolve()
-                resource_source = "folder_sync"
-                LOGGER.info("COBieQC bootstrap: COBieQC resource folder synced to %s", resolved_resource_dir)
-            else:
-                errors.append(
-                    "COBieQC resource directory missing expected files after sync: " + "; ".join(validation["missing"])
-                )
-                LOGGER.warning(
-                    "COBieQC bootstrap: COBieQC resource directory missing expected files after sync at %s (%s)",
-                    resource_dir,
-                    "; ".join(validation["missing"]),
-                )
-        else:
-            errors.append(f"COBieQC resource folder sync failed: {sync_message}")
-            LOGGER.warning("COBieQC bootstrap: COBieQC resource folder sync failed: %s", sync_message)
     else:
-        errors.append("COBieQC resource folder unavailable: no local resources and no folder source configured")
+        errors.append("COBieQC resource folder unavailable: missing required files in resource directory")
         LOGGER.warning("COBieQC bootstrap: COBieQC resource folder unavailable")
 
     last_error = " | ".join(errors)
@@ -354,6 +453,9 @@ def bootstrap_cobieqc_assets() -> None:
         last_error=last_error,
         resolved_resource_dir=resolved_resource_dir,
         resource_source=resource_source,
+        source_mode=source_mode,
+        warnings=warnings,
+        errors=errors,
     )
     LOGGER.info(
         "COBieQC bootstrap complete jar_exists=%s resource_dir_exists=%s resource_dir_populated=%s cobieqc_enabled=%s jar_path=%s resource_dir=%s resource_source=%s",

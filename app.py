@@ -5541,9 +5541,15 @@ def health():
         "cobieqc": {
             "enabled": runtime_diag["enabled"],
             "jar_exists": runtime_diag["jar_exists"],
+            "jar_ready": bool(bootstrap_status.get("jar_ready", runtime_diag["jar_exists"])),
             "resource_dir_exists": runtime_diag["resource_dir_exists"],
+            "resources_ready": bool(bootstrap_status.get("resources_ready", runtime_diag["resource_dir_exists"])),
             "jar_path": runtime_diag.get("jar_path"),
             "resource_dir": runtime_diag.get("resource_dir"),
+            "missing_files": bootstrap_status.get("missing_files", []),
+            "warnings": bootstrap_status.get("warnings", []),
+            "errors": bootstrap_status.get("errors", []),
+            "source_mode": bootstrap_status.get("source_mode", "unknown"),
         },
     }
     last_error = bootstrap_status.get("last_error") or runtime_diag.get("jar_error") or runtime_diag.get("resource_error")
