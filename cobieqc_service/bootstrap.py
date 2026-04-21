@@ -171,9 +171,19 @@ def _force_resource_download_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-def _force_jar_refresh_enabled() -> bool:
-    value = os.getenv("COBIEQC_FORCE_JAR_REFRESH", "").strip().lower()
-    return value in {"1", "true", "yes", "on"}
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    truthy = {"1", "true", "yes", "y", "on"}
+    falsy = {"0", "false", "no", "n", "off"}
+    if value in truthy:
+        return True
+    if value in falsy:
+        return False
+    LOGGER.warning("COBieQC bootstrap: invalid boolean for %s=%r; using default=%s", name, raw, default)
+    return default
 
 
 def _resource_dir_resolution_candidates(preferred_resource_dir: Path, configured_resource_dir: Path) -> list[Path]:
@@ -366,7 +376,7 @@ def _build_status(
     jar_validation: Optional[JarValidationResult] = None,
     jar_source: str = "",
 ) -> CobieQcBootstrapStatus:
-    jar_path = _jar_path()
+    jar_path = _jar_path().expanduser().resolve()
     resource_dir = (resolved_resource_dir or _resource_dir()).expanduser().resolve()
     jar_valid, jar_validation_reason, jar_size = validate_existing_jar(jar_path)
     jar_exists = jar_valid
@@ -401,7 +411,7 @@ def _build_status(
         warnings=status_warnings,
         errors=status_errors,
         last_error=last_error,
-        jar_validation_error=jar_validation_result.reason,
+        jar_validation_error=(jar_validation.reason if jar_validation else ""),
     )
 
 
@@ -448,7 +458,6 @@ def bootstrap_cobieqc_assets() -> None:
             errors.append(f"Invalid {COBIEQC_XML_FILE_URLS_JSON_ENV}: {exc}")
 
     try:
-        force_refresh = _force_jar_refresh_enabled()
         existing_jar_valid, existing_jar_reason, existing_jar_size = validate_existing_jar(jar_path)
         LOGGER.info(
             "COBieQC bootstrap: JAR validation path=%s valid=%s reason=%s size=%s force_refresh=%s",
@@ -456,9 +465,9 @@ def bootstrap_cobieqc_assets() -> None:
             existing_jar_valid,
             existing_jar_reason,
             existing_jar_size,
-            force_refresh,
+            force_jar_refresh,
         )
-        if force_refresh and jar_path.exists():
+        if force_jar_refresh and jar_path.exists():
             jar_path.unlink(missing_ok=True)
             LOGGER.info("COBieQC bootstrap: existing JAR replaced at %s (reason=forced_refresh)", jar_path)
             existing_jar_valid = False
@@ -467,7 +476,7 @@ def bootstrap_cobieqc_assets() -> None:
             LOGGER.info(
                 "COBieQC bootstrap: existing JAR replaced at %s (reason=%s)", jar_path, existing_jar_reason
             )
-        if existing_jar_valid and not force_refresh:
+        if existing_jar_valid and not force_jar_refresh:
             LOGGER.info("COBieQC bootstrap: existing JAR reused at %s (size=%s)", jar_path, existing_jar_size)
         else:
             if jar_path.exists():
@@ -522,7 +531,8 @@ def bootstrap_cobieqc_assets() -> None:
             try:
                 LOGGER.info("COBieQC bootstrap: downloading resource %s -> %s", filename, destination)
                 download_result = _download_to_temp(file_url, destination.suffix or ".bin", f"COBieQC resource '{filename}'")
-                _replace_file_atomically(download_result.path, destination)
+                download_path = download_result[0] if isinstance(download_result, tuple) else download_result.path
+                _replace_file_atomically(download_path, destination)
             except Exception as exc:
                 errors.append(f"resource download failed for {filename}: {exc}")
                 LOGGER.error("COBieQC bootstrap: resource download failed for %s: %s", filename, exc)

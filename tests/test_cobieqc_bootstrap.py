@@ -2,7 +2,6 @@ from pathlib import Path
 import zipfile
 
 from cobieqc_service import bootstrap
-import zipfile
 
 REQUIRED_FILES = [
     "SpaceReport.css",
@@ -27,6 +26,25 @@ def _write_valid_jar(path: Path, content: bytes = b"ok") -> None:
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
         archive.writestr("cobieqc.txt", content)
+
+
+def test_bool_env_handles_unset_truthy_falsy_and_invalid(monkeypatch, caplog):
+    monkeypatch.delenv("COBIEQC_FORCE_JAR_REFRESH", raising=False)
+    assert bootstrap._bool_env("COBIEQC_FORCE_JAR_REFRESH", default=True) is True
+    assert bootstrap._bool_env("COBIEQC_FORCE_JAR_REFRESH", default=False) is False
+
+    for value in ("1", "true", "yes", "y", "on", " TRUE "):
+        monkeypatch.setenv("COBIEQC_FORCE_JAR_REFRESH", value)
+        assert bootstrap._bool_env("COBIEQC_FORCE_JAR_REFRESH", default=False) is True
+
+    for value in ("0", "false", "no", "n", "off", " OFF "):
+        monkeypatch.setenv("COBIEQC_FORCE_JAR_REFRESH", value)
+        assert bootstrap._bool_env("COBIEQC_FORCE_JAR_REFRESH", default=True) is False
+
+    caplog.clear()
+    monkeypatch.setenv("COBIEQC_FORCE_JAR_REFRESH", "sometimes")
+    assert bootstrap._bool_env("COBIEQC_FORCE_JAR_REFRESH", default=True) is True
+    assert "invalid boolean for COBIEQC_FORCE_JAR_REFRESH='sometimes'" in caplog.text
 
 
 def test_parse_google_drive_file_id():
@@ -71,6 +89,27 @@ def test_bootstrap_skips_when_assets_already_exist(monkeypatch, tmp_path):
     assert called["value"] is False
     assert status["enabled"] is True
     assert status["resource_source"] == "existing_dir"
+
+
+def test_bootstrap_logs_readiness_summary_and_jar_reuse(monkeypatch, tmp_path, caplog):
+    root = tmp_path / "cobie"
+    jar = root / "CobieQcReporter.jar"
+    resources = root / "xsl_xml"
+    _write_required_resources(resources)
+    _write_valid_jar(jar)
+
+    monkeypatch.setenv("COBIEQC_DATA_DIR", str(root))
+    monkeypatch.setenv("COBIEQC_JAR_PATH", str(jar))
+    monkeypatch.setenv("COBIEQC_RESOURCE_DIR", str(resources))
+    monkeypatch.setenv("COBIEQC_XML_SOURCE_URL", "")
+    caplog.set_level("INFO", logger="ifc_app.cobieqc.bootstrap")
+
+    bootstrap.bootstrap_cobieqc_assets()
+
+    assert "existing JAR reused" in caplog.text
+    assert "using COBieQC resource folder" in caplog.text
+    assert "bootstrap complete" in caplog.text
+    assert "resources_ready=True" in caplog.text
 
 
 def test_bootstrap_installs_jar_and_resources_from_json_mapping(monkeypatch, tmp_path):
