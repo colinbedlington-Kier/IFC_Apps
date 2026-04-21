@@ -52,7 +52,7 @@ from cobieqc_service.jobs import (
 )
 from cobieqc_service.bootstrap import bootstrap_cobieqc_assets, get_cobieqc_bootstrap_status
 from cobieqc_service import runner as cobieqc_runner_module
-from cobieqc_service.runner import get_cobieqc_runtime_diagnostics, resolve_java_executable, run_cobieqc
+from cobieqc_service.runner import get_cobieqc_runtime_diagnostics, get_cobieqc_engine, resolve_java_executable, run_cobieqc
 from cobieqc_service.security import sanitize_filename as sanitize_upload_filename
 from cobieqc_service.security import validate_upload
 from ifc_qa_service import REGISTRY as IFC_QA_V2_REGISTRY
@@ -5423,6 +5423,9 @@ def _run_cobieqc_job(job_id: str) -> None:
                 message="Report generated",
                 finished_at=utc_now().isoformat() + "Z",
                 output_filename=result.get("output_filename", "report.html"),
+                cobie_xml_filename=Path(str(result.get("cobie_xml", ""))).name if result.get("cobie_xml") else None,
+                svrl_xml_filename=Path(str(result.get("svrl_xml", ""))).name if result.get("svrl_xml") else None,
+                validation_summary=result.get("summary", {}),
             )
             log_memory_stage(stage="response complete", session_id=job_id, file_name=result.get("output_filename", "report.html"), file_size=None, endpoint="/api/tools/cobieqc/run", started_at=started_at)
         else:
@@ -5455,9 +5458,11 @@ def startup_cleanup() -> None:
     APP_LOGGER.info("Startup network binding host=%s port=%s", host, port)
     bootstrap_cobieqc_assets()
     runtime_diag = get_cobieqc_runtime_diagnostics()
+    engine = get_cobieqc_engine()
     java_xmx_mb = os.getenv("COBIEQC_JAVA_XMX_MB", "512")
     APP_LOGGER.info(
-        "COBieQC startup health enabled=%s jar_exists=%s resource_dir_exists=%s jar_path=%s resource_dir=%s java_xmx_mb=%s xml_count=%s xsl_count=%s",
+        "COBieQC startup health engine=%s enabled=%s jar_exists=%s resource_dir_exists=%s jar_path=%s resource_dir=%s java_xmx_mb=%s xml_count=%s xsl_count=%s",
+        engine,
         runtime_diag["enabled"],
         runtime_diag["jar_exists"],
         runtime_diag["resource_dir_exists"],
@@ -5485,6 +5490,10 @@ def startup_cleanup() -> None:
         cobieqc_marker,
         cobieqc_flags,
     )
+    if engine != "java":
+        APP_LOGGER.info("COBieQC engine is '%s'; skipping Java runtime checks", engine)
+        return
+
     which_java = subprocess.run(
         ["which", "java"],
         capture_output=True,
@@ -5535,15 +5544,16 @@ templates = Jinja2Templates(directory="templates")
 def health():
     runtime_diag = get_cobieqc_runtime_diagnostics()
     bootstrap_status = get_cobieqc_bootstrap_status()
+    engine = runtime_diag.get("engine", "python")
+    jar_ready = bool(bootstrap_status.get("jar_ready", runtime_diag["jar_exists"])) if engine == "java" else True
     payload = {
         "status": "ok",
         "service": "ifc-tools",
         "cobieqc": {
-            "enabled": bool(bootstrap_status.get("enabled", runtime_diag["enabled"])),
-            "cobieqc_enabled": bool(bootstrap_status.get("enabled", runtime_diag["enabled"])),
-            "jar_exists": bool(bootstrap_status.get("jar_exists", runtime_diag["jar_exists"])),
-            "jar_valid": bool(bootstrap_status.get("jar_valid", False)),
-            "jar_ready": bool(bootstrap_status.get("jar_ready", runtime_diag["jar_exists"])),
+            "enabled": runtime_diag["enabled"],
+            "engine": engine,
+            "jar_exists": runtime_diag["jar_exists"],
+            "jar_ready": jar_ready,
             "resource_dir_exists": runtime_diag["resource_dir_exists"],
             "resources_ready": bool(bootstrap_status.get("resources_ready", runtime_diag["resource_dir_exists"])),
             "jar_source": bootstrap_status.get("jar_source", ""),
@@ -5759,6 +5769,25 @@ def api_reduce_file_size_run(payload: Dict[str, Any] = Body(...)):
 @app.get("/api/tools/cobieqc/health")
 def cobieqc_health():
     runtime_diag = get_cobieqc_runtime_diagnostics()
+    engine = runtime_diag.get("engine", "python")
+    if engine != "java":
+        return {
+            "ok": runtime_diag["resource_dir_exists"],
+            "engine": engine,
+            "java_available": False,
+            "java_path": None,
+            "jar_available": runtime_diag["jar_exists"],
+            "jar_path": runtime_diag["jar_path"],
+            "resource_dir_available": runtime_diag["resource_dir_exists"],
+            "resource_dir": runtime_diag["resource_dir"],
+            "xml_count": runtime_diag["xml_count"],
+            "xsl_count": runtime_diag["xsl_count"],
+            "attempted_jar_paths": runtime_diag["jar_candidates"],
+            "attempted_resource_dirs": runtime_diag["resource_candidates"],
+            "jar_error": runtime_diag["jar_error"],
+            "resource_error": runtime_diag["resource_error"],
+            "detail": "Python-native COBieQC engine selected",
+        }
     java_bin = resolve_java_executable()
     try:
         proc = subprocess.run([java_bin, "-version"], capture_output=True, text=True, check=False, timeout=10)
@@ -5889,6 +5918,9 @@ def cobieqc_job_result(job_id: str):
     return {
         "ok": job.get("status") == STATUS_DONE,
         "output_filename": output_path.name,
+        "cobie_xml_filename": job.get("cobie_xml_filename"),
+        "svrl_xml_filename": job.get("svrl_xml_filename"),
+        "validation_summary": job.get("validation_summary", {}),
         "preview_html": preview_html,
         "stdout_tail": _tail_text(logs),
         "stderr_tail": _tail_text(logs),
