@@ -6067,7 +6067,11 @@ async def ifc_qa_run(
             cfg.update(override)
 
     job_id = start_ifc_qa_v2_job(file_records, options, cfg)
-    return {"job_id": job_id}
+    return {
+        "success": True,
+        "job_id": job_id,
+        "files": [{"name": name, "path": path} for name, path in file_records],
+    }
 
 
 @app.get("/api/ifc-qa/status/{job_id}")
