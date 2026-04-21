@@ -1,12 +1,15 @@
 const qaState = {
   sessionId: "",
   activeJobId: "",
-  isRunning: false,
   uploadState: "idle",
+  runStartState: "idle",
   uploadPercent: 0,
   uploadBytesLoaded: 0,
   uploadBytesTotal: 0,
-  uploadError: "",
+  runError: null,
+  isStartingRun: false,
+  _loggedPollStart: false,
+  _loggedFirstStatus: false,
   qaConfig: {
     shortCodes: {},
     layers: {},
@@ -103,9 +106,9 @@ function extractorTemplate() {
   ${warningBanner()}
   <div class="stack">
     <label>IFC files</label>
-    <input id="qaIfcFiles" type="file" multiple accept=".ifc" ${disabledAttr}/>
-    <div id="qaFileQueue" class="qa-file-queue muted"></div>
-
+    <input id="qaIfcFiles" type="file" multiple accept=".ifc" />
+    <ul id="qaFileList" class="qa-file-list muted"></ul>
+    <div id="qaRunError" class="qa-error-banner" hidden></div>
     <div class="qa-upload-progress">
       <div class="qa-upload-progress-top">
         <strong id="qaUploadStatusText">Waiting for files…</strong>
@@ -217,62 +220,135 @@ function bindFilesList() {
   if (!input) return;
   input.addEventListener("change", () => {
     const files = Array.from(input.files || []);
-    const existing = new Set(qaState.fileQueue.map((f) => f.name));
-    files.forEach((f) => {
-      if (existing.has(f.name)) return;
-      qaState.fileQueue.push({
-        id: `${Date.now()}_${f.name}`,
-        file: f,
-        name: f.name,
-        size: f.size,
-        uploadPercent: 0,
-        processPercent: 0,
-        overallPercent: 0,
-        status: "queued",
-        stageText: "Queued",
-        error: "",
-        duplicate: qaState.sessionSourceFiles.includes(f.name),
-      });
-    });
-    renderFileQueue();
-    renderSessionSummary();
-    renderActionButtons();
+    const names = files.map((f) => `<li><span>${f.name}</span><span>${formatBytes(f.size)}</span></li>`).join("");
+    const list = qs("#qaFileList");
+    if (list) list.innerHTML = names || "<li>No files selected.</li>";
+    clearRunError();
+    if (!files.length) {
+      setUploadState("idle");
+      return;
+    }
+    setUploadState("ready");
   });
 }
 
-function renderSheetChecks() {
-  const wrap = qs("#qaSheetChecks");
-  if (!wrap) return;
-  wrap.innerHTML = DEFAULT_SHEETS.map(([k, label]) => `<label><input type="checkbox" data-sheet="${k}" checked /> ${label}</label>`).join("");
+function setUploadControlsDisabled(disabled) {
+  const startBtn = qs("#qaStartBtn");
+  const fileInput = qs("#qaIfcFiles");
+  if (startBtn) startBtn.disabled = disabled;
+  if (fileInput) fileInput.disabled = disabled;
 }
 
-async function uploadSingleFile(row, mode) {
-  const form = new FormData();
-  form.append("files", row.file, row.name);
-  form.append("session_id", qaState.sessionId);
-  form.append("options_json", JSON.stringify({ selected_sheets: selectedSheets() }));
-  form.append("config_override_json", JSON.stringify(qaState.qaConfig || {}));
-  const endpoint = mode === "add" ? "/api/ifc-qa/add-to-zip" : "/api/ifc-qa/run";
+function clearRunError() {
+  qaState.runError = null;
+  renderRunError();
+}
 
+function setRunError(stage, message, detail = "") {
+  qaState.runError = { stage, message, detail };
+  renderRunError();
+}
+
+function renderRunError() {
+  const error = qs("#qaRunError");
+  if (!error) return;
+  if (!qaState.runError) {
+    error.hidden = true;
+    error.innerHTML = "";
+    return;
+  }
+  const stage = qaState.runError.stage || "unknown";
+  const message = qaState.runError.message || "Unknown error";
+  const detail = qaState.runError.detail ? `<details><summary>Details</summary><pre>${String(qaState.runError.detail)}</pre></details>` : "";
+  error.hidden = false;
+  error.innerHTML = `<strong>${stage.toUpperCase()}:</strong> ${message}${detail}`;
+}
+
+function setUploadState(nextState, patch = {}) {
+  qaState.uploadState = nextState;
+  Object.assign(qaState, patch);
+  renderUploadProgress();
+}
+
+function setRunStartState(nextState) {
+  qaState.runStartState = nextState;
+  const status = qs("#qaUploadStatusText");
+  if (!status) return;
+  if (nextState === "starting") status.textContent = "Starting job…";
+  if (nextState === "running") status.textContent = "Processing…";
+}
+
+function renderUploadProgress() {
+  const status = qs("#qaUploadStatusText");
+  const pct = qs("#qaUploadPercentText");
+  const track = qs("#qaUploadProgressTrack");
+  const bar = qs("#qaUploadProgressBar");
+  const bytes = qs("#qaUploadBytesText");
+
+  const loaded = Number(qaState.uploadBytesLoaded) || 0;
+  const total = Number(qaState.uploadBytesTotal) || 0;
+  const percent = Math.max(0, Math.min(100, Number(qaState.uploadPercent) || 0));
+  const isUploading = qaState.uploadState === "uploading";
+  const statusMap = {
+    idle: "Waiting for files…",
+    ready: "Ready to upload",
+    uploading: "Uploading...",
+    uploaded: "Upload complete",
+    failed: "Upload failed",
+  };
+
+  if (status) status.textContent = statusMap[qaState.uploadState] || "Waiting for files…";
+  if (pct) pct.textContent = `${percent}%`;
+  if (bar) bar.style.width = `${percent}%`;
+  if (bytes) bytes.textContent = total > 0 ? `${formatBytes(loaded)} / ${formatBytes(total)}` : `${formatBytes(loaded)} uploaded`;
+  if (track) track.classList.toggle("indeterminate", isUploading && total <= 0);
+  setUploadControlsDisabled(isUploading || qaState.isStartingRun);
+}
+
+function parseXhrJson(xhr) {
+  if (xhr.response && typeof xhr.response === "object") return xhr.response;
+  const text = xhr.responseText || "";
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("Invalid start-job response");
+  }
+}
+
+function startQaUpload(form, fileCount) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", endpoint);
-    xhr.responseType = "json";
+    xhr.open("POST", "/api/ifc-qa/run");
     xhr.upload.onprogress = (evt) => {
       const total = evt.total || row.size || 1;
       const loaded = evt.loaded || 0;
-      const pct = Math.round((loaded / total) * 100);
-      row.status = "uploading";
-      row.uploadPercent = pct;
-      row.overallPercent = Math.round(pct * 0.5);
-      row.stageText = `Uploading… ${pct}%`;
-      renderFileQueue();
-      renderSessionSummary();
+      const total = evt.total || 0;
+      const percent = total > 0 ? Math.round((loaded / total) * 100) : qaState.uploadPercent;
+      setUploadState("uploading", {
+        uploadBytesLoaded: loaded,
+        uploadBytesTotal: total,
+        uploadPercent: percent,
+      });
+      const status = qs("#qaUploadStatusText");
+      if (status) status.textContent = `Uploading ${fileCount} file${fileCount === 1 ? "" : "s"}…`;
     };
-    xhr.onerror = () => reject(new Error("Network error"));
+    xhr.onerror = () => reject({ stage: "upload", message: "Network error during upload", detail: "" });
     xhr.onload = () => {
+      let payload = {};
+      try {
+        payload = parseXhrJson(xhr);
+      } catch (error) {
+        reject({ stage: "start", message: "Invalid start-job response", detail: error instanceof Error ? error.message : "" });
+        return;
+      }
+      console.info("IFC QA /run response", { status: xhr.status, payload });
       if (xhr.status < 200 || xhr.status >= 300) {
-        reject(new Error(xhr.response?.detail || `Upload failed (${xhr.status})`));
+        reject({
+          stage: "start",
+          message: payload?.error || payload?.detail || `Request failed with status ${xhr.status}`,
+          detail: payload?.detail || "",
+        });
         return;
       }
       resolve(xhr.response || {});
@@ -334,32 +410,166 @@ async function runQueue(mode) {
       row.stageText = "Failed";
       row.error = err instanceof Error ? err.message : "Failed";
     }
-    renderFileQueue();
-    await refreshSessionSummary();
+  });
+}
+
+async function startRun() {
+  clearRunError();
+  if (!qaState.configLoaded) {
+    setRunError("start", "Configuration is not loaded yet.");
+    return;
+  }
+  const input = qs("#qaIfcFiles");
+  const files = Array.from(input?.files || []);
+  if (!files.length) {
+    setRunError("upload", "Please select at least one IFC file.");
+    return;
+  }
+  const selected = selectedSheets();
+  if (!Object.values(selected).some(Boolean)) {
+    setRunError("start", "Select at least one output table before starting.");
+    return;
+  }
+  if (qaState.uploadState === "uploading" || qaState.isStartingRun) return;
+
+  const downloadBtn = qs("#qaDownloadBtn");
+  if (downloadBtn) downloadBtn.disabled = true;
+  qaState.isStartingRun = true;
+  qaState.activeJobId = "";
+  qaState.runStartState = "idle";
+  qaState._loggedPollStart = false;
+  qaState._loggedFirstStatus = false;
+
+  setUploadState("uploading", {
+    uploadPercent: 0,
+    uploadBytesLoaded: 0,
+    uploadBytesTotal: 0,
+  });
+
+  const form = new FormData();
+  console.info("IFC QA run request", {
+    fileCount: files.length,
+    fileNames: files.map((f) => f.name),
+    selectedOutputs: Object.entries(selected).filter(([, enabled]) => enabled).map(([key]) => key),
+    configLoaded: qaState.configLoaded,
+  });
+  files.forEach((f) => form.append("files", f, f.name));
+  form.append("options_json", JSON.stringify({ selected_sheets: selected, session_id: qaState.sessionId || "" }));
+  form.append("config_override_json", JSON.stringify(qaState.qaConfig || {}));
+
+  try {
+    const data = await startQaUpload(form, files.length);
+    setUploadState("uploaded", {
+      uploadPercent: 100,
+      uploadBytesLoaded: qaState.uploadBytesTotal || qaState.uploadBytesLoaded,
+      uploadBytesTotal: qaState.uploadBytesTotal || qaState.uploadBytesLoaded,
+    });
+    setRunStartState("starting");
+
+    if (!data || typeof data !== "object") {
+      throw { stage: "start", message: "Invalid start-job response", detail: "Expected JSON object payload." };
+    }
+    if (data.success !== true) {
+      throw { stage: "start", message: data.error || "Failed to start job", detail: data.detail || "" };
+    }
+    const jobId = typeof data.job_id === "string" ? data.job_id.trim() : "";
+    if (!jobId) {
+      throw { stage: "start", message: "Job started but no job_id was returned", detail: JSON.stringify(data) };
+    }
+
+    qaState.activeJobId = jobId;
+    console.info("IFC QA job started", { jobId });
+    setRunStartState("running");
+    setTimeout(() => pollStatus(jobId), 400);
+  } catch (err) {
+    const fallbackMessage = err?.stage === "upload" ? "Upload failed" : "Failed to start job";
+    setUploadState("failed");
+    setRunError(err?.stage || "start", err?.message || fallbackMessage, err?.detail || "");
+  } finally {
+    qaState.isStartingRun = false;
+    renderUploadProgress();
   }
   qaState.isRunning = false;
   renderActionButtons();
 }
 
-function openConfig() {
-  const txt = qs("#qaConfigText");
-  const modal = qs("#qaConfigModal");
-  if (!txt || !modal) return;
-  txt.value = JSON.stringify(qaState.qaConfig, null, 2);
-  modal.hidden = false;
+async function pollStatus(jobId) {
+  const normalizedJobId = typeof jobId === "string" ? jobId.trim() : "";
+  if (!normalizedJobId) {
+    setRunError("poll", "Polling skipped: invalid job_id.");
+    return;
+  }
+  if (normalizedJobId !== qaState.activeJobId) return;
+
+  if (!qaState._loggedPollStart) {
+    console.info("IFC QA polling start", { jobId: normalizedJobId });
+    qaState._loggedPollStart = true;
+  }
+
+  const resp = await fetch(`/api/ifc-qa/status/${normalizedJobId}`);
+  if (!resp.ok) {
+    let detail = "";
+    try {
+      const payload = await resp.json();
+      detail = payload?.detail || payload?.error || "";
+    } catch {
+      detail = "";
+    }
+    setRunError("poll", `Status endpoint returned HTTP ${resp.status}`, detail);
+    return;
+  }
+
+  const data = await resp.json();
+  if (!qaState._loggedFirstStatus) {
+    console.info("IFC QA first status response", {
+      jobId: normalizedJobId,
+      status: data?.status,
+      overallPercent: data?.overall_percent ?? data?.percent ?? 0,
+    });
+    qaState._loggedFirstStatus = true;
+  }
+
+  const fill = qs("#qaProgressFill");
+  const label = qs("#qaProgressLabel");
+  const log = qs("#qaLog");
+  const perFile = qs("#qaPerFile");
+  const dashboard = qs("#qaDashboardStatus");
+
+  const overallPercent = data.overall_percent ?? data.percent ?? 0;
+  if (fill) fill.style.width = `${overallPercent}%`;
+  if (label) label.textContent = `${data.currentStep || ""} ${data.currentFile ? `(${data.currentFile})` : ""}`;
+  if (log) log.value = (data.logs || []).join("\n");
+  if (perFile) {
+    perFile.textContent = (data.files || [])
+      .map((f) => `${f.name}: ${f.percent || 0}% ${f.stage ? `(${f.stage})` : ""}`)
+      .join(" | ");
+  }
+  if (dashboard) dashboard.textContent = `Status: ${data.status || "unknown"} (${overallPercent}%)`;
+
+  if (data.status === "complete") {
+    const downloadBtn = qs("#qaDownloadBtn");
+    if (downloadBtn) downloadBtn.disabled = false;
+    return;
+  }
+  if (data.status === "failed") {
+    setRunError("result", "Extraction job failed.", (data.logs || []).slice(-3).join("\n"));
+    return;
+  }
+  setTimeout(() => pollStatus(normalizedJobId), 1200);
 }
-function closeConfig() { const modal = qs("#qaConfigModal"); if (modal) modal.hidden = true; }
-function applyConfig() {
-  try { qaState.qaConfig = JSON.parse(qs("#qaConfigText")?.value || "{}"); closeConfig(); }
-  catch { alert("Invalid JSON"); }
+
+function downloadZip() {
+  if (!qaState.activeJobId) return;
+  const a = document.createElement("a");
+  a.href = `/api/ifc-qa/result/${qaState.activeJobId}`;
+  a.click();
 }
 
 function bindExtractor() {
   renderSheetChecks();
   bindFilesList();
-  renderFileQueue();
-  renderSessionSummary();
-  renderActionButtons();
+  setUploadState("idle");
+  clearRunError();
   qs("#qaConfigureBtn")?.addEventListener("click", openConfig);
   qs("#qaConfigClose")?.addEventListener("click", closeConfig);
   qs("#qaConfigApply")?.addEventListener("click", applyConfig);
@@ -397,6 +607,7 @@ async function init() {
     root.innerHTML = configTemplate();
   } else {
     root.innerHTML = dashboardTemplate();
+    if (qaState.activeJobId) pollStatus(qaState.activeJobId);
   }
 }
 
