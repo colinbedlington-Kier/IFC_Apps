@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import ifcopenshell
 import ifcopenshell.util.element
 import ifcopenshell.util.placement
+from backend.ifc_qa.config_loader import build_config_indexes, load_default_config
 
 BASE_OUTPUT = [
     "IFC Models",
@@ -591,11 +592,15 @@ def _csv_writer(path: Path, header: List[str]):
 def _write_outputs(job_id: str, ctx: FileContext, out_root: Path, config: Dict[str, Any]) -> List[Any]:
     source = ctx.source_file
     codes = source.split("-")
-    short_codes = set(config.get("short_codes", []))
-    layers = set(config.get("layers", []))
-    entity_types = set(config.get("entity_types", []))
-    uniclass = set(config.get("uniclass_system_category", []))
-    pset_template = config.get("pset_template", {})
+    indexes = config.get("_indexes") if isinstance(config.get("_indexes"), dict) else build_config_indexes(config)
+    short_code_set = indexes.get("short_code_set", set())
+    short_codes_by_entity = indexes.get("short_codes_by_entity", {})
+    layer_set = indexes.get("layer_set", set())
+    entity_type_by_key = indexes.get("entity_type_by_key", {})
+    entity_types_by_natural_language_entity = indexes.get("entity_types_by_natural_language_entity", {})
+    system_category_value_set = indexes.get("system_category_value_set", set())
+    system_category_by_number = indexes.get("system_category_by_number", {})
+    pset_template = indexes.get("pset_template_map", {})
 
     counts = {"write_objects_total": len(ctx.objects), "write_objects_processed": 0}
     stage_done = {k: 1.0 for k in STAGE_WEIGHTS if k != "write"}
@@ -628,16 +633,14 @@ def _write_outputs(job_id: str, ctx: FileContext, out_root: Path, config: Dict[s
         h, w = _csv_writer(out_root / "IFC Object Type" / f"IFC OBJECT TYPE - {source}.csv", HEADERS["object"])
         try:
             for i, fact in enumerate(facts, start=1):
-                type_tokens = fact.type_name.split("_") if fact.type_name else []
-                type_ok = bool(fact.type_name)
-                if len(type_tokens) >= 3:
-                    if len(codes) > 1:
-                        type_ok = type_ok and type_tokens[0] == codes[1]
-                    if len(codes) > 5:
-                        type_ok = type_ok and type_tokens[1] == codes[5]
-                    type_ok = type_ok and type_tokens[2] in entity_types
-                else:
-                    type_ok = False
+                type_tokens: List[str] = fact.type_name.split("_") if fact.type_name else []
+                type_key = "-".join([fact.entity or "", fact.type_entity or "", fact.predefined or ""])
+                type_ok = bool(type_key and type_key in entity_type_by_key)
+
+                if not type_ok and fact.type_name:
+                    if len(type_tokens) >= 3:
+                        natural_entity = type_tokens[2]
+                        type_ok = natural_entity in entity_types_by_natural_language_entity
 
                 stem = ""
                 if len(type_tokens) >= 3:
@@ -655,7 +658,16 @@ def _write_outputs(job_id: str, ctx: FileContext, out_root: Path, config: Dict[s
                 if len(codes) > 1:
                     name_ok = name_ok and fact.name.startswith(f"{codes[1]}-")
                 if short:
-                    name_ok = name_ok and short.rstrip("-") in short_codes
+                    short_value = short.rstrip("-")
+                    name_ok = name_ok and short_value in short_code_set
+                    natural_entity_rows = short_codes_by_entity.get(fact.entity, [])
+                    if natural_entity_rows:
+                        allowed = {
+                            r.get("Nomenclature_Short_Code")
+                            for r in natural_entity_rows
+                            if r.get("Nomenclature_Short_Code")
+                        }
+                        name_ok = name_ok and short_value in allowed
 
                 w.writerow([
                     fact.line_ref,
@@ -674,7 +686,7 @@ def _write_outputs(job_id: str, ctx: FileContext, out_root: Path, config: Dict[s
                     short,
                     str(bool(type_ok)),
                     stem,
-                    str(fact.layer in layers),
+                    str(fact.layer in layer_set),
                     str(fact.type_name in dupes if fact.type_name else False),
                     fact.longname,
                     fact.type_line_ref,
@@ -709,10 +721,13 @@ def _write_outputs(job_id: str, ctx: FileContext, out_root: Path, config: Dict[s
                     if system_writer and pset_name == "COBie_System" and prop_name in {"SystemCategory", "SystemName", "SystemDescription"}:
                         check, code = "", ""
                         if prop_name == "SystemCategory":
-                            check = str(value in uniclass)
+                            check = str(value in system_category_value_set)
                             lead = (value or "").split(":", 1)[0]
-                            parts = lead.split("_")
-                            code = "_".join(parts[:4]) if len(parts) >= 4 else lead
+                            if lead in system_category_by_number:
+                                code = lead
+                            else:
+                                parts = lead.split("_")
+                                code = "_".join(parts[:4]) if len(parts) >= 4 else lead
                         elif prop_name == "SystemName":
                             parts = (value or "").split("_")
                             check = str(len(parts) >= 4)
@@ -728,10 +743,13 @@ def _write_outputs(job_id: str, ctx: FileContext, out_root: Path, config: Dict[s
                     if system_writer and pset_name == "COBie_System" and prop_name in {"SystemCategory", "SystemName", "SystemDescription"}:
                         check, code = "", ""
                         if prop_name == "SystemCategory":
-                            check = str(value in uniclass)
+                            check = str(value in system_category_value_set)
                             lead = (value or "").split(":", 1)[0]
-                            parts = lead.split("_")
-                            code = "_".join(parts[:4]) if len(parts) >= 4 else lead
+                            if lead in system_category_by_number:
+                                code = lead
+                            else:
+                                parts = lead.split("_")
+                                code = "_".join(parts[:4]) if len(parts) >= 4 else lead
                         elif prop_name == "SystemName":
                             parts = (value or "").split("_")
                             check = str(len(parts) >= 4)
@@ -885,13 +903,5 @@ def start_job(file_records: List[Tuple[str, str]], options: Dict[str, Any], conf
 
 
 def default_config_from_dir(reference_dir: Path) -> Dict[str, Any]:
-    cfg = {}
-    for name in ["default_config", "pset_template", "uniclass_system_category", "short_codes", "layers", "entity_types", "property_exclusions"]:
-        p = reference_dir / f"{name}.json"
-        if p.exists():
-            with open(p, "r", encoding="utf-8") as f:
-                cfg[name] = json.load(f)
-        else:
-            cfg[name] = [] if name != "pset_template" else {}
-    cfg["pset_template"] = cfg.get("pset_template", {})
-    return cfg
+    del reference_dir
+    return load_default_config()
