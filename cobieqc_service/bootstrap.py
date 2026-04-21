@@ -2,7 +2,9 @@ import logging
 import json
 import os
 import shutil
+import subprocess
 import tempfile
+import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -29,6 +31,7 @@ _ZIP_DEPRECATION_LOGGED = False
 class CobieQcBootstrapStatus:
     enabled: bool
     jar_exists: bool
+    jar_valid: bool
     jar_ready: bool
     resource_dir_exists: bool
     resource_dir_populated: bool
@@ -36,14 +39,30 @@ class CobieQcBootstrapStatus:
     jar_path: str
     resource_dir: str
     resource_source: str = "missing"
+    jar_source: str = ""
     source_mode: str = "none"
     missing_files: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     last_error: str = ""
+    jar_validation_error: str = ""
 
 
 _LAST_STATUS: Optional[CobieQcBootstrapStatus] = None
+
+
+@dataclass
+class JarValidationResult:
+    valid: bool
+    reason: str = ""
+
+
+@dataclass
+class DownloadResult:
+    path: Path
+    content_type: str = ""
+    content_length: str = ""
+    http_status: str = ""
 
 
 def _data_root() -> Path:
@@ -104,6 +123,33 @@ def _is_non_empty_file(path: Path) -> bool:
     return path.exists() and path.is_file() and path.stat().st_size > 0
 
 
+def _read_jar_signature(path: Path) -> bytes:
+    with path.open("rb") as handle:
+        return handle.read(4)
+
+
+def validate_existing_jar(path: Path) -> tuple[bool, str, int]:
+    candidate = path.expanduser()
+    if not candidate.exists():
+        return False, "missing", 0
+    if not candidate.is_file():
+        return False, "not_a_file", 0
+    size = candidate.stat().st_size
+    if size <= 0:
+        return False, "empty_file", size
+    signature = _read_jar_signature(candidate)
+    if len(signature) < 2 or signature[:2] != b"PK":
+        return False, "invalid_zip_signature", size
+    try:
+        with zipfile.ZipFile(candidate, "r") as archive:
+            bad_member = archive.testzip()
+            if bad_member:
+                return False, f"zip_crc_failed:{bad_member}", size
+    except Exception as exc:
+        return False, f"zip_validation_failed:{exc}", size
+    return True, "ok", size
+
+
 def _validate_resource_dir(path: Path) -> dict:
     return validate_cobieqc_resource_dir(path)
 
@@ -122,6 +168,11 @@ def _force_resource_download_enabled() -> bool:
         or os.getenv("COBIEQC_FORCE_DOWNLOAD", "")
         or os.getenv("FORCE", "")
     ).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _force_jar_refresh_enabled() -> bool:
+    value = os.getenv("COBIEQC_FORCE_JAR_REFRESH", "").strip().lower()
     return value in {"1", "true", "yes", "on"}
 
 
@@ -198,16 +249,20 @@ def _replace_dir_atomically(source_dir: Path, destination_dir: Path) -> None:
     shutil.rmtree(backup_dir, ignore_errors=True)
 
 
-def _download_to_temp(source_url: str, suffix: str, purpose: str) -> tuple[Path, str]:
+def _download_to_temp(source_url: str, suffix: str, purpose: str) -> DownloadResult:
     direct_url = google_drive_direct_download_url(source_url) if "drive.google.com" in source_url else source_url
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
         temp_path = Path(temp_file.name)
     content_type = ""
+    content_length = ""
+    http_status = ""
     try:
         if requests is not None:
             with requests.get(direct_url, stream=True, timeout=120, allow_redirects=True) as response:
+                http_status = str(response.status_code)
                 response.raise_for_status()
                 content_type = response.headers.get("content-type", "")
+                content_length = response.headers.get("content-length", "")
                 with temp_path.open("wb") as handle:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
@@ -216,6 +271,10 @@ def _download_to_temp(source_url: str, suffix: str, purpose: str) -> tuple[Path,
             from urllib.request import urlopen
 
             with urlopen(direct_url, timeout=120) as response, temp_path.open("wb") as handle:
+                status = getattr(response, "status", None)
+                http_status = str(status) if status is not None else ""
+                content_type = response.headers.get("content-type", "")
+                content_length = response.headers.get("content-length", "")
                 shutil.copyfileobj(response, handle)
     except Exception:
         temp_path.unlink(missing_ok=True)
@@ -236,7 +295,12 @@ def _download_to_temp(source_url: str, suffix: str, purpose: str) -> tuple[Path,
             )
         temp_path.unlink(missing_ok=True)
         raise RuntimeError(f"Downloaded {purpose} appears to be HTML content instead of a file")
-    return temp_path, content_type
+    return DownloadResult(
+        path=temp_path,
+        content_type=content_type,
+        content_length=content_length,
+        http_status=http_status,
+    )
 
 
 def _load_xml_file_urls_mapping(raw_json: str) -> dict[str, str]:
@@ -299,23 +363,31 @@ def _build_status(
     source_mode: str = "none",
     warnings: Optional[list[str]] = None,
     errors: Optional[list[str]] = None,
+    jar_validation: Optional[JarValidationResult] = None,
+    jar_source: str = "",
 ) -> CobieQcBootstrapStatus:
     jar_path = _jar_path()
     resource_dir = (resolved_resource_dir or _resource_dir()).expanduser().resolve()
-    jar_exists = _is_non_empty_file(jar_path)
+    jar_valid, jar_validation_reason, jar_size = validate_existing_jar(jar_path)
+    jar_exists = jar_valid
     resource_validation = _validate_resource_dir(resource_dir)
     resource_exists = bool(resource_validation["exists"] and resource_validation["is_dir"])
     resource_populated = bool(resource_validation["valid"])
-    jar_ready = jar_exists
+    jar_ready = jar_valid
     missing_files = list(resource_validation.get("missing_required_files") or [])
     resources_ready = resource_exists and resource_populated and not missing_files
     status_warnings = list(warnings or [])
     status_errors = list(errors or [])
     if last_error and last_error not in status_errors:
         status_errors.append(last_error)
+    if not jar_valid and jar_validation_reason != "missing":
+        status_errors.append(
+            f"COBieQC JAR validation failed ({jar_validation_reason}, size={jar_size} bytes) at {jar_path}"
+        )
     return CobieQcBootstrapStatus(
         enabled=jar_ready and resources_ready,
         jar_exists=jar_exists,
+        jar_valid=jar_valid,
         jar_ready=jar_ready,
         resource_dir_exists=resource_exists,
         resource_dir_populated=resource_populated,
@@ -323,11 +395,13 @@ def _build_status(
         jar_path=str(jar_path),
         resource_dir=str(resource_dir),
         resource_source=resource_source if resources_ready else "missing",
+        jar_source=jar_source,
         source_mode=source_mode,
         missing_files=missing_files,
         warnings=status_warnings,
         errors=status_errors,
         last_error=last_error,
+        jar_validation_error=jar_validation_result.reason,
     )
 
 
@@ -351,6 +425,9 @@ def bootstrap_cobieqc_assets() -> None:
     xml_file_urls_raw = os.getenv(COBIEQC_XML_FILE_URLS_JSON_ENV, "").strip()
     xml_file_urls: dict[str, str] = {}
     legacy_xml_zip_source_url = os.getenv(DEPRECATED_XML_ZIP_SOURCE_ENV, "").strip()
+    force_jar_refresh = _bool_env("COBIEQC_FORCE_JAR_REFRESH", default=False)
+    jar_source = "existing_reused"
+    jar_validation = JarValidationResult(valid=False, reason="not yet validated")
 
     data_root.mkdir(parents=True, exist_ok=True)
     LOGGER.info("COBieQC bootstrap: data root ready at %s", data_root)
@@ -371,14 +448,53 @@ def bootstrap_cobieqc_assets() -> None:
             errors.append(f"Invalid {COBIEQC_XML_FILE_URLS_JSON_ENV}: {exc}")
 
     try:
-        if _is_non_empty_file(jar_path):
-            LOGGER.info("COBieQC bootstrap: existing JAR kept at %s", jar_path)
+        force_refresh = _force_jar_refresh_enabled()
+        existing_jar_valid, existing_jar_reason, existing_jar_size = validate_existing_jar(jar_path)
+        LOGGER.info(
+            "COBieQC bootstrap: JAR validation path=%s valid=%s reason=%s size=%s force_refresh=%s",
+            jar_path,
+            existing_jar_valid,
+            existing_jar_reason,
+            existing_jar_size,
+            force_refresh,
+        )
+        if force_refresh and jar_path.exists():
+            jar_path.unlink(missing_ok=True)
+            LOGGER.info("COBieQC bootstrap: existing JAR replaced at %s (reason=forced_refresh)", jar_path)
+            existing_jar_valid = False
+        elif not existing_jar_valid and jar_path.exists():
+            jar_path.unlink(missing_ok=True)
+            LOGGER.info(
+                "COBieQC bootstrap: existing JAR replaced at %s (reason=%s)", jar_path, existing_jar_reason
+            )
+        if existing_jar_valid and not force_refresh:
+            LOGGER.info("COBieQC bootstrap: existing JAR reused at %s (size=%s)", jar_path, existing_jar_size)
         else:
-            LOGGER.info("COBieQC bootstrap: downloading JAR to %s", jar_path)
+            if jar_path.exists():
+                LOGGER.warning(
+                    "COBieQC bootstrap: existing JAR invalid and will be replaced path=%s reason=%s",
+                    jar_path,
+                    existing_jar_valid.reason,
+                )
+                jar_path.unlink(missing_ok=True)
+            jar_source = "downloaded_replacement"
+            LOGGER.info("COBieQC bootstrap: downloading JAR source_url=%s destination=%s", jar_source_url, jar_path)
             jar_download = _download_to_temp(jar_source_url, ".jar", "COBieQC JAR")
             jar_temp = jar_download[0] if isinstance(jar_download, tuple) else jar_download
+            download_valid, download_reason, download_size = validate_existing_jar(jar_temp)
+            LOGGER.info(
+                "COBieQC bootstrap: downloaded JAR validation valid=%s reason=%s size=%s",
+                download_valid,
+                download_reason,
+                download_size,
+            )
+            if not download_valid:
+                jar_temp.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"downloaded JAR failed validation ({download_reason}, size={download_size} bytes); java engine disabled"
+                )
             _replace_file_atomically(jar_temp, jar_path)
-            LOGGER.info("COBieQC bootstrap: JAR installed at %s", jar_path)
+            LOGGER.info("COBieQC bootstrap: JAR installed at %s (size=%s)", jar_path, download_size)
     except Exception as exc:
         errors.append(f"JAR download/install failed: {exc}")
         LOGGER.error("COBieQC bootstrap JAR install failed: %s", exc)
@@ -393,27 +509,8 @@ def bootstrap_cobieqc_assets() -> None:
             LOGGER.info("COBieQC bootstrap: copied packaged fallback resources into %s", resolved_resource_dir)
             source_mode = "packaged_fallback"
 
-    xml_source_kind = _classify_xml_source_url(xml_source_url)
-    remote_folder_sync_supported = False
-    LOGGER.info(
-        "COBieQC bootstrap: xml_source_kind=%s xml_source_url_present=%s remote_folder_sync_supported=%s",
-        xml_source_kind,
-        bool(xml_source_url),
-        remote_folder_sync_supported,
-    )
-
-    if _is_google_drive_folder_url(xml_source_url):
-        warning = (
-            "Google Drive folder URLs in COBIEQC_XML_SOURCE_URL are unsupported; "
-            f"use {COBIEQC_XML_FILE_URLS_JSON_ENV} with direct file download URLs"
-        )
-        warnings.append(warning)
-        LOGGER.warning("COBieQC bootstrap: %s", warning)
-        if not resolved_resource_dir and not xml_file_urls:
-            errors.append("resource bootstrap unsupported for Google Drive folder URL source mode")
-            source_mode = "unsupported_google_drive_folder"
-
     if xml_file_urls:
+        LOGGER.info("COBieQC bootstrap: %s present, ignoring COBIEQC_XML_SOURCE_URL", COBIEQC_XML_FILE_URLS_JSON_ENV)
         resource_dir.mkdir(parents=True, exist_ok=True)
         source_mode = "file_urls_json"
         force_download = _force_resource_download_enabled()
@@ -424,8 +521,8 @@ def bootstrap_cobieqc_assets() -> None:
                 continue
             try:
                 LOGGER.info("COBieQC bootstrap: downloading resource %s -> %s", filename, destination)
-                temp_file, _ = _download_to_temp(file_url, destination.suffix or ".bin", f"COBieQC resource '{filename}'")
-                _replace_file_atomically(temp_file, destination)
+                download_result = _download_to_temp(file_url, destination.suffix or ".bin", f"COBieQC resource '{filename}'")
+                _replace_file_atomically(download_result.path, destination)
             except Exception as exc:
                 errors.append(f"resource download failed for {filename}: {exc}")
                 LOGGER.error("COBieQC bootstrap: resource download failed for %s: %s", filename, exc)
@@ -439,8 +536,28 @@ def bootstrap_cobieqc_assets() -> None:
                 "COBieQC resource directory missing required files after download: "
                 + ", ".join(missing_required_files or validation["missing"])
             )
-    elif not resolved_resource_dir and not _is_google_drive_folder_url(xml_source_url):
-        source_mode = "unconfigured"
+    else:
+        xml_source_kind = _classify_xml_source_url(xml_source_url)
+        remote_folder_sync_supported = False
+        LOGGER.info(
+            "COBieQC bootstrap: xml_source_kind=%s xml_source_url_present=%s remote_folder_sync_supported=%s",
+            xml_source_kind,
+            bool(xml_source_url),
+            remote_folder_sync_supported,
+        )
+
+        if _is_google_drive_folder_url(xml_source_url):
+            warning = (
+                "Google Drive folder URLs in COBIEQC_XML_SOURCE_URL are unsupported; "
+                f"use {COBIEQC_XML_FILE_URLS_JSON_ENV} with direct file download URLs"
+            )
+            warnings.append(warning)
+            LOGGER.warning("COBieQC bootstrap: %s", warning)
+            if not resolved_resource_dir:
+                errors.append("resource bootstrap unsupported for Google Drive folder URL source mode")
+                source_mode = "unsupported_google_drive_folder"
+        elif not resolved_resource_dir:
+            source_mode = "unconfigured"
 
     if resolved_resource_dir:
         LOGGER.info("COBieQC bootstrap: using COBieQC resource folder at %s", resolved_resource_dir)
@@ -456,12 +573,16 @@ def bootstrap_cobieqc_assets() -> None:
         source_mode=source_mode,
         warnings=warnings,
         errors=errors,
+        jar_validation=jar_validation,
+        jar_source=jar_source,
     )
     LOGGER.info(
-        "COBieQC bootstrap complete jar_exists=%s resource_dir_exists=%s resource_dir_populated=%s cobieqc_enabled=%s jar_path=%s resource_dir=%s resource_source=%s",
+        "COBieQC bootstrap complete jar_exists=%s jar_valid=%s jar_source=%s jar_validation_error=%s resources_ready=%s cobieqc_enabled=%s jar_path=%s resource_dir=%s resource_source=%s",
         _LAST_STATUS.jar_exists,
-        _LAST_STATUS.resource_dir_exists,
-        _LAST_STATUS.resource_dir_populated,
+        _LAST_STATUS.jar_valid,
+        _LAST_STATUS.jar_source,
+        _LAST_STATUS.jar_validation_error,
+        _LAST_STATUS.resources_ready,
         _LAST_STATUS.enabled,
         _LAST_STATUS.jar_path,
         _LAST_STATUS.resource_dir,

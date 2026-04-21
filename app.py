@@ -5556,6 +5556,8 @@ def health():
             "jar_ready": jar_ready,
             "resource_dir_exists": runtime_diag["resource_dir_exists"],
             "resources_ready": bool(bootstrap_status.get("resources_ready", runtime_diag["resource_dir_exists"])),
+            "jar_source": bootstrap_status.get("jar_source", ""),
+            "jar_validation_error": bootstrap_status.get("jar_validation_error", ""),
             "jar_path": runtime_diag.get("jar_path"),
             "resource_dir": runtime_diag.get("resource_dir"),
             "missing_files": bootstrap_status.get("missing_files", []),
