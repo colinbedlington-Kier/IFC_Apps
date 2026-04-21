@@ -30,8 +30,8 @@ On Railway Hobby-sized memory budgets, this can exceed container limits during l
 - **Heavy-job timeout guard** via `HEAVY_JOB_TIMEOUT_SECONDS`.
 - **COBieQC Java heap cap** via `COBIEQC_JAVA_XMX_MB` (default `512`) plus `-Xms128m`.
 - **COBieQC bootstrap hardening**:
-  - validates ZIP payload before extraction,
-  - avoids broken extract loops by failing fast on invalid payloads,
+  - uses folder-based resource validation (`xsl_xml` with expected XML/XSL files),
+  - avoids ZIP download/extract paths for XML/XSL resources,
   - falls back cleanly to disabled state if resources are unavailable.
 - **Streaming upload writes** to disk for IFC QA/COBieQC/session uploads to avoid large request-body copies in RAM.
 - **Explicit cleanup/gc hooks** after heavy Excel→IFC update processing.
