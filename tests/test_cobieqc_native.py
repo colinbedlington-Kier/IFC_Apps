@@ -27,8 +27,11 @@ def _make_sample_workbook(path: Path) -> None:
     ws.append(["Name", "Category"])
     ws.append(["HQ", "Office"])
     ws2 = wb.create_sheet("Space")
-    ws2.append(["Name", "Floor"])
-    ws2.append(["Room 101", "1"])
+    ws2.append(["Name", "Floor", "CreatedBy", "CreatedOn"])
+    ws2.append(["Room 101", "1", "Alice", 45292.5])
+    ws3 = wb.create_sheet("Contact")
+    ws3.append(["Name", "Email"])
+    ws3.append(["Alice", "alice@example.com"])
     wb.save(path)
 
 
@@ -169,6 +172,80 @@ def test_schematron_compiled_xslt_rewrites_relative_imports(monkeypatch, tmp_pat
         encoding="utf-8"
     )
     assert "import resolved" in svrl_xml.read_text(encoding="utf-8")
+
+
+def test_lxml_selects_multiple_design_phases_and_logs_phase_catalog(monkeypatch, tmp_path):
+    pytest.importorskip("lxml")
+    workbook = tmp_path / "input.xlsx"
+    resources = tmp_path / "xsl_xml"
+    job_dir = tmp_path / "job"
+    _make_sample_workbook(workbook)
+    resources.mkdir(parents=True, exist_ok=True)
+    (resources / "COBieRules.sch").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<sch:schema xmlns:sch="http://purl.oclc.org/dsdl/schematron">
+  <sch:phase id="Design.COBieValidation.Errors"><sch:active pattern="err"/></sch:phase>
+  <sch:phase id="COBieValidation.Information"><sch:active pattern="info"/></sch:phase>
+  <sch:pattern id="err"><sch:rule context="/COBie"><sch:assert test="false()" id="ERR1">bad</sch:assert></sch:rule></sch:pattern>
+  <sch:pattern id="info"><sch:rule context="/COBie"><sch:assert test="false()" id="INFO1">bad</sch:assert></sch:rule></sch:pattern>
+</sch:schema>""",
+        encoding="utf-8",
+    )
+    (resources / "iso_svrl_for_xslt2.xsl").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  xmlns:axsl="urn:test:axsl"
+  xmlns:svrl="http://purl.oclc.org/dsdl/svrl">
+  <xsl:output method="xml" indent="yes"/>
+  <xsl:namespace-alias stylesheet-prefix="axsl" result-prefix="xsl"/>
+  <xsl:param name="phase"/>
+  <xsl:template match="/">
+    <axsl:stylesheet version="1.0" xmlns:svrl="http://purl.oclc.org/dsdl/svrl">
+      <axsl:template match="/">
+        <svrl:schematron-output>
+          <svrl:active-pattern id="{$phase}"/>
+          <svrl:fired-rule context="/COBie"/>
+          <svrl:failed-assert id="{$phase}" location="/COBie"><svrl:text>phase</svrl:text></svrl:failed-assert>
+        </svrl:schematron-output>
+      </axsl:template>
+    </axsl:stylesheet>
+  </xsl:template>
+</xsl:stylesheet>""",
+        encoding="utf-8",
+    )
+    (resources / "COBieExcelTemplate.xml").write_text("<template/>", encoding="utf-8")
+    (resources / "COBieRules_Functions.xsl").write_text("<xsl:stylesheet version='1.0' xmlns:xsl='http://www.w3.org/1999/XSL/Transform'/>", encoding="utf-8")
+    (resources / "iso_schematron_skeleton_for_saxon.xsl").write_text("<!-- skeleton marker -->", encoding="utf-8")
+    (resources / "SpaceReport.css").write_text("body {}", encoding="utf-8")
+    (resources / "SVRL_HTML_altLocation.xslt").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <xsl:template match="/"><html><body>ok</body></html></xsl:template>
+</xsl:stylesheet>""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "lxml")
+
+    result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
+    assert result.ok
+    assert "schematron_available_phases=Design.COBieValidation.Errors,COBieValidation.Information" in result.stdout
+    assert "schematron_phase_selected stage=D phases=Design.COBieValidation.Errors,COBieValidation.Information" in result.stdout
+    assert "svrl_diagnostics fired_rules=2 failed_asserts=2" in result.stdout
+
+
+def test_created_on_normalized_to_iso8601(monkeypatch, tmp_path):
+    workbook = tmp_path / "input.xlsx"
+    resources = tmp_path / "xsl_xml"
+    job_dir = tmp_path / "job"
+    _make_sample_workbook(workbook)
+    _write_resources(resources)
+    monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "lxml")
+    result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
+    assert result.ok
+    generated_xml = (job_dir / "generated_cobie.xml").read_text(encoding="utf-8")
+    assert "2024-01-01T12:00:00" in generated_xml
+    assert "generated_created_on_samples values=2024-01-01T12:00:00" in result.stdout
 
 
 def test_saxon_executes_compiled_xslt_with_quantified_expression(monkeypatch, tmp_path):
