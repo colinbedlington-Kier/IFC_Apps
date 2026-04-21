@@ -145,6 +145,20 @@ class SchematronPipeline:
             )
             compiled_xslt_output_path.write_bytes(compiled_xslt_bytes)
             logs.append(self._phase_log("schematron_compiled_to_xslt", compiled_xslt_output_path))
+            logs.append(f"compiled_validation_xslt path={compiled_xslt_output_path}")
+            detected_hrefs = self._collect_xslt_dependency_hrefs(compiled_xslt_output_path)
+            logs.append(f"compiled_xslt_dependencies_detected hrefs={','.join(detected_hrefs) or '(none)'}")
+            rewritten = self._rewrite_xslt_dependency_hrefs(compiled_xslt_output_path)
+            for source_href, target_href in rewritten:
+                logs.append(f"compiled_xslt_dependency_rewritten from={source_href} to={target_href}")
+            unresolved = self._find_unresolved_relative_hrefs(compiled_xslt_output_path)
+            if unresolved:
+                warnings.append(
+                    f"compiled_xslt_unresolved_relative_dependencies={','.join(unresolved)} "
+                    f"base_dir={compiled_xslt_output_path.parent}"
+                )
+                logs.append(f"compiled_xslt_unresolved_relative_dependencies hrefs={','.join(unresolved)}")
+            logs.append(f"validation_resolver_base path={compiled_xslt_output_path.parent}")
         except Exception as exc:
             diagnostics = self._collect_schematron_diagnostics(sch_doc)
             warnings.append(
@@ -228,6 +242,44 @@ class SchematronPipeline:
     def _phase_log(self, phase: str, artifact: Path) -> str:
         size = artifact.stat().st_size if artifact.exists() else 0
         return f"{phase} path={artifact} size_bytes={size}"
+
+    def _collect_xslt_dependency_hrefs(self, xslt_path: Path) -> List[str]:
+        try:
+            from lxml import etree
+        except Exception:
+            return []
+        doc = etree.parse(str(xslt_path))
+        nodes = doc.xpath("//*[local-name()='import' or local-name()='include'][@href]")
+        return [str(node.get("href", "")).strip() for node in nodes]
+
+    def _rewrite_xslt_dependency_hrefs(self, xslt_path: Path) -> List[Tuple[str, str]]:
+        try:
+            from lxml import etree
+        except Exception:
+            return []
+        parser = etree.XMLParser(remove_blank_text=False)
+        doc = etree.parse(str(xslt_path), parser)
+        rewritten: List[Tuple[str, str]] = []
+        for node in doc.xpath("//*[local-name()='import' or local-name()='include'][@href]"):
+            href = str(node.get("href", "")).strip()
+            if not href or "://" in href or href.startswith("/"):
+                continue
+            candidate = (self.resources_dir / href).resolve()
+            if candidate.exists():
+                absolute_href = candidate.as_uri()
+                node.set("href", absolute_href)
+                rewritten.append((href, absolute_href))
+        if rewritten:
+            doc.write(str(xslt_path), encoding="utf-8", pretty_print=True, xml_declaration=True)
+        return rewritten
+
+    def _find_unresolved_relative_hrefs(self, xslt_path: Path) -> List[str]:
+        unresolved: List[str] = []
+        for href in self._collect_xslt_dependency_hrefs(xslt_path):
+            if not href or "://" in href or href.startswith("/"):
+                continue
+            unresolved.append(href)
+        return unresolved
 
     def _safe_artifact_preview(self, artifact: Path) -> List[str]:
         if not artifact.exists():
