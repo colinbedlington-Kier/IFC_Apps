@@ -1,0 +1,48 @@
+{
+  "shortCodes": [
+    {
+      "Natural_Language_Entity": "Zone",
+      "Nomenclature_Short_Code": "Fr-",
+      "IFC_Entity": "IfcZone-",
+      "IFC_Entity_Type": "-"
+    }
+  ],
+  "layers": [
+    {
+      "Layer_Table": "Structures",
+      "Layer_Discipline": "S",
+      "Layer": "S-EF2005--Substructure"
+    }
+  ],
+  "entityTypes": [
+    {
+      "Entity_Enumeration": "Actuator_ElectricActuator",
+      "Natural_Language_Entity": "Actuator",
+      "IFC_Entity_Occurrence": "IfcDistributionControlElement",
+      "IFC_Entity_Type": "IfcActuatorType",
+      "IFC_Predefined_Type": "ELECTRICACTUATOR",
+      "Required_For_COBie": "Yes",
+      "IFC_Predefined_Type_Key": "IfcDistributionControlElement-IfcActuatorType-ELECTRICACTUATOR"
+    }
+  ],
+  "systemCategory": [
+    {
+      "Classification_Table": "Uniclass 2015 Table SystemCategory",
+      "Classification_Number": "Ss_15",
+      "Classification_Version": "Uniclass2015_Ss_v1_38",
+      "Classification_Value": "Ss_15: Earthworks, remediation and temporary systems"
+    }
+  ],
+  "psetTemplate": {
+    "IfcBeam-IfcBeamType": [
+      {
+        "Property_Set": "COBie_Type",
+        "Property_Name": "AssetType"
+      },
+      {
+        "Property_Set": "COBie_Component",
+        "Property_Name": "Space"
+      }
+    ]
+  }
+}

@@ -9,6 +9,7 @@ const qaState = {
     psetTemplate: {},
   },
   warning: "",
+  configReady: false,
 };
 
 const DEFAULT_SHEETS = [
@@ -54,28 +55,23 @@ async function ensureSession() {
 }
 
 async function loadQaConfig() {
-  const urls = [];
-  if (qaState.sessionId) urls.push(`/api/ifc-qa/config/${qaState.sessionId}`);
-  urls.push("/api/ifc-qa/config/default", "/api/ifc-qa/config");
-
-  for (const url of urls) {
-    try {
-      const resp = await fetch(url);
-      if (!resp.ok) continue;
-      const data = await resp.json();
-      qaState.qaConfig = normalizeConfig(data);
-      qaState.warning = "";
-      return;
-    } catch (err) {
-      console.warn(`Failed to load IFC QA config from ${url}`, err);
-    }
+  try {
+    const resp = await fetch("/api/ifc-qa/config");
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    qaState.qaConfig = normalizeConfig(data);
+    qaState.warning = "";
+    qaState.configReady = true;
+  } catch (err) {
+    console.warn("Failed to load IFC QA default config", err);
+    qaState.warning = "IFC QA config failed to load. Extraction is disabled until config is available.";
+    qaState.configReady = false;
   }
-  qaState.warning = "Config unavailable; using defaults";
 }
 
 function warningBanner() {
   if (!qaState.warning) return "";
-  return `<div class="card" style="border-left:4px solid #f59e0b;background:#fff8e6">${qaState.warning}</div>`;
+  return `<div class="card" style="border-left:4px solid #dc2626;background:#fef2f2">${qaState.warning}</div>`;
 }
 
 function extractorTemplate() {
@@ -91,7 +87,7 @@ function extractorTemplate() {
 
     <div class="inline">
       <button class="btn secondary" id="qaConfigureBtn" type="button">Configure</button>
-      <button class="btn" id="qaStartBtn" type="button">Start QA Extraction</button>
+      <button class="btn" id="qaStartBtn" type="button" ${qaState.configReady ? "" : "disabled"}>Start QA Extraction</button>
       <button class="btn secondary" id="qaDownloadBtn" type="button" disabled>Download ZIP</button>
     </div>
 
@@ -170,9 +166,30 @@ function openConfig() {
   modal.hidden = false;
 }
 function closeConfig() { const modal = qs("#qaConfigModal"); if (modal) modal.hidden = true; }
-function applyConfig() {
+async function applyConfig() {
   try {
-    qaState.qaConfig = JSON.parse(qs("#qaConfigText")?.value || "{}");
+    const edited = JSON.parse(qs("#qaConfigText")?.value || "{}");
+    const validation = await fetch("/api/ifc-qa/config/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(edited),
+    });
+    const result = await validation.json();
+    if (!result.valid) {
+      alert(`Invalid config: ${(result.errors || []).join("; ")}`);
+      return;
+    }
+    const mergedResp = await fetch("/api/ifc-qa/config/merge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(edited),
+    });
+    const mergedData = await mergedResp.json();
+    if (!mergedData.valid) {
+      alert(`Merge failed: ${(mergedData.errors || []).join("; ")}`);
+      return;
+    }
+    qaState.qaConfig = normalizeConfig(mergedData.config || edited);
     closeConfig();
   } catch {
     alert("Invalid JSON");
@@ -187,12 +204,23 @@ function exportConfig(config = qaState.qaConfig) {
   a.click();
   URL.revokeObjectURL(url);
 }
-function importConfig(ev) {
+async function importConfig(ev) {
   const file = ev.target.files?.[0];
   if (!file) return;
-  file.text().then((txt) => {
+  file.text().then(async (txt) => {
     try {
-      qaState.qaConfig = JSON.parse(txt);
+      const parsed = JSON.parse(txt);
+      const mergedResp = await fetch("/api/ifc-qa/config/merge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed),
+      });
+      const mergedData = await mergedResp.json();
+      if (!mergedData.valid) {
+        alert(`Invalid override: ${(mergedData.errors || []).join("; ")}`);
+        return;
+      }
+      qaState.qaConfig = normalizeConfig(mergedData.config || parsed);
       const editor = qs("#qaConfigText");
       if (editor) editor.value = JSON.stringify(qaState.qaConfig, null, 2);
     } catch {
@@ -204,6 +232,7 @@ function importConfig(ev) {
 async function startRun() {
   const input = qs("#qaIfcFiles");
   const files = Array.from(input?.files || []);
+  if (!qaState.configReady) return alert("IFC QA config unavailable. Cannot start extraction.");
   if (!files.length) return alert("Please select IFC files");
 
   const downloadBtn = qs("#qaDownloadBtn");

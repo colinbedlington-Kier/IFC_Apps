@@ -56,7 +56,8 @@ from cobieqc_service.runner import get_cobieqc_runtime_diagnostics, get_cobieqc_
 from cobieqc_service.security import sanitize_filename as sanitize_upload_filename
 from cobieqc_service.security import validate_upload
 from ifc_qa_service import REGISTRY as IFC_QA_V2_REGISTRY
-from ifc_qa_service import default_config_from_dir, start_job as start_ifc_qa_v2_job
+from ifc_qa_service import start_job as start_ifc_qa_v2_job
+from backend.ifc_qa.config_loader import export_config, get_default_config, merge_config_overrides, validate_config_structure
 from backend.ifc_jobs import create_job as create_ifc_job, get_job as get_ifc_job, update_job as update_ifc_job
 from backend.ifc_file_size_reducer import (
     IfcFileSizeReducerError,
@@ -6060,11 +6061,18 @@ async def ifc_qa_run(
     if options_json:
         options = json.loads(options_json)
     options["max_workers"] = 1
-    cfg = default_config_from_dir(IFC_QA_REFERENCE_DIR)
+    try:
+        cfg = get_default_config()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"IFC QA default config failed to load: {exc}")
+
     if config_override_json:
         override = json.loads(config_override_json)
         if isinstance(override, dict):
-            cfg.update(override)
+            try:
+                cfg = merge_config_overrides(cfg, override)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid config override: {exc}")
 
     job_id = start_ifc_qa_v2_job(file_records, options, cfg)
     return {"job_id": job_id}
@@ -6103,18 +6111,43 @@ def ifc_qa_result(job_id: str):
     return FileResponse(path, media_type="application/zip", filename="IFC Output.zip")
 
 
-@app.get("/api/ifc-qa/config/default")
+@app.get("/api/ifc-qa/config")
 def ifc_qa_default_config():
-    return default_config_from_dir(IFC_QA_REFERENCE_DIR)
+    try:
+        return export_config(get_default_config())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"IFC QA default config unavailable: {exc}")
+
+
+@app.get("/api/ifc-qa/config/default")
+def ifc_qa_default_config_compat():
+    return ifc_qa_default_config()
 
 
 @app.get("/api/ifc-qa/config/{session_id}")
 def ifc_qa_config_session(session_id: str):
     return {
         "session_id": session_id,
-        "config": default_config_from_dir(IFC_QA_REFERENCE_DIR),
+        "config": ifc_qa_default_config(),
         "overrides": {},
     }
+
+
+@app.post("/api/ifc-qa/config/validate")
+def ifc_qa_validate_config(payload: Dict[str, Any] = Body(...)):
+    errors = validate_config_structure(payload)
+    return {"valid": len(errors) == 0, "errors": errors}
+
+
+@app.post("/api/ifc-qa/config/merge")
+def ifc_qa_merge_config(payload: Dict[str, Any] = Body(...)):
+    try:
+        merged = merge_config_overrides(get_default_config(), payload)
+    except ValueError as exc:
+        return {"valid": False, "errors": [str(exc)], "config": None}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"IFC QA merge failed: {exc}")
+    return {"valid": True, "errors": [], "config": export_config(merged)}
 
 
 @app.get("/api/ifc-qa/config/{session_id}/regex")
@@ -6123,7 +6156,7 @@ def ifc_qa_config_regex_compat(session_id: str):
         "regex": [],
         "patterns": [],
         "overrides": {},
-        "message": "Regex extractor deprecated; using IFCOpenShell config.",
+        "message": "Regex extractor deprecated; using baked-in JSON config.",
     }
 
 

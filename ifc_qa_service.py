@@ -8,10 +8,13 @@ import threading
 import time
 import uuid
 import zipfile
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+from backend.ifc_qa.config_loader import get_default_config
 
 import ifcopenshell
 import ifcopenshell.util.element
@@ -218,6 +221,7 @@ class IfcQaRegistry:
                 self.jobs.pop(job_id, None)
 
 
+LOGGER = logging.getLogger("ifc_qa.service")
 REGISTRY = IfcQaRegistry()
 
 
@@ -591,11 +595,13 @@ def _csv_writer(path: Path, header: List[str]):
 def _write_outputs(job_id: str, ctx: FileContext, out_root: Path, config: Dict[str, Any]) -> List[Any]:
     source = ctx.source_file
     codes = source.split("-")
-    short_codes = set(config.get("short_codes", []))
-    layers = set(config.get("layers", []))
-    entity_types = set(config.get("entity_types", []))
-    uniclass = set(config.get("uniclass_system_category", []))
-    pset_template = config.get("pset_template", {})
+    indexes = config.get("_indexes") or {}
+    short_codes = indexes.get("short_code_set", set())
+    layers = indexes.get("layer_set", set())
+    entity_type_by_key = indexes.get("entity_type_by_key", {})
+    entity_types_by_natural = indexes.get("entity_types_by_natural_language_entity", {})
+    uniclass = indexes.get("system_category_values", set())
+    pset_template = indexes.get("pset_template_map", config.get("psetTemplate", {}))
 
     counts = {"write_objects_total": len(ctx.objects), "write_objects_processed": 0}
     stage_done = {k: 1.0 for k in STAGE_WEIGHTS if k != "write"}
@@ -630,14 +636,11 @@ def _write_outputs(job_id: str, ctx: FileContext, out_root: Path, config: Dict[s
             for i, fact in enumerate(facts, start=1):
                 type_tokens = fact.type_name.split("_") if fact.type_name else []
                 type_ok = bool(fact.type_name)
-                if len(type_tokens) >= 3:
-                    if len(codes) > 1:
-                        type_ok = type_ok and type_tokens[0] == codes[1]
-                    if len(codes) > 5:
-                        type_ok = type_ok and type_tokens[1] == codes[5]
-                    type_ok = type_ok and type_tokens[2] in entity_types
-                else:
-                    type_ok = False
+                entity_key = f"{fact.entity}-{fact.type_entity}-{fact.predefined}".strip("-")
+                type_ok = type_ok and entity_key in entity_type_by_key
+                if not type_ok and len(type_tokens) >= 3:
+                    natural_entity = type_tokens[2]
+                    type_ok = natural_entity in entity_types_by_natural
 
                 stem = ""
                 if len(type_tokens) >= 3:
@@ -751,8 +754,8 @@ def _write_outputs(job_id: str, ctx: FileContext, out_root: Path, config: Dict[s
                     reqs = pset_template.get(combo, [])
                     seen = prop_index.get(fact.obj_id, set())
                     for req in reqs:
-                        pset_name = req.get("Property_Set_Template", "")
-                        prop_name = req.get("Property_Name_Template", "")
+                        pset_name = req.get("Property_Set", "") or req.get("Property_Set_Template", "")
+                        prop_name = req.get("Property_Name", "") or req.get("Property_Name_Template", "")
                         ok = (pset_name, prop_name) in seen
                         w.writerow([
                             fact.line_ref,
@@ -884,14 +887,23 @@ def start_job(file_records: List[Tuple[str, str]], options: Dict[str, Any], conf
     return job_id
 
 
+
+
+def evaluate_config_rules(config: Dict[str, Any], *, short_code: str, layer: str, entity_type_key: str, system_category_value: str, pset_combo: str, pset_pair: Tuple[str, str]) -> Dict[str, bool]:
+    indexes = config.get("_indexes") or {}
+    pset_rows = indexes.get("pset_template_map", {}).get(pset_combo, [])
+    pset_ok = any((row.get("Property_Set") == pset_pair[0] and row.get("Property_Name") == pset_pair[1]) for row in pset_rows)
+    return {
+        "short_code": short_code in indexes.get("short_code_set", set()),
+        "layer": layer in indexes.get("layer_set", set()),
+        "entity_type_key": entity_type_key in indexes.get("entity_type_by_key", {}),
+        "system_category": system_category_value in indexes.get("system_category_values", set()),
+        "pset_template": pset_ok,
+    }
+
 def default_config_from_dir(reference_dir: Path) -> Dict[str, Any]:
-    cfg = {}
-    for name in ["default_config", "pset_template", "uniclass_system_category", "short_codes", "layers", "entity_types", "property_exclusions"]:
-        p = reference_dir / f"{name}.json"
-        if p.exists():
-            with open(p, "r", encoding="utf-8") as f:
-                cfg[name] = json.load(f)
-        else:
-            cfg[name] = [] if name != "pset_template" else {}
-    cfg["pset_template"] = cfg.get("pset_template", {})
-    return cfg
+    try:
+        return get_default_config()
+    except Exception:
+        LOGGER.exception("Failed to load IFC QA default configuration")
+        raise
