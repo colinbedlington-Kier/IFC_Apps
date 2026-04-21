@@ -204,7 +204,7 @@ def test_saxon_executes_compiled_xslt_with_quantified_expression(monkeypatch, tm
     <axsl:stylesheet version="2.0" xmlns:svrl="http://purl.oclc.org/dsdl/svrl">
       <axsl:template match="/">
         <svrl:schematron-output>
-          <axsl:if test="some $comp in /COBieWorkbook/Sheet[@name='Facility']/Row satisfies string-length($comp/Name) &gt; 0">
+          <axsl:if test="some $comp in /COBie/Facilities/Facility satisfies string-length($comp/Name) &gt; 0">
             <svrl:successful-report test="quantified-expression">
               <svrl:text>quantifier_ok</svrl:text>
             </svrl:successful-report>
@@ -309,7 +309,7 @@ def test_native_pipeline_logs_cobie_and_svrl_diagnostics(monkeypatch, tmp_path):
     result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
 
     assert result.ok
-    assert "generated_cobie_xml_diagnostics root_element=COBieWorkbook" in result.stdout
+    assert "generated_cobie_xml_diagnostics root_element=COBie" in result.stdout
     assert "generated_cobie_xml_entity_counts" in result.stdout
     assert "svrl_diagnostics fired_rules=0" in result.stdout
     assert any("rule contexts likely did not match" in warning for warning in result.summary["warnings"])

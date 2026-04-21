@@ -106,12 +106,10 @@ def _inspect_cobie_xml(cobie_xml_path: Path) -> Dict[str, Any]:
                     samples.append(_element_path(node, parent_map))
         counts[entity_name] = count
         sample_paths[entity_name] = samples
-    for sheet_node in root.iter():
-        if _local_name(sheet_node.tag) != "Sheet":
-            continue
-        sheet_name = str(sheet_node.attrib.get("name", "")).strip() or "(unnamed)"
-        row_count = sum(1 for child in list(sheet_node) if _local_name(child.tag) == "Row")
-        sheet_to_rows[sheet_name] = row_count
+    for node in root.iter():
+        source_sheet = str(node.attrib.get("sourceSheet", "")).strip()
+        if source_sheet:
+            sheet_to_rows[source_sheet] = sheet_to_rows.get(source_sheet, 0) + 1
     model_path_count = sum(1 for node in root.iter() if _local_name(node.tag).lower() in lower_names)
     return {
         "root_element_name": _local_name(root.tag),
@@ -219,29 +217,59 @@ class CobieWorkbookXmlBuilder:
     def build(self) -> Tuple[bytes, List[str]]:
         warnings: List[str] = []
         wb = load_workbook(self.workbook_path, read_only=True, data_only=True)
-        root = ET.Element("COBieWorkbook")
+        root = ET.Element("COBie")
         root.set("stage", self.stage)
         root.set("source", self.workbook_path.name)
 
         if self.template_path and self.template_path.exists():
             root.set("template", self.template_path.name)
         else:
-            warnings.append("COBieExcelTemplate.xml missing; using generic workbook mapping")
+            warnings.append("COBieExcelTemplate.xml missing; using direct entity sheet mapping")
+
+        canonical_entity_map: Dict[str, Tuple[str, str]] = {
+            "contact": ("Contacts", "Contact"),
+            "facility": ("Facilities", "Facility"),
+            "floor": ("Floors", "Floor"),
+            "space": ("Spaces", "Space"),
+            "zone": ("Zones", "Zone"),
+            "type": ("Types", "Type"),
+            "component": ("Components", "Component"),
+        }
+        container_elements: Dict[str, ET.Element] = {}
+
+        def _resolve_container(sheet_title: str) -> Tuple[str, str]:
+            normalized = _clean_tag(sheet_title).lower()
+            if normalized.endswith("s"):
+                normalized = normalized[:-1]
+            if normalized in canonical_entity_map:
+                return canonical_entity_map[normalized]
+            entity = _clean_tag(sheet_title)
+            if entity.endswith("s"):
+                entity = entity[:-1] or entity
+            return f"{entity}s", entity
 
         for sheet in wb.worksheets:
-            sheet_el = ET.SubElement(root, "Sheet")
-            sheet_el.set("name", sheet.title)
             rows = list(sheet.iter_rows(values_only=True))
             if not rows:
                 warnings.append(f"Sheet '{sheet.title}' is empty")
                 continue
 
+            container_name, entity_name = _resolve_container(sheet.title)
+            container_el = container_elements.get(container_name)
+            if container_el is None:
+                container_el = ET.SubElement(root, container_name)
+                container_elements[container_name] = container_el
+
             header = [_clean_tag(v if v is not None else "Column") for v in rows[0]]
-            for row_idx, row in enumerate(rows[1:], start=2):
+            entity_ordinal = 0
+            for row_idx, row in enumerate(rows[1:], start=1):
                 if all(cell in (None, "") for cell in row):
                     continue
-                row_el = ET.SubElement(sheet_el, "Row")
-                row_el.set("index", str(row_idx))
+                entity_ordinal += 1
+                row_el = ET.SubElement(container_el, entity_name)
+                row_el.set("sourceSheet", sheet.title)
+                row_el.set("rowNumber", str(row_idx))
+                row_el.set("sheetOrdinal", str(entity_ordinal))
                 for col_idx, cell in enumerate(row):
                     col_name = header[col_idx] if col_idx < len(header) else f"Column_{col_idx + 1}"
                     cell_el = ET.SubElement(row_el, col_name)
@@ -826,6 +854,14 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
             "generated_cobie_xml_sheet_row_counts "
             + " ".join(f"{sheet}:{count}" for sheet, count in sorted(sheet_row_counts.items()))
         )
+        workbook_style = cobie_diagnostics["root_element_name"] == "COBieWorkbook" or any(
+            child == "Sheet" for child in cobie_diagnostics["first_level_children"]
+        )
+        if workbook_style:
+            raise RuntimeError(
+                "Workbook XML shape is not compatible with COBie Schematron validation; "
+                "expected COBie entity containers instead of COBieWorkbook/Sheet wrappers."
+            )
         if cobie_diagnostics["root_element_name"] != "COBie":
             parse_warnings.append(
                 "Generated COBie XML root element is not 'COBie'; rules may expect a COBie root container."
