@@ -1,12 +1,12 @@
 const qaState = {
   sessionId: "",
-  jobId: "",
+  activeJobId: "",
+  isRunning: false,
   uploadState: "idle",
   uploadPercent: 0,
   uploadBytesLoaded: 0,
   uploadBytesTotal: 0,
   uploadError: "",
-  isStartingRun: false,
   qaConfig: {
     shortCodes: {},
     layers: {},
@@ -16,6 +16,11 @@ const qaState = {
   },
   warning: "",
   configLoaded: false,
+  fileQueue: [],
+  lastUpdated: "",
+  modelCount: 0,
+  hasZip: false,
+  sessionSourceFiles: [],
 };
 
 const DEFAULT_SHEETS = [
@@ -45,19 +50,30 @@ function normalizeConfig(raw) {
 
 async function ensureSession() {
   const existing = localStorage.getItem("ifc_session_id") || "";
+  const resp = await fetch("/api/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: existing }),
+  });
+  if (!resp.ok) throw new Error("session error");
+  const data = await resp.json();
+  qaState.sessionId = data.session_id || existing;
+  if (qaState.sessionId) localStorage.setItem("ifc_session_id", qaState.sessionId);
+}
+
+async function refreshSessionSummary() {
+  if (!qaState.sessionId) return;
   try {
-    const resp = await fetch("/api/session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: existing }),
-    });
-    if (!resp.ok) throw new Error("session error");
+    const resp = await fetch(`/api/ifc-qa/session/${qaState.sessionId}/summary`);
+    if (!resp.ok) return;
     const data = await resp.json();
-    qaState.sessionId = data.session_id || existing;
-    if (qaState.sessionId) localStorage.setItem("ifc_session_id", qaState.sessionId);
-  } catch (e) {
-    console.warn("IFC QA session unavailable", e);
-  }
+    qaState.modelCount = data.model_count || 0;
+    qaState.lastUpdated = data.updated_at || "";
+    qaState.hasZip = !!data.has_zip;
+    qaState.sessionSourceFiles = Array.isArray(data.source_files) ? data.source_files : [];
+  } catch (_) {}
+  renderSessionSummary();
+  renderActionButtons();
 }
 
 async function loadQaConfig() {
@@ -87,9 +103,9 @@ function extractorTemplate() {
   ${warningBanner()}
   <div class="stack">
     <label>IFC files</label>
-    <input id="qaIfcFiles" type="file" multiple accept=".ifc" />
-    <ul id="qaFileList" class="qa-file-list muted"></ul>
-    <div id="qaUploadError" class="qa-error-banner" hidden></div>
+    <input id="qaIfcFiles" type="file" multiple accept=".ifc" ${disabledAttr}/>
+    <div id="qaFileQueue" class="qa-file-queue muted"></div>
+
     <div class="qa-upload-progress">
       <div class="qa-upload-progress-top">
         <strong id="qaUploadStatusText">Waiting for files…</strong>
@@ -107,12 +123,14 @@ function extractorTemplate() {
     <div class="inline">
       <button class="btn secondary" id="qaConfigureBtn" type="button" ${disabledAttr}>Configure</button>
       <button class="btn" id="qaStartBtn" type="button" ${disabledAttr}>Start QA Extraction</button>
+      <button class="btn secondary" id="qaAddBtn" type="button" disabled>Add to ZIP</button>
       <button class="btn secondary" id="qaDownloadBtn" type="button" disabled>Download ZIP</button>
     </div>
 
+    <div id="qaSessionSummary" class="muted"></div>
+
     <div class="progress-track"><div id="qaProgressFill" class="progress-fill" style="width:0%"></div></div>
     <div id="qaProgressLabel" class="muted"></div>
-    <div id="qaPerFile" class="muted"></div>
     <textarea id="qaLog" class="log-box" rows="10" readonly></textarea>
   </div>
 
@@ -145,39 +163,52 @@ function formatBytes(bytes) {
   return `${size.toFixed(precision)} ${units[idx]}`;
 }
 
-function configTemplate() {
-  return `
-  ${warningBanner()}
-  <div class="stack">
-    <div class="section-title"><h3>Current IFC QA Config</h3></div>
-    <textarea id="qaConfigStandalone" rows="22" style="width:100%;font-family:monospace">${JSON.stringify(qaState.qaConfig, null, 2)}</textarea>
-    <div class="inline">
-      <button class="btn secondary" id="qaConfigExportStandalone" type="button">Export JSON</button>
-    </div>
-  </div>`;
+function statusLabel(status) {
+  return ({ queued: "Queued", uploading: "Uploading", uploaded: "Uploaded", processing: "Processing", complete: "Complete", failed: "Failed" }[status] || "Queued");
 }
 
-function dashboardTemplate() {
-  return `
-  ${warningBanner()}
-  <div class="stack">
-    <div class="section-title"><h3>IFC QA Dashboard</h3></div>
-    <p class="muted">Run an extraction from the extractor page to populate progress and downloadable results.</p>
-    <div id="qaDashboardStatus" class="card">No active job.</div>
-  </div>`;
-}
-
-function renderSheetChecks() {
-  const wrap = qs("#qaSheetChecks");
+function renderFileQueue() {
+  const wrap = qs("#qaFileQueue");
   if (!wrap) return;
-  wrap.innerHTML = DEFAULT_SHEETS.map(([k, label]) => `<label><input type="checkbox" data-sheet="${k}" checked /> ${label}</label>`).join("");
+  if (!qaState.fileQueue.length) {
+    wrap.innerHTML = "<div class='muted'>No files selected.</div>";
+    return;
+  }
+  wrap.innerHTML = qaState.fileQueue.map((row) => {
+    const pct = Math.max(0, Math.min(100, row.overallPercent || 0));
+    const dup = row.duplicate ? `<div class='muted' style='color:#b45309'>Duplicate filename detected. Existing outputs will be replaced.</div>` : "";
+    const err = row.error ? `<div class='muted' style='color:#b91c1c'>${row.error}</div>` : "";
+    return `
+      <div class="card" style="padding:10px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;gap:10px"><strong>${row.name}</strong><span>${formatBytes(row.size)}</span></div>
+        <div class="muted" style="margin:4px 0">${statusLabel(row.status)} — ${row.stageText || "Queued"}</div>
+        <div class="progress-track" style="height:8px"><div class="progress-fill" style="width:${pct}%"></div></div>
+        ${dup}
+        ${err}
+      </div>`;
+  }).join("");
+}
+
+function renderSessionSummary() {
+  const el = qs("#qaSessionSummary");
+  if (!el) return;
+  const pending = qaState.fileQueue.filter((row) => ["queued", "uploading", "uploaded", "processing", "failed"].includes(row.status)).length;
+  el.textContent = `Session ZIP contains: ${qaState.modelCount} models | Last updated: ${qaState.lastUpdated || "-"} | Pending selected files: ${pending}`;
+}
+
+function renderActionButtons() {
+  const startBtn = qs("#qaStartBtn");
+  const addBtn = qs("#qaAddBtn");
+  const dlBtn = qs("#qaDownloadBtn");
+  const hasQueued = qaState.fileQueue.some((row) => row.status === "queued" || row.status === "failed");
+  if (startBtn) startBtn.disabled = qaState.isRunning || !hasQueued || qaState.modelCount > 0;
+  if (addBtn) addBtn.disabled = qaState.isRunning || !hasQueued || qaState.modelCount === 0;
+  if (dlBtn) dlBtn.disabled = qaState.isRunning || !qaState.hasZip;
 }
 
 function selectedSheets() {
   const out = {};
-  DEFAULT_SHEETS.forEach(([k]) => {
-    out[k] = !!qs(`[data-sheet="${k}"]`)?.checked;
-  });
+  DEFAULT_SHEETS.forEach(([k]) => { out[k] = !!qs(`[data-sheet="${k}"]`)?.checked; });
   return out;
 }
 
@@ -186,92 +217,128 @@ function bindFilesList() {
   if (!input) return;
   input.addEventListener("change", () => {
     const files = Array.from(input.files || []);
-    const names = files.map((f) => `<li><span>${f.name}</span><span>${formatBytes(f.size)}</span></li>`).join("");
-    const list = qs("#qaFileList");
-    if (list) list.innerHTML = names || "<li>No files selected.</li>";
-    qaState.uploadError = "";
-    if (!files.length) {
-      setUploadState("idle");
-      return;
-    }
-    setUploadState("ready");
+    const existing = new Set(qaState.fileQueue.map((f) => f.name));
+    files.forEach((f) => {
+      if (existing.has(f.name)) return;
+      qaState.fileQueue.push({
+        id: `${Date.now()}_${f.name}`,
+        file: f,
+        name: f.name,
+        size: f.size,
+        uploadPercent: 0,
+        processPercent: 0,
+        overallPercent: 0,
+        status: "queued",
+        stageText: "Queued",
+        error: "",
+        duplicate: qaState.sessionSourceFiles.includes(f.name),
+      });
+    });
+    renderFileQueue();
+    renderSessionSummary();
+    renderActionButtons();
   });
 }
 
-function setUploadControlsDisabled(disabled) {
-  const startBtn = qs("#qaStartBtn");
-  const fileInput = qs("#qaIfcFiles");
-  if (startBtn) startBtn.disabled = disabled;
-  if (fileInput) fileInput.disabled = disabled;
+function renderSheetChecks() {
+  const wrap = qs("#qaSheetChecks");
+  if (!wrap) return;
+  wrap.innerHTML = DEFAULT_SHEETS.map(([k, label]) => `<label><input type="checkbox" data-sheet="${k}" checked /> ${label}</label>`).join("");
 }
 
-function setUploadState(nextState, patch = {}) {
-  qaState.uploadState = nextState;
-  Object.assign(qaState, patch);
-  renderUploadProgress();
-}
+async function uploadSingleFile(row, mode) {
+  const form = new FormData();
+  form.append("files", row.file, row.name);
+  form.append("session_id", qaState.sessionId);
+  form.append("options_json", JSON.stringify({ selected_sheets: selectedSheets() }));
+  form.append("config_override_json", JSON.stringify(qaState.qaConfig || {}));
+  const endpoint = mode === "add" ? "/api/ifc-qa/add-to-zip" : "/api/ifc-qa/run";
 
-function renderUploadProgress() {
-  const status = qs("#qaUploadStatusText");
-  const pct = qs("#qaUploadPercentText");
-  const track = qs("#qaUploadProgressTrack");
-  const bar = qs("#qaUploadProgressBar");
-  const bytes = qs("#qaUploadBytesText");
-  const error = qs("#qaUploadError");
-
-  const loaded = Number(qaState.uploadBytesLoaded) || 0;
-  const total = Number(qaState.uploadBytesTotal) || 0;
-  const percent = Math.max(0, Math.min(100, Number(qaState.uploadPercent) || 0));
-  const isUploading = qaState.uploadState === "uploading";
-  const statusMap = {
-    idle: "Waiting for files…",
-    ready: "Ready to upload",
-    uploading: "Preparing upload…",
-    uploaded: "Upload complete. Starting extraction…",
-    failed: "Upload failed",
-  };
-
-  if (status) status.textContent = statusMap[qaState.uploadState] || "Waiting for files…";
-  if (pct) pct.textContent = `${percent}%`;
-  if (bar) bar.style.width = `${percent}%`;
-  if (bytes) bytes.textContent = total > 0 ? `${formatBytes(loaded)} / ${formatBytes(total)}` : `${formatBytes(loaded)} uploaded`;
-  if (track) track.classList.toggle("indeterminate", isUploading && total <= 0);
-  if (error) {
-    error.hidden = qaState.uploadState !== "failed";
-    error.textContent = qaState.uploadError || "Upload failed. Please try again.";
-  }
-  setUploadControlsDisabled(isUploading || qaState.isStartingRun);
-}
-
-function startQaUpload(form, fileCount) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", "/api/ifc-qa/run");
+    xhr.open("POST", endpoint);
     xhr.responseType = "json";
     xhr.upload.onprogress = (evt) => {
+      const total = evt.total || row.size || 1;
       const loaded = evt.loaded || 0;
-      const total = evt.total || 0;
-      const percent = total > 0 ? Math.round((loaded / total) * 100) : qaState.uploadPercent;
-      setUploadState("uploading", {
-        uploadBytesLoaded: loaded,
-        uploadBytesTotal: total,
-        uploadPercent: percent,
-        uploadError: "",
-      });
-      const status = qs("#qaUploadStatusText");
-      if (status) status.textContent = `Uploading ${fileCount} file${fileCount === 1 ? "" : "s"}…`;
+      const pct = Math.round((loaded / total) * 100);
+      row.status = "uploading";
+      row.uploadPercent = pct;
+      row.overallPercent = Math.round(pct * 0.5);
+      row.stageText = `Uploading… ${pct}%`;
+      renderFileQueue();
+      renderSessionSummary();
     };
-    xhr.onerror = () => reject(new Error("Network error during upload"));
+    xhr.onerror = () => reject(new Error("Network error"));
     xhr.onload = () => {
-      const payload = xhr.response || {};
       if (xhr.status < 200 || xhr.status >= 300) {
-        reject(new Error(payload?.detail || payload?.error || `Upload failed with status ${xhr.status}`));
+        reject(new Error(xhr.response?.detail || `Upload failed (${xhr.status})`));
         return;
       }
-      resolve(payload);
+      resolve(xhr.response || {});
     };
     xhr.send(form);
   });
+}
+
+function updateRowFromStatus(row, statusFile) {
+  row.status = statusFile.status || row.status;
+  row.uploadPercent = statusFile.upload_percent ?? row.uploadPercent;
+  row.processPercent = statusFile.process_percent ?? row.processPercent;
+  row.overallPercent = statusFile.overall_percent ?? row.overallPercent;
+  row.stageText = statusFile.message || statusFile.stage || row.stageText;
+}
+
+async function pollJob(jobId, row) {
+  while (true) {
+    const resp = await fetch(`/api/ifc-qa/status/${jobId}`);
+    if (!resp.ok) throw new Error("status failed");
+    const data = await resp.json();
+    const statusFile = (data.files || []).find((f) => f.source_file === row.name || f.name === row.name);
+    if (statusFile) updateRowFromStatus(row, statusFile);
+    const fill = qs("#qaProgressFill");
+    const label = qs("#qaProgressLabel");
+    const log = qs("#qaLog");
+    if (fill) fill.style.width = `${data.overall_percent || 0}%`;
+    if (label) label.textContent = `${data.currentStep || ""} ${data.currentFile ? `(${data.currentFile})` : ""}`;
+    if (log) log.value = (data.logs || []).join("\n");
+    renderFileQueue();
+    if (data.status === "complete") return;
+    if (data.status === "failed") throw new Error("processing failed");
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+async function runQueue(mode) {
+  if (qaState.isRunning) return;
+  const queued = qaState.fileQueue.filter((row) => row.status === "queued" || row.status === "failed");
+  if (!queued.length) return;
+  qaState.isRunning = true;
+  renderActionButtons();
+  for (const row of queued) {
+    row.error = "";
+    try {
+      const payload = await uploadSingleFile(row, mode);
+      qaState.activeJobId = payload.job_id || "";
+      qaState.sessionId = payload.session_id || qaState.sessionId;
+      row.status = "uploaded";
+      row.stageText = "Uploaded, waiting to process…";
+      row.overallPercent = Math.max(row.overallPercent, 50);
+      renderFileQueue();
+      await pollJob(qaState.activeJobId, row);
+      row.status = "complete";
+      row.stageText = "Complete";
+      row.overallPercent = 100;
+    } catch (err) {
+      row.status = "failed";
+      row.stageText = "Failed";
+      row.error = err instanceof Error ? err.message : "Failed";
+    }
+    renderFileQueue();
+    await refreshSessionSummary();
+  }
+  qaState.isRunning = false;
+  renderActionButtons();
 }
 
 function openConfig() {
@@ -283,136 +350,35 @@ function openConfig() {
 }
 function closeConfig() { const modal = qs("#qaConfigModal"); if (modal) modal.hidden = true; }
 function applyConfig() {
-  try {
-    qaState.qaConfig = JSON.parse(qs("#qaConfigText")?.value || "{}");
-    closeConfig();
-  } catch {
-    alert("Invalid JSON");
-  }
-}
-function exportConfig(config = qaState.qaConfig) {
-  const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "ifc_qa_config.json";
-  a.click();
-  URL.revokeObjectURL(url);
-}
-function importConfig(ev) {
-  const file = ev.target.files?.[0];
-  if (!file) return;
-  file.text().then((txt) => {
-    try {
-      qaState.qaConfig = JSON.parse(txt);
-      const editor = qs("#qaConfigText");
-      if (editor) editor.value = JSON.stringify(qaState.qaConfig, null, 2);
-    } catch {
-      alert("Invalid JSON");
-    }
-  });
-}
-
-async function startRun() {
-  if (!qaState.configLoaded) return alert("Config is not loaded yet. Please reload and try again.");
-  const input = qs("#qaIfcFiles");
-  const files = Array.from(input?.files || []);
-  if (!files.length) return alert("Please select IFC files");
-  if (qaState.uploadState === "uploading" || qaState.isStartingRun) return;
-
-  const downloadBtn = qs("#qaDownloadBtn");
-  if (downloadBtn) downloadBtn.disabled = true;
-  qaState.isStartingRun = true;
-  setUploadState("uploading", {
-    uploadPercent: 0,
-    uploadBytesLoaded: 0,
-    uploadBytesTotal: 0,
-    uploadError: "",
-  });
-
-  const form = new FormData();
-  files.forEach((f) => form.append("files", f, f.name));
-  form.append("options_json", JSON.stringify({ selected_sheets: selectedSheets() }));
-  form.append("config_override_json", JSON.stringify(qaState.qaConfig || {}));
-
-  try {
-    const data = await startQaUpload(form, files.length);
-    setUploadState("uploaded", {
-      uploadPercent: 100,
-      uploadBytesLoaded: qaState.uploadBytesTotal || qaState.uploadBytesLoaded,
-      uploadBytesTotal: qaState.uploadBytesTotal || qaState.uploadBytesLoaded,
-    });
-    qaState.jobId = data.job_id;
-    pollStatus();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to upload files";
-    setUploadState("failed", { uploadError: message });
-  } finally {
-    qaState.isStartingRun = false;
-    renderUploadProgress();
-  }
-}
-
-async function pollStatus() {
-  if (!qaState.jobId) return;
-  const resp = await fetch(`/api/ifc-qa/status/${qaState.jobId}`);
-  if (!resp.ok) return;
-  const data = await resp.json();
-
-  const fill = qs("#qaProgressFill");
-  const label = qs("#qaProgressLabel");
-  const log = qs("#qaLog");
-  const perFile = qs("#qaPerFile");
-  const dashboard = qs("#qaDashboardStatus");
-
-  const overallPercent = data.overall_percent ?? data.percent ?? 0;
-  if (fill) fill.style.width = `${overallPercent}%`;
-  if (label) label.textContent = `${data.currentStep || ""} ${data.currentFile ? `(${data.currentFile})` : ""}`;
-  if (log) log.value = (data.logs || []).join("\n");
-  if (perFile) {
-    perFile.textContent = (data.files || [])
-      .map((f) => `${f.name}: ${f.percent || 0}% ${f.stage ? `(${f.stage})` : ""}`)
-      .join(" | ");
-  }
-  if (dashboard) dashboard.textContent = `Status: ${data.status || "unknown"} (${overallPercent}%)`;
-
-  if (data.status === "complete") {
-    const downloadBtn = qs("#qaDownloadBtn");
-    if (downloadBtn) downloadBtn.disabled = false;
-    return;
-  }
-  if (data.status !== "failed") setTimeout(pollStatus, 1200);
-}
-
-function downloadZip() {
-  if (!qaState.jobId) return;
-  const a = document.createElement("a");
-  a.href = `/api/ifc-qa/result/${qaState.jobId}`;
-  a.click();
+  try { qaState.qaConfig = JSON.parse(qs("#qaConfigText")?.value || "{}"); closeConfig(); }
+  catch { alert("Invalid JSON"); }
 }
 
 function bindExtractor() {
   renderSheetChecks();
   bindFilesList();
-  setUploadState("idle");
+  renderFileQueue();
+  renderSessionSummary();
+  renderActionButtons();
   qs("#qaConfigureBtn")?.addEventListener("click", openConfig);
   qs("#qaConfigClose")?.addEventListener("click", closeConfig);
   qs("#qaConfigApply")?.addEventListener("click", applyConfig);
-  qs("#qaConfigExport")?.addEventListener("click", () => exportConfig());
-  qs("#qaConfigImport")?.addEventListener("change", importConfig);
-  qs("#qaStartBtn")?.addEventListener("click", startRun);
-  qs("#qaDownloadBtn")?.addEventListener("click", downloadZip);
+  qs("#qaStartBtn")?.addEventListener("click", () => runQueue("run"));
+  qs("#qaAddBtn")?.addEventListener("click", () => runQueue("add"));
+  qs("#qaDownloadBtn")?.addEventListener("click", () => {
+    if (!qaState.sessionId) return;
+    const a = document.createElement("a");
+    a.href = `/api/ifc-qa/result/${qaState.sessionId}`;
+    a.click();
+  });
 }
 
-function bindConfigPage() {
-  qs("#qaConfigExportStandalone")?.addEventListener("click", () => {
-    const text = qs("#qaConfigStandalone")?.value || "{}";
-    try {
-      exportConfig(JSON.parse(text));
-    } catch {
-      alert("Invalid JSON in viewer");
-    }
-  });
+function configTemplate() {
+  return `<div class="stack"><div class="section-title"><h3>Current IFC QA Config</h3></div>
+  <textarea id="qaConfigStandalone" rows="22" style="width:100%;font-family:monospace">${JSON.stringify(qaState.qaConfig, null, 2)}</textarea></div>`;
+}
+function dashboardTemplate() {
+  return `<div class="stack"><div class="section-title"><h3>IFC QA Dashboard</h3></div><div id="qaDashboardStatus" class="card">No active job.</div></div>`;
 }
 
 async function init() {
@@ -420,23 +386,17 @@ async function init() {
   if (!root) return;
   const page = root.dataset.qaPage || "extractor";
 
-  if (page === "extractor") root.innerHTML = extractorTemplate();
-  if (page === "config") root.innerHTML = configTemplate();
-  if (page === "dashboard") root.innerHTML = dashboardTemplate();
-
   await ensureSession();
   await loadQaConfig();
 
-  // Re-render with possible warning/config updates.
   if (page === "extractor") {
     root.innerHTML = extractorTemplate();
     bindExtractor();
+    await refreshSessionSummary();
   } else if (page === "config") {
     root.innerHTML = configTemplate();
-    bindConfigPage();
-  } else if (page === "dashboard") {
+  } else {
     root.innerHTML = dashboardTemplate();
-    if (qaState.jobId) pollStatus();
   }
 }
 
