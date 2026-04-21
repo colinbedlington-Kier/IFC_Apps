@@ -3,6 +3,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import hashlib
 from datetime import date, datetime
 from collections import Counter
 from dataclasses import dataclass
@@ -458,6 +459,7 @@ def _inspect_svrl(svrl_output_path: Path) -> Dict[str, Any]:
     failed_asserts = root.findall(".//{*}failed-assert")
     successful_reports = root.findall(".//{*}successful-report")
     diagnostics = root.findall(".//{*}diagnostic-reference")
+    failed_assert_samples: List[Dict[str, Any]] = []
     failed_assert_counts: Counter[str] = Counter()
     failed_assert_rows: Counter[str] = Counter()
     for node in failed_asserts:
@@ -465,8 +467,30 @@ def _inspect_svrl(svrl_output_path: Path) -> Dict[str, Any]:
         failed_assert_counts[rule_id] += 1
         location = str(node.attrib.get("location", "")).strip() or "(unknown)"
         failed_assert_rows[location] += 1
+        if len(failed_assert_samples) < 5:
+            text_value = ""
+            diagnostics_values: List[str] = []
+            for child in list(node):
+                child_name = _local_name(child.tag)
+                if child_name == "text":
+                    text_value = (child.text or "").strip()
+                if child_name == "diagnostic-reference":
+                    diag_text = "".join(child.itertext()).strip()
+                    diag_id = str(child.attrib.get("diagnostic", "")).strip()
+                    diagnostics_values.append(f"{diag_id}:{diag_text}" if diag_id else diag_text)
+            failed_assert_samples.append(
+                {
+                    "id": str(node.attrib.get("id", "")).strip() or "(none)",
+                    "location": str(node.attrib.get("location", "")).strip() or "(none)",
+                    "role": str(node.attrib.get("role", "")).strip() or "(none)",
+                    "text": text_value or "(none)",
+                    "diagnostics": diagnostics_values,
+                }
+            )
     top_failing_rules = [{"rule": key, "count": count} for key, count in failed_assert_counts.most_common(10)]
     return {
+        "root_element_name": _local_name(root.tag),
+        "root_namespace": _namespace_uri(root.tag) or "(none)",
         "fired_rules": len(fired_rules),
         "failed_asserts": len(failed_asserts),
         "successful_reports": len(successful_reports),
@@ -478,6 +502,35 @@ def _inspect_svrl(svrl_output_path: Path) -> Dict[str, Any]:
         "failed_assert_count_by_rule": dict(failed_assert_counts),
         "top_failing_rules": top_failing_rules,
         "affected_rows_sample": [key for key, _ in failed_assert_rows.most_common(10)],
+        "failed_assert_samples": failed_assert_samples,
+    }
+
+
+def _first_lines(path: Path, line_count: int = 50) -> List[str]:
+    if not path.exists():
+        return [f"(missing) {path}"]
+    return path.read_text(encoding="utf-8", errors="replace").splitlines()[:line_count]
+
+
+def _compare_svrl_files(primary_path: Path, secondary_path: Path) -> Dict[str, Any]:
+    primary_bytes = primary_path.read_bytes() if primary_path.exists() else b""
+    secondary_bytes = secondary_path.read_bytes() if secondary_path.exists() else b""
+    primary_root = ET.parse(str(primary_path)).getroot() if primary_path.exists() else None
+    secondary_root = ET.parse(str(secondary_path)).getroot() if secondary_path.exists() else None
+    primary_children = len(list(primary_root)) if primary_root is not None else 0
+    secondary_children = len(list(secondary_root)) if secondary_root is not None else 0
+    return {
+        "primary_path": str(primary_path),
+        "secondary_path": str(secondary_path),
+        "exact_copy": primary_bytes == secondary_bytes,
+        "primary_size": len(primary_bytes),
+        "secondary_size": len(secondary_bytes),
+        "primary_sha256": hashlib.sha256(primary_bytes).hexdigest() if primary_bytes else "",
+        "secondary_sha256": hashlib.sha256(secondary_bytes).hexdigest() if secondary_bytes else "",
+        "primary_root": _local_name(primary_root.tag) if primary_root is not None else "(missing)",
+        "secondary_root": _local_name(secondary_root.tag) if secondary_root is not None else "(missing)",
+        "primary_children": primary_children,
+        "secondary_children": secondary_children,
     }
 
 
@@ -524,6 +577,57 @@ def _compare_svrl_outputs(generated_svrl_path: Path, reference_svrl_path: Path) 
         "count_deltas": count_deltas[:100],
         "row_deltas": row_deltas[:100],
     }
+
+
+def _inspect_svrl_html_xslt(xslt_path: Path, svrl_path: Path) -> Dict[str, Any]:
+    details: Dict[str, Any] = {
+        "xslt_path": str(xslt_path),
+        "exists": xslt_path.exists(),
+        "error_group_xpaths": [],
+        "affected_row_xpaths": [],
+        "checks_performed_xpaths": [],
+        "xpath_evaluations": [],
+    }
+    if not xslt_path.exists():
+        return details
+    try:
+        from lxml import etree
+    except Exception as exc:
+        details["error"] = f"lxml unavailable: {exc}"
+        return details
+
+    try:
+        xslt_doc = etree.parse(str(xslt_path))
+        svrl_doc = etree.parse(str(svrl_path))
+    except Exception as exc:
+        details["error"] = f"parse failure: {exc}"
+        return details
+
+    expressions: List[str] = []
+    for node in xslt_doc.xpath("//*"):
+        for attr_name in ("select", "match"):
+            value = str(node.attrib.get(attr_name, "")).strip()
+            if value:
+                expressions.append(value)
+    unique_expr: List[str] = []
+    for expr in expressions:
+        if expr not in unique_expr:
+            unique_expr.append(expr)
+    details["error_group_xpaths"] = [expr for expr in unique_expr if "failed-assert" in expr][:20]
+    details["affected_row_xpaths"] = [expr for expr in unique_expr if "location" in expr][:20]
+    details["checks_performed_xpaths"] = [
+        expr for expr in unique_expr if any(token in expr for token in ("fired-rule", "successful-report", "active-pattern"))
+    ][:20]
+
+    for expr in [*details["error_group_xpaths"], *details["affected_row_xpaths"], *details["checks_performed_xpaths"]]:
+        try:
+            result = svrl_doc.xpath(expr)
+            details["xpath_evaluations"].append(
+                {"expression": expr, "result_count": len(result) if isinstance(result, list) else 1, "ok": True}
+            )
+        except Exception as exc:
+            details["xpath_evaluations"].append({"expression": expr, "ok": False, "error": str(exc)})
+    return details
 
 
 @dataclass
@@ -1063,7 +1167,7 @@ class SvrlHtmlRenderer:
         warnings: List[str],
     ) -> Tuple[List[str], str]:
         engine = _get_xslt_engine()
-        logs: List[str] = []
+        logs: List[str] = [f"html_transform_input path={svrl_path} exists={svrl_path.exists()}"]
         error = ""
         css_path = self.resources_dir / "SpaceReport.css"
         target_css = html_output_path.parent / "SpaceReport.css"
@@ -1420,6 +1524,8 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
         svrl_diagnostics = _inspect_svrl(svrl_xml_path)
         logs.append(
             "svrl_diagnostics "
+            f"root_element={svrl_diagnostics['root_element_name']} "
+            f"root_namespace={svrl_diagnostics['root_namespace']} "
             f"fired_rules={svrl_diagnostics['fired_rules']} "
             f"failed_asserts={svrl_diagnostics['failed_asserts']} "
             f"successful_reports={svrl_diagnostics['successful_reports']} "
@@ -1440,6 +1546,31 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
                 f"{rule}:{count}" for rule, count in sorted(svrl_diagnostics["failed_assert_count_by_rule"].items())
             )
         )
+        for idx, sample in enumerate(svrl_diagnostics["failed_assert_samples"], start=1):
+            logs.append(
+                "svrl_failed_assert_sample "
+                f"index={idx} id={sample['id']} location={sample['location']} role={sample['role']} "
+                f"text={sample['text']} diagnostics={';'.join(sample['diagnostics']) or '(none)'}"
+            )
+
+        diagnostic_mode = os.getenv("COBIEQC_SVRL_DIAGNOSTIC_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+        if diagnostic_mode:
+            phase_1_path = svrl_xml_path.parent / f"{svrl_xml_path.stem}.phase_1{svrl_xml_path.suffix}"
+            phase_1_lines = _first_lines(phase_1_path, line_count=50)
+            final_lines = _first_lines(svrl_xml_path, line_count=50)
+            logs.append(f"svrl_phase_1_first_50 path={phase_1_path} lines={' | '.join(phase_1_lines)}")
+            logs.append(f"svrl_final_first_50 path={svrl_xml_path} lines={' | '.join(final_lines)}")
+            phase_compare = _compare_svrl_files(svrl_xml_path, phase_1_path)
+            logs.append(
+                "svrl_phase_compare "
+                f"final_path={phase_compare['primary_path']} phase_1_path={phase_compare['secondary_path']} "
+                f"exact_copy={phase_compare['exact_copy']} "
+                f"final_size={phase_compare['primary_size']} phase_1_size={phase_compare['secondary_size']} "
+                f"final_root={phase_compare['primary_root']} phase_1_root={phase_compare['secondary_root']} "
+                f"final_children={phase_compare['primary_children']} phase_1_children={phase_compare['secondary_children']} "
+                f"final_sha256={phase_compare['primary_sha256']} phase_1_sha256={phase_compare['secondary_sha256']}"
+            )
+
         reference_svrl_path = _find_reference_svrl_path(out_dir)
         if reference_svrl_path:
             svrl_comparison = _compare_svrl_outputs(svrl_xml_path, reference_svrl_path)
@@ -1488,6 +1619,47 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
         renderer = SvrlHtmlRenderer(resources_dir=resources_dir)
         html_logs, html_error = renderer.render(svrl_xml_path, html_path, summary, warnings)
         logs.extend(html_logs)
+        html_text = html_path.read_text(encoding="utf-8", errors="replace") if html_path.exists() else ""
+        if svrl_diagnostics["failed_asserts"] > 0 and "no errors" in html_text.lower():
+            sample_ids = [item["id"] for item in svrl_diagnostics["failed_assert_samples"][:5]]
+            warning = (
+                "HARD WARNING: SVRL contains failed-asserts but HTML rendered 'No Errors'. "
+                f"failed_assert_count={svrl_diagnostics['failed_asserts']} sample_ids={sample_ids}"
+            )
+            warnings.append(warning)
+            logs.append(f"svrl_html_mismatch {warning}")
+
+        html_xslt_path = None
+        for candidate in (
+            resources_dir / "SVRL_HTML_altLocation.xslt",
+            resources_dir / "_SVRL_HTML_altLocation.xslt",
+        ):
+            if candidate.exists():
+                html_xslt_path = candidate
+                break
+        if html_xslt_path:
+            xslt_diag = _inspect_svrl_html_xslt(html_xslt_path, svrl_xml_path)
+            logs.append(
+                "svrl_html_xslt_expectations "
+                f"path={xslt_diag['xslt_path']} "
+                f"error_group_xpaths={';'.join(xslt_diag['error_group_xpaths']) or '(none)'} "
+                f"affected_row_xpaths={';'.join(xslt_diag['affected_row_xpaths']) or '(none)'} "
+                f"checks_performed_xpaths={';'.join(xslt_diag['checks_performed_xpaths']) or '(none)'}"
+            )
+            for eval_item in xslt_diag["xpath_evaluations"][:20]:
+                if eval_item.get("ok"):
+                    logs.append(
+                        f"svrl_html_xpath_eval expression={eval_item['expression']} "
+                        f"result_count={eval_item['result_count']}"
+                    )
+                else:
+                    logs.append(
+                        f"svrl_html_xpath_eval expression={eval_item['expression']} "
+                        f"error={eval_item.get('error', '(unknown)')}"
+                    )
+            if xslt_diag.get("error"):
+                warnings.append(f"SVRL/HTML XPath diagnostic skipped: {xslt_diag['error']}")
+
         if html_error:
             warnings.append(f"Schematron execution fallback used: html generation failed during SVRL-to-HTML transform: {html_error}")
 
