@@ -65,6 +65,36 @@ class DownloadResult:
     http_status: str = ""
 
 
+@dataclass(frozen=True)
+class SaxonAssetConfig:
+    label: str
+    path_env: str
+    source_env: str
+    download_log_event: str
+
+
+SAXON_ASSET_CONFIGS = [
+    SaxonAssetConfig(
+        label="saxon",
+        path_env="COBIEQC_SAXON_JAR_PATH",
+        source_env="COBIEQC_SAXON_SOURCE_URL",
+        download_log_event="saxon_downloaded",
+    ),
+    SaxonAssetConfig(
+        label="resolver",
+        path_env="COBIEQC_SAXON_XMLRESOLVER_JAR_PATH",
+        source_env="COBIEQC_SAXON_XMLRESOLVER_SOURCE_URL",
+        download_log_event="saxon_resolver_downloaded",
+    ),
+    SaxonAssetConfig(
+        label="resolver_data",
+        path_env="COBIEQC_SAXON_XMLRESOLVER_DATA_JAR_PATH",
+        source_env="COBIEQC_SAXON_XMLRESOLVER_DATA_SOURCE_URL",
+        download_log_event="saxon_resolver_downloaded",
+    ),
+]
+
+
 def _data_root() -> Path:
     return Path(os.getenv("COBIEQC_DATA_DIR", "/data/cobieqc")).expanduser()
 
@@ -75,6 +105,75 @@ def _jar_path() -> Path:
 
 def _resource_dir() -> Path:
     return Path(os.getenv("COBIEQC_RESOURCE_DIR", str(_data_root() / "xsl_xml"))).expanduser()
+
+
+def _bootstrap_saxon_assets(errors: list[str]) -> dict[str, bool]:
+    saxon_availability: dict[str, bool] = {}
+    tracked_dirs: set[str] = set()
+    for asset in SAXON_ASSET_CONFIGS:
+        configured_path_raw = os.getenv(asset.path_env, "").strip()
+        if not configured_path_raw:
+            saxon_availability[asset.path_env] = False
+            continue
+        configured_path = Path(configured_path_raw).expanduser()
+        parent_key = str(configured_path.parent.resolve())
+        if parent_key not in tracked_dirs:
+            configured_path.parent.mkdir(parents=True, exist_ok=True)
+            LOGGER.info("COBieQC bootstrap: saxon_dir_created path=%s", configured_path.parent.resolve())
+            tracked_dirs.add(parent_key)
+
+        if not _is_non_empty_file(configured_path):
+            source_url = os.getenv(asset.source_env, "").strip()
+            if not source_url:
+                message = (
+                    f"Saxon configuration error: missing path={configured_path.resolve()} "
+                    f"source_url_env={asset.source_env} source_url=<unset>"
+                )
+                LOGGER.error("COBieQC bootstrap: %s", message)
+                errors.append(message)
+                saxon_availability[asset.path_env] = False
+                continue
+            try:
+                LOGGER.info(
+                    "COBieQC bootstrap: downloading Saxon asset env=%s source_url=%s destination=%s",
+                    asset.path_env,
+                    source_url,
+                    configured_path.resolve(),
+                )
+                download = _download_to_temp(source_url, configured_path.suffix or ".jar", asset.path_env)
+                download_path = download[0] if isinstance(download, tuple) else download.path
+                _replace_file_atomically(download_path, configured_path)
+                LOGGER.info(
+                    "COBieQC bootstrap: %s path=%s size=%s",
+                    asset.download_log_event,
+                    configured_path.resolve(),
+                    configured_path.stat().st_size,
+                )
+            except Exception as exc:
+                message = (
+                    f"Saxon configuration error: unable to install path={configured_path.resolve()} "
+                    f"source_url={source_url} reason={exc}"
+                )
+                LOGGER.error("COBieQC bootstrap: %s", message)
+                errors.append(message)
+
+        valid = _is_non_empty_file(configured_path)
+        LOGGER.info("COBieQC bootstrap: saxon_validation path=%s valid=%s", configured_path.resolve(), valid)
+        if not valid:
+            source_url = os.getenv(asset.source_env, "").strip()
+            message = (
+                f"Saxon configuration error: missing path={configured_path.resolve()} "
+                f"source_url={source_url or '<unset>'}"
+            )
+            LOGGER.error("COBieQC bootstrap: %s", message)
+            errors.append(message)
+        saxon_availability[asset.path_env] = valid
+
+    LOGGER.info(
+        "COBieQC bootstrap: saxon availability summary %s",
+        ", ".join([f"{env}={ready}" for env, ready in saxon_availability.items()]) or "no_saxon_paths_configured",
+    )
+    return saxon_availability
 
 
 def parse_google_drive_file_id(url: str) -> str:
@@ -444,6 +543,7 @@ def bootstrap_cobieqc_assets() -> None:
 
     warnings: list[str] = []
     errors: list[str] = []
+    _bootstrap_saxon_assets(errors)
 
     if legacy_xml_zip_source_url and not _ZIP_DEPRECATION_LOGGED:
         message = f"{DEPRECATED_XML_ZIP_SOURCE_ENV} is deprecated and ignored; XML ZIP bootstrap is disabled"
