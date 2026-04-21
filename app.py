@@ -27,7 +27,7 @@ import ifcopenshell.util.element
 import ifcopenshell.util.placement
 import pandas as pd
 from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from ifcopenshell.guid import new as new_guid
@@ -6041,48 +6041,100 @@ async def ifc_qa_run(
     options_json: Optional[str] = Form(None),
     config_override_json: Optional[str] = Form(None),
 ):
-    if has_active_ifc_qa_job():
-        raise HTTPException(status_code=429, detail="An IFC QA job is already running on this replica. Please retry shortly.")
-    if not files:
-        raise HTTPException(status_code=400, detail="At least one IFC file is required")
+    try:
+        if has_active_ifc_qa_job():
+            APP_LOGGER.warning("ifc_qa_run_rejected reason=active_job")
+            raise HTTPException(
+                status_code=429,
+                detail="An IFC QA job is already running on this replica. Please retry shortly.",
+            )
+        if not files:
+            APP_LOGGER.warning("ifc_qa_run_rejected reason=no_files")
+            raise HTTPException(status_code=400, detail="At least one IFC file is required")
 
-    upload_dir = Path(tempfile.mkdtemp(prefix="ifc_qa_uploads_v2_"))
-    file_records: List[Tuple[str, str]] = []
-    for upload in files:
-        original_name = upload.filename or "upload.ifc"
-        dest = upload_dir / sanitize_filename(original_name)
-        with open(dest, "wb") as handle:
-            written = 0
-            while True:
-                chunk = await upload.read(1024 * 1024)
-                if not chunk:
-                    break
-                written += len(chunk)
-                if written > MAX_UPLOAD_BYTES:
-                    handle.close()
-                    dest.unlink(missing_ok=True)
-                    raise HTTPException(status_code=413, detail=f"Upload exceeds MAX_UPLOAD_BYTES ({human_size(MAX_UPLOAD_BYTES)}): {original_name}")
-                handle.write(chunk)
-        enforce_upload_limits(str(dest), endpoint="/api/ifc-qa/run")
-        file_records.append((original_name, str(dest)))
+        upload_dir = Path(tempfile.mkdtemp(prefix="ifc_qa_uploads_v2_"))
+        file_records: List[Tuple[str, str]] = []
+        total_request_bytes = 0
+        for upload in files:
+            original_name = upload.filename or "upload.ifc"
+            dest = upload_dir / sanitize_filename(original_name)
+            with open(dest, "wb") as handle:
+                written = 0
+                while True:
+                    chunk = await upload.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > MAX_UPLOAD_BYTES:
+                        handle.close()
+                        dest.unlink(missing_ok=True)
+                        APP_LOGGER.warning("ifc_qa_run_rejected reason=file_too_large file=%s", original_name)
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"Upload exceeds MAX_UPLOAD_BYTES ({human_size(MAX_UPLOAD_BYTES)}): {original_name}",
+                        )
+                    handle.write(chunk)
+            enforce_upload_limits(str(dest), endpoint="/api/ifc-qa/run")
+            file_size = dest.stat().st_size
+            total_request_bytes += file_size
+            file_records.append((original_name, str(dest)))
 
-    options: Dict[str, Any] = {}
-    if options_json:
-        options = json.loads(options_json)
-    options["max_workers"] = 1
-    cfg = load_ifc_qa_default_config()
-    if config_override_json:
-        override = json.loads(config_override_json)
-        if isinstance(override, dict):
-            cfg = merge_config_override(cfg, override)
-            cfg["_indexes"] = build_config_indexes(cfg)
+        options: Dict[str, Any] = {}
+        if options_json:
+            try:
+                options = json.loads(options_json)
+            except json.JSONDecodeError as exc:
+                APP_LOGGER.warning("ifc_qa_run_rejected reason=invalid_options_json detail=%s", exc)
+                raise HTTPException(status_code=400, detail="Invalid options_json payload") from exc
+        options["max_workers"] = 1
+        cfg = load_ifc_qa_default_config()
+        if config_override_json:
+            try:
+                override = json.loads(config_override_json)
+            except json.JSONDecodeError as exc:
+                APP_LOGGER.warning("ifc_qa_run_rejected reason=invalid_config_override_json detail=%s", exc)
+                raise HTTPException(status_code=400, detail="Invalid config_override_json payload") from exc
+            if isinstance(override, dict):
+                cfg = merge_config_override(cfg, override)
+                cfg["_indexes"] = build_config_indexes(cfg)
 
-    job_id = start_ifc_qa_v2_job(file_records, options, cfg)
-    return {
-        "success": True,
-        "job_id": job_id,
-        "files": [{"name": name, "path": path} for name, path in file_records],
-    }
+        selected_outputs = options.get("selected_sheets", {}) if isinstance(options, dict) else {}
+        selected_output_keys = [key for key, enabled in selected_outputs.items() if enabled]
+        job_id = start_ifc_qa_v2_job(file_records, options, cfg)
+        session_id = options.get("session_id") if isinstance(options, dict) else None
+        APP_LOGGER.info(
+            "ifc_qa_run_started session_id=%s job_id=%s file_count=%s outputs=%s request_bytes=%s",
+            session_id or "n/a",
+            job_id,
+            len(file_records),
+            ",".join(selected_output_keys) if selected_output_keys else "none",
+            total_request_bytes,
+        )
+        return {
+            "success": True,
+            "job_id": job_id,
+            "session_id": session_id or "",
+            "message": "Job started",
+        }
+    except HTTPException as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "success": False,
+                "error": exc.detail if isinstance(exc.detail, str) else "IFC QA run request failed",
+                "detail": exc.detail,
+            },
+        )
+    except Exception as exc:  # pragma: no cover - defensive path
+        APP_LOGGER.exception("ifc_qa_run_rejected reason=unexpected_error detail=%s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": "Failed to start IFC QA job",
+                "detail": str(exc),
+            },
+        )
 
 
 @app.get("/api/ifc-qa/status/{job_id}")
