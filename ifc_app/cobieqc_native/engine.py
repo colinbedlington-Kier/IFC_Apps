@@ -3,12 +3,14 @@ import os
 import shlex
 import shutil
 import subprocess
+from datetime import date, datetime
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from openpyxl import load_workbook
+from openpyxl.utils.datetime import from_excel
 from xml.etree import ElementTree as ET
 
 LOGGER = logging.getLogger("ifc_app.cobieqc.native")
@@ -85,6 +87,19 @@ def _find_reference_xml_path(out_dir: Path) -> Optional[Path]:
     return None
 
 
+def _find_reference_svrl_path(out_dir: Path) -> Optional[Path]:
+    configured = os.getenv("COBIEQC_REFERENCE_SVRL_PATH", "").strip()
+    if configured:
+        candidate = Path(configured).expanduser().resolve()
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    for filename in ("legacy_validation_result.svrl.xml", "reference_validation_result.svrl.xml", "legacy.svrl.xml"):
+        candidate = out_dir / filename
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
 def _inspect_cobie_xml(cobie_xml_path: Path) -> Dict[str, Any]:
     doc = ET.parse(str(cobie_xml_path))
     root = doc.getroot()
@@ -94,6 +109,7 @@ def _inspect_cobie_xml(cobie_xml_path: Path) -> Dict[str, Any]:
     counts: Dict[str, int] = {}
     sample_paths: Dict[str, List[str]] = {}
     sheet_to_rows: Dict[str, int] = {}
+    created_on_samples: List[str] = []
     for entity_name in COBIE_ENTITY_NAMES:
         needle = entity_name.lower()
         count = 0
@@ -110,7 +126,12 @@ def _inspect_cobie_xml(cobie_xml_path: Path) -> Dict[str, Any]:
         source_sheet = str(node.attrib.get("sourceSheet", "")).strip()
         if source_sheet:
             sheet_to_rows[source_sheet] = sheet_to_rows.get(source_sheet, 0) + 1
+        if _local_name(node.tag).lower() == "createdon":
+            text = (node.text or "").strip()
+            if text and len(created_on_samples) < 10:
+                created_on_samples.append(text)
     model_path_count = sum(1 for node in root.iter() if _local_name(node.tag).lower() in lower_names)
+    cross_ref = _cross_reference_created_by(root)
     return {
         "root_element_name": _local_name(root.tag),
         "root_namespace": _namespace_uri(root.tag) or "(none)",
@@ -119,6 +140,38 @@ def _inspect_cobie_xml(cobie_xml_path: Path) -> Dict[str, Any]:
         "sample_paths": sample_paths,
         "sheet_row_counts": sheet_to_rows,
         "model_path_count": model_path_count,
+        "created_on_samples": created_on_samples,
+        "cross_reference": cross_ref,
+    }
+
+
+def _cross_reference_created_by(root: ET.Element) -> Dict[str, Any]:
+    contact_names = {
+        (name_node.text or "").strip()
+        for name_node in root.findall(".//{*}Contacts/{*}Contact/{*}Name")
+        if (name_node.text or "").strip()
+    }
+    unmatched: List[str] = []
+    total = 0
+    matched = 0
+    for parent in root.iter():
+        for child in list(parent):
+            if _local_name(child.tag).lower() != "createdby":
+                continue
+            total += 1
+            created_by = (child.text or "").strip()
+            if created_by and created_by in contact_names:
+                matched += 1
+                continue
+            parent_sheet = parent.attrib.get("sourceSheet", "")
+            parent_row = parent.attrib.get("rowNumber", "")
+            unmatched.append(f"{created_by or '(blank)'}@{parent_sheet}#{parent_row}")
+    return {
+        "contact_name_count": len(contact_names),
+        "created_by_total": total,
+        "created_by_matched": matched,
+        "created_by_unmatched": max(total - matched, 0),
+        "unmatched_samples": unmatched[:10],
     }
 
 
@@ -185,13 +238,71 @@ def _inspect_svrl(svrl_output_path: Path) -> Dict[str, Any]:
     failed_asserts = root.findall(".//{*}failed-assert")
     successful_reports = root.findall(".//{*}successful-report")
     diagnostics = root.findall(".//{*}diagnostic-reference")
+    failed_assert_counts: Counter[str] = Counter()
+    failed_assert_rows: Counter[str] = Counter()
+    for node in failed_asserts:
+        rule_id = str(node.attrib.get("id", "")).strip() or str(node.attrib.get("test", "")).strip() or "(unknown)"
+        failed_assert_counts[rule_id] += 1
+        location = str(node.attrib.get("location", "")).strip() or "(unknown)"
+        failed_assert_rows[location] += 1
+    top_failing_rules = [{"rule": key, "count": count} for key, count in failed_assert_counts.most_common(10)]
     return {
         "fired_rules": len(fired_rules),
         "failed_asserts": len(failed_asserts),
         "successful_reports": len(successful_reports),
+        "rules_matched": len(fired_rules),
+        "rules_evaluated": len(failed_asserts) + len(successful_reports),
         "active_patterns": len(active_patterns),
         "active_pattern_ids": active_pattern_ids[:5],
         "diagnostics": len(diagnostics),
+        "failed_assert_count_by_rule": dict(failed_assert_counts),
+        "top_failing_rules": top_failing_rules,
+        "affected_rows_sample": [key for key, _ in failed_assert_rows.most_common(10)],
+    }
+
+
+def _extract_svrl_failure_index(root: ET.Element) -> Dict[str, Any]:
+    per_rule: Counter[str] = Counter()
+    per_rule_rows: Dict[str, set] = {}
+    for node in root.findall(".//{*}failed-assert"):
+        rule_id = str(node.attrib.get("id", "")).strip() or str(node.attrib.get("test", "")).strip() or "(unknown)"
+        per_rule[rule_id] += 1
+        row = str(node.attrib.get("location", "")).strip() or "(unknown)"
+        if rule_id not in per_rule_rows:
+            per_rule_rows[rule_id] = set()
+        per_rule_rows[rule_id].add(row)
+    return {"counts": per_rule, "rows": per_rule_rows}
+
+
+def _compare_svrl_outputs(generated_svrl_path: Path, reference_svrl_path: Path) -> Dict[str, Any]:
+    generated_root = ET.parse(str(generated_svrl_path)).getroot()
+    reference_root = ET.parse(str(reference_svrl_path)).getroot()
+    generated = _extract_svrl_failure_index(generated_root)
+    reference = _extract_svrl_failure_index(reference_root)
+    generated_rules = set(generated["counts"].keys())
+    reference_rules = set(reference["counts"].keys())
+    all_rules = sorted(generated_rules | reference_rules)
+    count_deltas: List[str] = []
+    row_deltas: List[str] = []
+    for rule_id in all_rules:
+        gen_count = int(generated["counts"].get(rule_id, 0))
+        ref_count = int(reference["counts"].get(rule_id, 0))
+        if gen_count != ref_count:
+            count_deltas.append(f"{rule_id}:generated={gen_count},reference={ref_count}")
+        gen_rows = generated["rows"].get(rule_id, set())
+        ref_rows = reference["rows"].get(rule_id, set())
+        if gen_rows != ref_rows:
+            missing = sorted(ref_rows - gen_rows)[:3]
+            extra = sorted(gen_rows - ref_rows)[:3]
+            row_deltas.append(f"{rule_id}:missing_rows={missing},extra_rows={extra}")
+    return {
+        "reference_svrl_path": str(reference_svrl_path),
+        "generated_failed_asserts": sum(generated["counts"].values()),
+        "reference_failed_asserts": sum(reference["counts"].values()),
+        "missing_rules": sorted(reference_rules - generated_rules),
+        "extra_rules": sorted(generated_rules - reference_rules),
+        "count_deltas": count_deltas[:100],
+        "row_deltas": row_deltas[:100],
     }
 
 
@@ -273,10 +384,58 @@ class CobieWorkbookXmlBuilder:
                 for col_idx, cell in enumerate(row):
                     col_name = header[col_idx] if col_idx < len(header) else f"Column_{col_idx + 1}"
                     cell_el = ET.SubElement(row_el, col_name)
-                    if cell is not None:
-                        cell_el.text = str(cell)
+                    normalized = self._normalize_cell_value(
+                        cell=cell,
+                        column_name=col_name,
+                        workbook_epoch=wb.epoch,
+                        warnings=warnings,
+                    )
+                    if normalized is not None:
+                        cell_el.text = normalized
 
         return ET.tostring(root, encoding="utf-8", xml_declaration=True), warnings
+
+    def _normalize_cell_value(
+        self,
+        cell: Any,
+        column_name: str,
+        workbook_epoch: datetime,
+        warnings: List[str],
+    ) -> Optional[str]:
+        if cell is None:
+            return None
+        name = column_name.strip().lower()
+        if name == "createdon":
+            normalized_date = self._normalize_created_on(cell, workbook_epoch, warnings)
+            return normalized_date
+        if isinstance(cell, str):
+            trimmed = cell.strip()
+            return trimmed or None
+        return str(cell).strip() or None
+
+    def _normalize_created_on(self, value: Any, workbook_epoch: datetime, warnings: List[str]) -> Optional[str]:
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%dT%H:%M:%S")
+        if isinstance(value, date):
+            return datetime(value.year, value.month, value.day).strftime("%Y-%m-%dT%H:%M:%S")
+        if isinstance(value, (float, int)):
+            try:
+                dt = from_excel(value, epoch=workbook_epoch)
+                if isinstance(dt, datetime):
+                    return dt.strftime("%Y-%m-%dT%H:%M:%S")
+                if isinstance(dt, date):
+                    return datetime(dt.year, dt.month, dt.day).strftime("%Y-%m-%dT%H:%M:%S")
+            except Exception as exc:
+                warnings.append(f"CreatedOn numeric value conversion failed value={value} error={exc}")
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return parsed.strftime("%Y-%m-%dT%H:%M:%S")
+        except Exception:
+            warnings.append(f"CreatedOn value not normalized to ISO8601 value='{text}'")
+            return text
 
 
 class SchematronPipeline:
@@ -309,6 +468,50 @@ class SchematronPipeline:
         raise RuntimeError(
             f"Unsupported COBIEQC_XSLT_ENGINE='{engine}'. Expected one of: saxon, lxml."
         )
+
+    def _phase_catalog(self, sch_root: Any, use_xpath: bool = True) -> Dict[str, Any]:
+        if use_xpath:
+            ns = {"sch": "http://purl.oclc.org/dsdl/schematron"}
+            pattern_ids = [str(v) for v in sch_root.xpath("/sch:schema/sch:pattern/@id", namespaces=ns)]
+            phase_nodes = sch_root.xpath("/sch:schema/sch:phase", namespaces=ns)
+            phase_map: Dict[str, List[str]] = {}
+            for phase in phase_nodes:
+                phase_id = str(phase.attrib.get("id", "")).strip()
+                if not phase_id:
+                    continue
+                refs = [str(v) for v in phase.xpath("./sch:active/@pattern", namespaces=ns)]
+                phase_map[phase_id] = refs
+            return {"phase_ids": list(phase_map.keys()), "phase_patterns": phase_map, "pattern_ids": pattern_ids}
+        ns = {"sch": "http://purl.oclc.org/dsdl/schematron"}
+        pattern_ids = [str(el.attrib.get("id", "")).strip() for el in sch_root.findall("sch:pattern", ns)]
+        phase_map = {}
+        for phase in sch_root.findall("sch:phase", ns):
+            phase_id = str(phase.attrib.get("id", "")).strip()
+            if not phase_id:
+                continue
+            refs = [str(active.attrib.get("pattern", "")).strip() for active in phase.findall("sch:active", ns)]
+            phase_map[phase_id] = [ref for ref in refs if ref]
+        return {"phase_ids": list(phase_map.keys()), "phase_patterns": phase_map, "pattern_ids": pattern_ids}
+
+    def _resolve_phase_ids(self, phase_ids: List[str]) -> List[str]:
+        configured = os.getenv("COBIEQC_SCHEMATRON_PHASES", "").strip()
+        if configured:
+            desired = [part.strip() for part in configured.split(",") if part.strip()]
+            selected = [phase for phase in desired if phase in phase_ids]
+            if selected:
+                return selected
+        if not phase_ids:
+            return []
+        stage_value = (self.stage or "").strip().upper()
+        keyword_map = {"D": ("design", "information"), "C": ("construction",)}
+        keywords = keyword_map.get(stage_value, (stage_value.lower(),))
+        exact = [phase for phase in phase_ids if phase.upper() == stage_value]
+        matching = [phase for phase in phase_ids if any(keyword in phase.lower() for keyword in keywords if keyword)]
+        selected = []
+        for item in [*exact, *matching]:
+            if item not in selected:
+                selected.append(item)
+        return selected or [phase_ids[0]]
 
     def _validate_with_lxml(
         self,
@@ -351,73 +554,81 @@ class SchematronPipeline:
         if functions_path.exists():
             logs.append(self._phase_log("schematron_functions_loaded", functions_path))
 
-        phase_id = self._resolve_phase_id(sch_doc)
-        if phase_id:
-            logs.append(f"schematron_phase_selected stage={self.stage} phase={phase_id}")
-        else:
-            warnings.append(
-                f"No explicit phase mapping found for stage '{self.stage}'. Running with default Schematron phase."
-            )
+        catalog = self._phase_catalog(sch_doc, use_xpath=True)
+        logs.append(f"schematron_available_phases={','.join(catalog['phase_ids']) or '(none)'}")
+        for phase_id, patterns in catalog["phase_patterns"].items():
+            logs.append(f"schematron_phase_patterns phase={phase_id} active_patterns={','.join(patterns) or '(none)'}")
+        phase_ids = self._resolve_phase_ids(catalog["phase_ids"])
+        logs.append(f"schematron_phase_selected stage={self.stage} phases={','.join(phase_ids) or '(default)'}")
+        if not phase_ids:
+            warnings.append(f"No phases discovered for stage '{self.stage}'. Running default Schematron phase.")
 
+        if not phase_ids:
+            phase_ids = [""]
+        phase_svrl_roots: List[Any] = []
+        phase_compiled_paths: List[Path] = []
         compile_step = "schematron compile"
-        try:
-            compiler_doc = etree.parse(str(compile_xslt_path))
-            compiler = etree.XSLT(compiler_doc)
-            compile_args = {"phase": etree.XSLT.strparam(phase_id)} if phase_id else {}
-            compiled_validation_doc = compiler(sch_doc, **compile_args)
-            compiled_xslt_bytes = etree.tostring(
-                compiled_validation_doc, encoding="utf-8", pretty_print=True, xml_declaration=True
-            )
-            compiled_xslt_output_path.write_bytes(compiled_xslt_bytes)
-            logs.append(self._phase_log("schematron_compiled_to_xslt", compiled_xslt_output_path))
-            logs.append(f"compiled_validation_xslt path={compiled_xslt_output_path}")
-            detected_hrefs = self._collect_xslt_dependency_hrefs(compiled_xslt_output_path)
-            logs.append(f"compiled_xslt_dependencies_detected hrefs={','.join(detected_hrefs) or '(none)'}")
-            rewritten = self._rewrite_xslt_dependency_hrefs(compiled_xslt_output_path)
-            for source_href, target_href in rewritten:
-                logs.append(f"compiled_xslt_dependency_rewritten from={source_href} to={target_href}")
-            unresolved = self._find_unresolved_relative_hrefs(compiled_xslt_output_path)
-            if unresolved:
-                warnings.append(
-                    f"compiled_xslt_unresolved_relative_dependencies={','.join(unresolved)} "
-                    f"base_dir={compiled_xslt_output_path.parent}"
-                )
-                logs.append(f"compiled_xslt_unresolved_relative_dependencies hrefs={','.join(unresolved)}")
-            logs.append(f"validation_resolver_base path={compiled_xslt_output_path.parent}")
-        except Exception as exc:
-            diagnostics = self._collect_schematron_diagnostics(sch_doc)
-            warnings.append(
-                f"Schematron execution fallback used: compilation failed during {compile_step}: {exc}"
-            )
-            warnings.extend(diagnostics)
-            self._write_fallback_svrl(svrl_output_path, warnings, [str(exc)])
-            return (
-                {"failed_asserts": 0, "successful_reports": 0, "diagnostics": len(warnings)},
-                warnings,
-                str(exc),
-                logs,
-            )
-
         validation_step = "XML validation"
-        try:
-            xml_doc = etree.parse(str(cobie_xml_path))
-            validation_doc = etree.parse(str(compiled_xslt_output_path))
-            validation_transform = etree.XSLT(validation_doc)
-            svrl_doc = validation_transform(xml_doc)
-            svrl_bytes = etree.tostring(svrl_doc, encoding="utf-8", pretty_print=True, xml_declaration=True)
-            svrl_output_path.write_bytes(svrl_bytes)
-            logs.append(self._phase_log("validation_xslt_applied", compiled_xslt_output_path))
-            logs.append(self._phase_log("svrl_generated", svrl_output_path))
-        except Exception as exc:
-            warnings.append(f"Schematron execution fallback used: validation failed during {validation_step}: {exc}")
-            warnings.extend(self._safe_artifact_preview(compiled_xslt_output_path))
-            self._write_fallback_svrl(svrl_output_path, warnings, [str(exc)])
-            return (
-                {"failed_asserts": 0, "successful_reports": 0, "diagnostics": len(warnings)},
-                warnings,
-                str(exc),
-                logs,
+        for idx, phase_id in enumerate(phase_ids):
+            phase_suffix = f".phase_{idx + 1}"
+            phase_compiled_path = (
+                compiled_xslt_output_path.parent / f"{compiled_xslt_output_path.stem}{phase_suffix}{compiled_xslt_output_path.suffix}"
             )
+            phase_svrl_path = svrl_output_path.parent / f"{svrl_output_path.stem}{phase_suffix}{svrl_output_path.suffix}"
+            try:
+                compiler_doc = etree.parse(str(compile_xslt_path))
+                compiler = etree.XSLT(compiler_doc)
+                compile_args = {"phase": etree.XSLT.strparam(phase_id)} if phase_id else {}
+                compiled_validation_doc = compiler(sch_doc, **compile_args)
+                phase_compiled_path.write_bytes(
+                    etree.tostring(compiled_validation_doc, encoding="utf-8", pretty_print=True, xml_declaration=True)
+                )
+                phase_compiled_paths.append(phase_compiled_path)
+                logs.append(self._phase_log("schematron_compiled_to_xslt", phase_compiled_path))
+                logs.append(f"compiled_validation_xslt phase={phase_id or '(default)'} path={phase_compiled_path}")
+                detected_hrefs = self._collect_xslt_dependency_hrefs(phase_compiled_path)
+                logs.append(f"compiled_xslt_dependencies_detected phase={phase_id or '(default)'} hrefs={','.join(detected_hrefs) or '(none)'}")
+                rewritten = self._rewrite_xslt_dependency_hrefs(phase_compiled_path)
+                for source_href, target_href in rewritten:
+                    logs.append(f"compiled_xslt_dependency_rewritten phase={phase_id or '(default)'} from={source_href} to={target_href}")
+                unresolved = self._find_unresolved_relative_hrefs(phase_compiled_path)
+                if unresolved:
+                    warnings.append(
+                        f"compiled_xslt_unresolved_relative_dependencies={','.join(unresolved)} "
+                        f"base_dir={phase_compiled_path.parent}"
+                    )
+                    logs.append(f"compiled_xslt_unresolved_relative_dependencies phase={phase_id or '(default)'} hrefs={','.join(unresolved)}")
+                logs.append(f"validation_resolver_base path={phase_compiled_path.parent}")
+                xml_doc = etree.parse(str(cobie_xml_path))
+                validation_doc = etree.parse(str(phase_compiled_path))
+                validation_transform = etree.XSLT(validation_doc)
+                svrl_doc = validation_transform(xml_doc)
+                phase_svrl_path.write_bytes(
+                    etree.tostring(svrl_doc, encoding="utf-8", pretty_print=True, xml_declaration=True)
+                )
+                phase_root = etree.parse(str(phase_svrl_path)).getroot()
+                phase_root.attrib["data-phase"] = phase_id or "(default)"
+                phase_svrl_roots.append(phase_root)
+                logs.append(self._phase_log("validation_xslt_applied", phase_compiled_path))
+                logs.append(self._phase_log("svrl_generated", phase_svrl_path))
+            except Exception as exc:
+                diagnostics = self._collect_schematron_diagnostics(sch_doc)
+                warnings.append(f"Schematron execution fallback used: failed during {compile_step}/{validation_step}: {exc}")
+                warnings.extend(diagnostics)
+                self._write_fallback_svrl(svrl_output_path, warnings, [str(exc)])
+                return ({"failed_asserts": 0, "successful_reports": 0, "diagnostics": len(warnings)}, warnings, str(exc), logs)
+
+        if phase_svrl_roots:
+            merged_root = phase_svrl_roots[0]
+            for extra_root in phase_svrl_roots[1:]:
+                for child in list(extra_root):
+                    merged_root.append(child)
+            svrl_output_path.write_bytes(
+                etree.tostring(merged_root, encoding="utf-8", pretty_print=True, xml_declaration=True)
+            )
+            if phase_compiled_paths:
+                shutil.copy2(phase_compiled_paths[-1], compiled_xslt_output_path)
+        logs.append(self._phase_log("svrl_generated", svrl_output_path))
 
         root = etree.parse(str(svrl_output_path)).getroot()
         failed_asserts = len(root.xpath("//*[local-name()='failed-assert']"))
@@ -451,60 +662,81 @@ class SchematronPipeline:
         if not compile_xslt_path.exists():
             raise RuntimeError(f"iso_svrl_for_xslt2.xsl missing at {compile_xslt_path}")
 
-        phase_id = self._resolve_phase_id_elementtree(sch_path)
-        if phase_id:
-            logs.append(f"schematron_phase_selected stage={self.stage} phase={phase_id}")
-        else:
-            warnings.append(
-                f"No explicit phase mapping found for stage '{self.stage}'. Running with default Schematron phase."
-            )
+        sch_root = ET.parse(str(sch_path)).getroot()
+        catalog = self._phase_catalog(sch_root, use_xpath=False)
+        logs.append(f"schematron_available_phases={','.join(catalog['phase_ids']) or '(none)'}")
+        for phase_id, patterns in catalog["phase_patterns"].items():
+            logs.append(f"schematron_phase_patterns phase={phase_id} active_patterns={','.join(patterns) or '(none)'}")
+        phase_ids = self._resolve_phase_ids(catalog["phase_ids"])
+        logs.append(f"schematron_phase_selected stage={self.stage} phases={','.join(phase_ids) or '(default)'}")
+        if not phase_ids:
+            phase_ids = [""]
         logs.append(self._phase_log("schematron_source_loaded", sch_path))
         if skeleton_path.exists():
             logs.append(self._phase_log("schematron_skeleton_loaded", skeleton_path))
         if functions_path.exists():
             logs.append(self._phase_log("schematron_functions_loaded", functions_path))
 
-        compile_stdout, compile_stderr = _run_saxon_xslt(
-            xml_input_path=sch_path,
-            stylesheet_path=compile_xslt_path,
-            output_path=compiled_xslt_output_path,
-            params={"phase": phase_id} if phase_id else {},
-            logs=logs,
-        )
-        logs.append(self._phase_log("schematron_compiled_to_xslt", compiled_xslt_output_path))
-        logs.append(f"compiled_validation_xslt path={compiled_xslt_output_path}")
-        if compile_stdout:
-            logs.append(f"saxon_compile_stdout={compile_stdout.strip()}")
-        if compile_stderr:
-            logs.append(f"saxon_compile_stderr={compile_stderr.strip()}")
-
-        detected_hrefs = self._collect_xslt_dependency_hrefs(compiled_xslt_output_path)
-        logs.append(f"compiled_xslt_dependencies_detected hrefs={','.join(detected_hrefs) or '(none)'}")
-        rewritten = self._rewrite_xslt_dependency_hrefs(compiled_xslt_output_path)
-        for source_href, target_href in rewritten:
-            logs.append(f"compiled_xslt_dependency_rewritten from={source_href} to={target_href}")
-        unresolved = self._find_unresolved_relative_hrefs(compiled_xslt_output_path)
-        if unresolved:
-            warnings.append(
-                f"compiled_xslt_unresolved_relative_dependencies={','.join(unresolved)} "
-                f"base_dir={compiled_xslt_output_path.parent}"
+        phase_svrl_paths: List[Path] = []
+        phase_compiled_paths: List[Path] = []
+        for idx, phase_id in enumerate(phase_ids):
+            phase_suffix = f".phase_{idx + 1}"
+            phase_compiled_path = (
+                compiled_xslt_output_path.parent / f"{compiled_xslt_output_path.stem}{phase_suffix}{compiled_xslt_output_path.suffix}"
             )
-            logs.append(f"compiled_xslt_unresolved_relative_dependencies hrefs={','.join(unresolved)}")
-        logs.append(f"validation_resolver_base path={compiled_xslt_output_path.parent}")
+            phase_svrl_path = svrl_output_path.parent / f"{svrl_output_path.stem}{phase_suffix}{svrl_output_path.suffix}"
+            compile_stdout, compile_stderr = _run_saxon_xslt(
+                xml_input_path=sch_path,
+                stylesheet_path=compile_xslt_path,
+                output_path=phase_compiled_path,
+                params={"phase": phase_id} if phase_id else {},
+                logs=logs,
+            )
+            phase_compiled_paths.append(phase_compiled_path)
+            logs.append(self._phase_log("schematron_compiled_to_xslt", phase_compiled_path))
+            logs.append(f"compiled_validation_xslt phase={phase_id or '(default)'} path={phase_compiled_path}")
+            if compile_stdout:
+                logs.append(f"saxon_compile_stdout phase={phase_id or '(default)'} stdout={compile_stdout.strip()}")
+            if compile_stderr:
+                logs.append(f"saxon_compile_stderr phase={phase_id or '(default)'} stderr={compile_stderr.strip()}")
+            detected_hrefs = self._collect_xslt_dependency_hrefs(phase_compiled_path)
+            logs.append(f"compiled_xslt_dependencies_detected phase={phase_id or '(default)'} hrefs={','.join(detected_hrefs) or '(none)'}")
+            rewritten = self._rewrite_xslt_dependency_hrefs(phase_compiled_path)
+            for source_href, target_href in rewritten:
+                logs.append(f"compiled_xslt_dependency_rewritten phase={phase_id or '(default)'} from={source_href} to={target_href}")
+            unresolved = self._find_unresolved_relative_hrefs(phase_compiled_path)
+            if unresolved:
+                warnings.append(
+                    f"compiled_xslt_unresolved_relative_dependencies={','.join(unresolved)} "
+                    f"base_dir={phase_compiled_path.parent}"
+                )
+                logs.append(f"compiled_xslt_unresolved_relative_dependencies phase={phase_id or '(default)'} hrefs={','.join(unresolved)}")
+            logs.append(f"validation_resolver_base path={phase_compiled_path.parent}")
+            validation_stdout, validation_stderr = _run_saxon_xslt(
+                xml_input_path=cobie_xml_path,
+                stylesheet_path=phase_compiled_path,
+                output_path=phase_svrl_path,
+                params={},
+                logs=logs,
+            )
+            phase_svrl_paths.append(phase_svrl_path)
+            logs.append(self._phase_log("validation_xslt_applied", phase_compiled_path))
+            logs.append(self._phase_log("svrl_generated", phase_svrl_path))
+            if validation_stdout:
+                logs.append(f"saxon_validation_stdout phase={phase_id or '(default)'} stdout={validation_stdout.strip()}")
+            if validation_stderr:
+                logs.append(f"saxon_validation_stderr phase={phase_id or '(default)'} stderr={validation_stderr.strip()}")
 
-        validation_stdout, validation_stderr = _run_saxon_xslt(
-            xml_input_path=cobie_xml_path,
-            stylesheet_path=compiled_xslt_output_path,
-            output_path=svrl_output_path,
-            params={},
-            logs=logs,
-        )
-        logs.append(self._phase_log("validation_xslt_applied", compiled_xslt_output_path))
+        if phase_svrl_paths:
+            base_root = ET.parse(str(phase_svrl_paths[0])).getroot()
+            for extra in phase_svrl_paths[1:]:
+                extra_root = ET.parse(str(extra)).getroot()
+                for child in list(extra_root):
+                    base_root.append(child)
+            svrl_output_path.write_bytes(ET.tostring(base_root, encoding="utf-8", xml_declaration=True))
+            if phase_compiled_paths:
+                shutil.copy2(phase_compiled_paths[-1], compiled_xslt_output_path)
         logs.append(self._phase_log("svrl_generated", svrl_output_path))
-        if validation_stdout:
-            logs.append(f"saxon_validation_stdout={validation_stdout.strip()}")
-        if validation_stderr:
-            logs.append(f"saxon_validation_stderr={validation_stderr.strip()}")
 
         root = ET.parse(str(svrl_output_path)).getroot()
         failed_asserts = len(root.findall(".//{*}failed-assert"))
@@ -520,38 +752,6 @@ class SchematronPipeline:
             "",
             logs,
         )
-
-    def _resolve_phase_id(self, sch_doc: Any) -> Optional[str]:
-        ns = {"sch": "http://purl.oclc.org/dsdl/schematron"}
-        stage_value = (self.stage or "").strip().upper()
-        phase_ids = [str(v) for v in sch_doc.xpath("/sch:schema/sch:phase/@id", namespaces=ns)]
-        if not phase_ids:
-            return None
-        if stage_value in phase_ids:
-            return stage_value
-        stage_keywords = {"D": "design", "C": "construction"}
-        keyword = stage_keywords.get(stage_value, stage_value.lower())
-        for candidate in phase_ids:
-            if keyword and keyword in candidate.lower():
-                return candidate
-        return phase_ids[0]
-
-    def _resolve_phase_id_elementtree(self, sch_path: Path) -> Optional[str]:
-        ns = {"sch": "http://purl.oclc.org/dsdl/schematron"}
-        doc = ET.parse(str(sch_path))
-        root = doc.getroot()
-        phase_ids = [str(el.attrib.get("id", "")).strip() for el in root.findall("sch:phase", ns) if el.attrib.get("id")]
-        if not phase_ids:
-            return None
-        stage_value = (self.stage or "").strip().upper()
-        if stage_value in phase_ids:
-            return stage_value
-        stage_keywords = {"D": "design", "C": "construction"}
-        keyword = stage_keywords.get(stage_value, stage_value.lower())
-        for candidate in phase_ids:
-            if keyword and keyword in candidate.lower():
-                return candidate
-        return phase_ids[0]
 
     def _collect_schematron_diagnostics(self, sch_doc: Any) -> List[str]:
         ns = {"sch": "http://purl.oclc.org/dsdl/schematron"}
@@ -854,6 +1054,21 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
             "generated_cobie_xml_sheet_row_counts "
             + " ".join(f"{sheet}:{count}" for sheet, count in sorted(sheet_row_counts.items()))
         )
+        logs.append(
+            "generated_created_on_samples "
+            f"values={','.join(cobie_diagnostics['created_on_samples']) or '(none)'}"
+        )
+        cross_ref = cobie_diagnostics["cross_reference"]
+        logs.append(
+            "generated_cross_reference_summary "
+            f"contact_names={cross_ref['contact_name_count']} "
+            f"created_by_total={cross_ref['created_by_total']} "
+            f"created_by_unmatched={cross_ref['created_by_unmatched']}"
+        )
+        logs.append(
+            "generated_cross_reference_unmatched_samples "
+            f"samples={','.join(cross_ref['unmatched_samples']) or '(none)'}"
+        )
         workbook_style = cobie_diagnostics["root_element_name"] == "COBieWorkbook" or any(
             child == "Sheet" for child in cobie_diagnostics["first_level_children"]
         )
@@ -924,9 +1139,51 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
             f"fired_rules={svrl_diagnostics['fired_rules']} "
             f"failed_asserts={svrl_diagnostics['failed_asserts']} "
             f"successful_reports={svrl_diagnostics['successful_reports']} "
+            f"rules_matched={svrl_diagnostics['rules_matched']} "
+            f"rules_evaluated={svrl_diagnostics['rules_evaluated']} "
             f"active_patterns={svrl_diagnostics['active_patterns']} "
             f"active_pattern_ids={','.join(svrl_diagnostics['active_pattern_ids']) or '(none)'}"
         )
+        logs.append(
+            "svrl_rule_failure_top10 "
+            + ",".join(
+                f"{item['rule']}:{item['count']}" for item in svrl_diagnostics["top_failing_rules"]
+            )
+        )
+        logs.append(
+            "svrl_failed_assert_count_by_rule "
+            + ",".join(
+                f"{rule}:{count}" for rule, count in sorted(svrl_diagnostics["failed_assert_count_by_rule"].items())
+            )
+        )
+        reference_svrl_path = _find_reference_svrl_path(out_dir)
+        if reference_svrl_path:
+            svrl_comparison = _compare_svrl_outputs(svrl_xml_path, reference_svrl_path)
+            logs.append(
+                "svrl_comparison_summary "
+                f"reference_svrl_path={svrl_comparison['reference_svrl_path']} "
+                f"generated_failed_asserts={svrl_comparison['generated_failed_asserts']} "
+                f"reference_failed_asserts={svrl_comparison['reference_failed_asserts']}"
+            )
+            logs.append(
+                "svrl_comparison_rules "
+                f"missing_rules={','.join(svrl_comparison['missing_rules']) or '(none)'} "
+                f"extra_rules={','.join(svrl_comparison['extra_rules']) or '(none)'}"
+            )
+            logs.append(
+                "svrl_comparison_count_deltas "
+                f"deltas={';'.join(svrl_comparison['count_deltas']) or '(none)'}"
+            )
+            logs.append(
+                "svrl_comparison_row_deltas "
+                f"deltas={';'.join(svrl_comparison['row_deltas']) or '(none)'}"
+            )
+            summary["svrl_comparison"] = svrl_comparison
+        else:
+            logs.append(
+                "svrl_comparison_skipped reason=no_reference_svrl "
+                "hint=Set_COBIEQC_REFERENCE_SVRL_PATH_or_place_legacy_validation_result.svrl.xml_in_job_dir"
+            )
         svrl_size_bytes = svrl_xml_path.stat().st_size if svrl_xml_path.exists() else 0
         non_trivial_workbook = sum(cobie_diagnostics["sheet_row_counts"].values()) >= 10
         if svrl_diagnostics["fired_rules"] == 0 and (non_trivial_workbook or svrl_size_bytes < 2048):
