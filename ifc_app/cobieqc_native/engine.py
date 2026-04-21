@@ -3,6 +3,7 @@ import os
 import shlex
 import shutil
 import subprocess
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,6 +13,7 @@ from xml.etree import ElementTree as ET
 
 LOGGER = logging.getLogger("ifc_app.cobieqc.native")
 APP_ROOT = Path(__file__).resolve().parents[2]
+COBIE_ENTITY_NAMES = ["Contact", "Facility", "Floor", "Space", "Zone", "Type", "Component"]
 
 
 def _clean_tag(value: str) -> str:
@@ -28,6 +30,171 @@ def _xml_escape(value: Any) -> str:
         .replace('"', "&quot;")
         .replace("'", "&apos;")
     )
+
+
+def _local_name(tag: str) -> str:
+    if "}" in tag:
+        return tag.rsplit("}", 1)[-1]
+    return tag
+
+
+def _namespace_uri(tag: str) -> str:
+    if tag.startswith("{") and "}" in tag:
+        return tag[1:].split("}", 1)[0]
+    return ""
+
+
+def _safe_iterparse_namespaces(xml_path: Path) -> Dict[str, str]:
+    namespaces: Dict[str, str] = {}
+    try:
+        for _, payload in ET.iterparse(str(xml_path), events=("start-ns",)):
+            prefix, uri = payload
+            namespaces[prefix or "(default)"] = uri
+    except Exception:
+        return {}
+    return namespaces
+
+
+def _build_element_parent_map(root: ET.Element) -> Dict[ET.Element, Optional[ET.Element]]:
+    parent_map: Dict[ET.Element, Optional[ET.Element]] = {root: None}
+    for parent in root.iter():
+        for child in list(parent):
+            parent_map[child] = parent
+    return parent_map
+
+
+def _element_path(element: ET.Element, parent_map: Dict[ET.Element, Optional[ET.Element]]) -> str:
+    parts = []
+    cursor: Optional[ET.Element] = element
+    while cursor is not None:
+        parts.append(_local_name(cursor.tag))
+        cursor = parent_map.get(cursor)
+    return "/" + "/".join(reversed(parts))
+
+
+def _find_reference_xml_path(out_dir: Path) -> Optional[Path]:
+    configured = os.getenv("COBIEQC_REFERENCE_XML_PATH", "").strip()
+    if configured:
+        candidate = Path(configured).expanduser().resolve()
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    for filename in ("legacy_generated_cobie.xml", "legacy_cobie.xml", "known_good_cobie.xml", "bsn.xml"):
+        candidate = out_dir / filename
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _inspect_cobie_xml(cobie_xml_path: Path) -> Dict[str, Any]:
+    doc = ET.parse(str(cobie_xml_path))
+    root = doc.getroot()
+    parent_map = _build_element_parent_map(root)
+    first_level = [_local_name(child.tag) for child in list(root)]
+    lower_names = {name.lower() for name in COBIE_ENTITY_NAMES}
+    counts: Dict[str, int] = {}
+    sample_paths: Dict[str, List[str]] = {}
+    sheet_to_rows: Dict[str, int] = {}
+    for entity_name in COBIE_ENTITY_NAMES:
+        needle = entity_name.lower()
+        count = 0
+        samples: List[str] = []
+        for node in root.iter():
+            node_name = _local_name(node.tag).lower()
+            if node_name == needle or node_name == f"{needle}s":
+                count += 1
+                if len(samples) < 3:
+                    samples.append(_element_path(node, parent_map))
+        counts[entity_name] = count
+        sample_paths[entity_name] = samples
+    for sheet_node in root.iter():
+        if _local_name(sheet_node.tag) != "Sheet":
+            continue
+        sheet_name = str(sheet_node.attrib.get("name", "")).strip() or "(unnamed)"
+        row_count = sum(1 for child in list(sheet_node) if _local_name(child.tag) == "Row")
+        sheet_to_rows[sheet_name] = row_count
+    model_path_count = sum(1 for node in root.iter() if _local_name(node.tag).lower() in lower_names)
+    return {
+        "root_element_name": _local_name(root.tag),
+        "root_namespace": _namespace_uri(root.tag) or "(none)",
+        "first_level_children": first_level,
+        "entity_counts": counts,
+        "sample_paths": sample_paths,
+        "sheet_row_counts": sheet_to_rows,
+        "model_path_count": model_path_count,
+    }
+
+
+def _collect_xml_structure_snapshot(xml_path: Path) -> Dict[str, Any]:
+    doc = ET.parse(str(xml_path))
+    root = doc.getroot()
+    parent_map = _build_element_parent_map(root)
+    path_counter: Counter[str] = Counter()
+    frequency: Counter[str] = Counter()
+    for node in root.iter():
+        name = _local_name(node.tag)
+        frequency[name] += 1
+        path_counter[_element_path(node, parent_map)] += 1
+    return {
+        "root_name": _local_name(root.tag),
+        "root_namespace": _namespace_uri(root.tag) or "(none)",
+        "namespaces": _safe_iterparse_namespaces(xml_path),
+        "element_frequency": dict(frequency),
+        "xpath_inventory": dict(path_counter),
+    }
+
+
+def _compare_xml_structure(generated_xml_path: Path, reference_xml_path: Path) -> Dict[str, Any]:
+    generated = _collect_xml_structure_snapshot(generated_xml_path)
+    reference = _collect_xml_structure_snapshot(reference_xml_path)
+
+    generated_paths = set(generated["xpath_inventory"].keys())
+    reference_paths = set(reference["xpath_inventory"].keys())
+    generated_elements = set(generated["element_frequency"].keys())
+    reference_elements = set(reference["element_frequency"].keys())
+
+    missing_paths = sorted(reference_paths - generated_paths)
+    extra_paths = sorted(generated_paths - reference_paths)
+    missing_elements = sorted(reference_elements - generated_elements)
+    extra_elements = sorted(generated_elements - reference_elements)
+    frequency_deltas: List[str] = []
+    for key in sorted(generated_elements | reference_elements):
+        gen_count = int(generated["element_frequency"].get(key, 0))
+        ref_count = int(reference["element_frequency"].get(key, 0))
+        if gen_count != ref_count:
+            frequency_deltas.append(f"{key}:generated={gen_count},reference={ref_count}")
+
+    return {
+        "reference_path": str(reference_xml_path),
+        "generated_root": generated["root_name"],
+        "reference_root": reference["root_name"],
+        "generated_namespace": generated["root_namespace"],
+        "reference_namespace": reference["root_namespace"],
+        "generated_namespaces": generated["namespaces"],
+        "reference_namespaces": reference["namespaces"],
+        "missing_paths": missing_paths[:100],
+        "extra_paths": extra_paths[:100],
+        "missing_elements": missing_elements[:100],
+        "extra_elements": extra_elements[:100],
+        "frequency_deltas": frequency_deltas[:100],
+    }
+
+
+def _inspect_svrl(svrl_output_path: Path) -> Dict[str, Any]:
+    root = ET.parse(str(svrl_output_path)).getroot()
+    active_patterns = root.findall(".//{*}active-pattern")
+    active_pattern_ids = [str(node.attrib.get("id", "")).strip() for node in active_patterns if node.attrib.get("id")]
+    fired_rules = root.findall(".//{*}fired-rule")
+    failed_asserts = root.findall(".//{*}failed-assert")
+    successful_reports = root.findall(".//{*}successful-report")
+    diagnostics = root.findall(".//{*}diagnostic-reference")
+    return {
+        "fired_rules": len(fired_rules),
+        "failed_asserts": len(failed_asserts),
+        "successful_reports": len(successful_reports),
+        "active_patterns": len(active_patterns),
+        "active_pattern_ids": active_pattern_ids[:5],
+        "diagnostics": len(diagnostics),
+    }
 
 
 @dataclass
@@ -636,6 +803,74 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
         cobie_xml_bytes, parse_warnings = builder.build()
         cobie_xml_path.write_bytes(cobie_xml_bytes)
         logs.append(f"generated_cobie_xml path={cobie_xml_path} size_bytes={cobie_xml_path.stat().st_size}")
+        cobie_diagnostics = _inspect_cobie_xml(cobie_xml_path)
+        logs.append(
+            "generated_cobie_xml_diagnostics "
+            f"root_element={cobie_diagnostics['root_element_name']} "
+            f"root_namespace={cobie_diagnostics['root_namespace']} "
+            f"first_level_children={','.join(cobie_diagnostics['first_level_children']) or '(none)'}"
+        )
+        entity_counts = cobie_diagnostics["entity_counts"]
+        logs.append(
+            "generated_cobie_xml_entity_counts "
+            + " ".join(f"{key}={entity_counts.get(key, 0)}" for key in COBIE_ENTITY_NAMES)
+        )
+        for entity_name in COBIE_ENTITY_NAMES:
+            sample_paths = cobie_diagnostics["sample_paths"].get(entity_name, [])
+            logs.append(
+                f"generated_cobie_xml_sample_paths entity={entity_name} "
+                f"paths={','.join(sample_paths) if sample_paths else '(none)'}"
+            )
+        sheet_row_counts = cobie_diagnostics["sheet_row_counts"]
+        logs.append(
+            "generated_cobie_xml_sheet_row_counts "
+            + " ".join(f"{sheet}:{count}" for sheet, count in sorted(sheet_row_counts.items()))
+        )
+        if cobie_diagnostics["root_element_name"] != "COBie":
+            parse_warnings.append(
+                "Generated COBie XML root element is not 'COBie'; rules may expect a COBie root container."
+            )
+        if cobie_diagnostics["root_namespace"] == "(none)":
+            parse_warnings.append(
+                "Generated COBie XML has no root namespace; rules may rely on COBie namespaces."
+            )
+        if cobie_diagnostics["model_path_count"] == 0:
+            parse_warnings.append(
+                "Generated COBie XML did not expose Contact/Facility/Floor/Space/Zone/Type/Component paths."
+            )
+        reference_xml_path = _find_reference_xml_path(out_dir)
+        if reference_xml_path:
+            comparison = _compare_xml_structure(cobie_xml_path, reference_xml_path)
+            logs.append(
+                "cobie_xml_comparison_summary "
+                f"reference_path={comparison['reference_path']} "
+                f"generated_root={comparison['generated_root']} reference_root={comparison['reference_root']} "
+                f"generated_namespace={comparison['generated_namespace']} "
+                f"reference_namespace={comparison['reference_namespace']}"
+            )
+            logs.append(
+                "cobie_xml_comparison_namespace_map "
+                f"generated={comparison['generated_namespaces']} "
+                f"reference={comparison['reference_namespaces']}"
+            )
+            logs.append(
+                "cobie_xml_comparison_paths "
+                f"missing_count={len(comparison['missing_paths'])} extra_count={len(comparison['extra_paths'])}"
+            )
+            logs.append(
+                "cobie_xml_comparison_elements "
+                f"missing={','.join(comparison['missing_elements']) or '(none)'} "
+                f"extra={','.join(comparison['extra_elements']) or '(none)'}"
+            )
+            logs.append(
+                "cobie_xml_comparison_frequency_deltas "
+                f"deltas={';'.join(comparison['frequency_deltas']) or '(none)'}"
+            )
+        else:
+            logs.append(
+                "cobie_xml_comparison_skipped reason=no_reference_xml "
+                "hint=Set_COBIEQC_REFERENCE_XML_PATH_or_place_legacy_cobie.xml_in_job_dir"
+            )
 
         logs.append("XML generated")
         validator = SchematronPipeline(resources_dir=resources_dir, stage=stage)
@@ -647,8 +882,30 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
         logs.extend(schematron_logs)
 
         warnings = [*parse_warnings, *svrl_warnings]
+        svrl_diagnostics = _inspect_svrl(svrl_xml_path)
+        logs.append(
+            "svrl_diagnostics "
+            f"fired_rules={svrl_diagnostics['fired_rules']} "
+            f"failed_asserts={svrl_diagnostics['failed_asserts']} "
+            f"successful_reports={svrl_diagnostics['successful_reports']} "
+            f"active_patterns={svrl_diagnostics['active_patterns']} "
+            f"active_pattern_ids={','.join(svrl_diagnostics['active_pattern_ids']) or '(none)'}"
+        )
+        svrl_size_bytes = svrl_xml_path.stat().st_size if svrl_xml_path.exists() else 0
+        non_trivial_workbook = sum(cobie_diagnostics["sheet_row_counts"].values()) >= 10
+        if svrl_diagnostics["fired_rules"] == 0 and (non_trivial_workbook or svrl_size_bytes < 2048):
+            warnings.append(
+                "SVRL diagnostics indicate zero fired rules for a non-trivial workbook or tiny output; "
+                "rule contexts likely did not match the generated COBie XML structure."
+            )
         summary["warnings"] = warnings
         summary["stage"] = stage
+        summary["svrl_diagnostics"] = svrl_diagnostics
+        summary["cobie_xml_diagnostics"] = {
+            "root_element_name": cobie_diagnostics["root_element_name"],
+            "root_namespace": cobie_diagnostics["root_namespace"],
+            "entity_counts": cobie_diagnostics["entity_counts"],
+        }
 
         renderer = SvrlHtmlRenderer(resources_dir=resources_dir)
         html_logs, html_error = renderer.render(svrl_xml_path, html_path, summary, warnings)
