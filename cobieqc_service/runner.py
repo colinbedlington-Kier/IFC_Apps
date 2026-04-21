@@ -128,14 +128,62 @@ def resolve_cobieqc_jar_path() -> Path:
     return _resolve_existing_path(cobieqc_jar_candidates(), expected_kind="file", label="JAR path")
 
 
-def resolve_cobieqc_resource_dir() -> Path:
-    return _resolve_existing_path(cobieqc_resource_candidates(), expected_kind="dir", label="resource dir")
-
-
 def _resource_file_counts(resource_dir: Path) -> Dict[str, int]:
     xml_count = sum(1 for p in resource_dir.rglob("*.xml") if p.is_file())
     xsl_count = sum(1 for p in resource_dir.rglob("*.xsl") if p.is_file())
     return {"xml_count": xml_count, "xsl_count": xsl_count}
+
+
+def validate_cobieqc_resource_dir(path: Path) -> Dict[str, object]:
+    resolved = path.expanduser().resolve()
+    result: Dict[str, object] = {
+        "path": str(resolved),
+        "exists": resolved.exists(),
+        "is_dir": resolved.is_dir(),
+        "has_files": False,
+        "xml_count": 0,
+        "xsl_count": 0,
+        "valid": False,
+        "missing": [],
+    }
+    missing: List[str] = []
+    if not resolved.exists():
+        missing.append("directory not found")
+    elif not resolved.is_dir():
+        missing.append("path is not a directory")
+    else:
+        has_files = any(child.is_file() for child in resolved.rglob("*"))
+        result["has_files"] = has_files
+        counts = _resource_file_counts(resolved)
+        result["xml_count"] = counts["xml_count"]
+        result["xsl_count"] = counts["xsl_count"]
+        if not has_files:
+            missing.append("directory is empty")
+        if counts["xml_count"] == 0:
+            missing.append("missing *.xml resource files")
+        if counts["xsl_count"] == 0:
+            missing.append("missing *.xsl resource files")
+    result["missing"] = missing
+    result["valid"] = len(missing) == 0
+    return result
+
+
+def resolve_cobieqc_resource_dir() -> Path:
+    candidates = cobieqc_resource_candidates()
+    invalid_reasons: List[str] = []
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        validation = validate_cobieqc_resource_dir(resolved)
+        LOGGER.debug("COBieQC resource dir validation: %s", validation)
+        if validation["valid"]:
+            LOGGER.info("COBieQC resource dir selected: %s", resolved)
+            return resolved
+        if validation["exists"]:
+            invalid_reasons.append(f"{resolved} ({'; '.join(validation['missing'])})")
+
+    attempted = ", ".join(str(p.expanduser()) for p in candidates)
+    detail = f" Invalid candidates: {', '.join(invalid_reasons)}." if invalid_reasons else ""
+    raise RuntimeError(f"COBieQC resource dir not found or missing expected files. Checked: {attempted}.{detail}")
 
 
 def _log_preflight_diagnostics(

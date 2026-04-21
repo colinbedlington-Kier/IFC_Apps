@@ -78,14 +78,15 @@ COBie QC is now a built-in IFC Toolkit page available at **/tools/cobieqc** (no 
 - Railway/web runtimes must bind to `0.0.0.0:$PORT` (with local fallback `8000`).
 - A lightweight health endpoint is available at `GET /health` for platform healthchecks.
 - Railway production deployments should mount a persistent volume at `/data`.
-- On startup, COBieQC assets are auto-restored into `/data/cobieqc` when missing:
+- On startup, COBieQC assets are bootstrapped with folder-first precedence:
   - `/data/cobieqc/CobieQcReporter.jar`
   - `/data/cobieqc/xsl_xml/`
-- The repository does not include COBieQC runtime assets. Bootstrap uses Google Drive sources (env-overridable):
+- The repository does not include COBieQC runtime assets. Bootstrap uses:
   - `COBIEQC_JAR_SOURCE_URL` (default: Google Drive JAR share link)
-  - `COBIEQC_XML_ZIP_SOURCE_URL` (default: Google Drive ZIP share link)
-- Bootstrap accepts Google Drive share links and converts them internally to direct download URLs.
-- The Google Drive folder link for `xsl_xml` is a manual backup/reference source only (`COBIEQC_XML_FOLDER_SOURCE_URL` default).
+  - `COBIEQC_XML_SOURCE_URL` (folder reference; default: Google Drive folder link)
+- `COBIEQC_XML_ZIP_SOURCE_URL` is deprecated and ignored for XML/XSL resources.
+- XML/XSL bootstrap no longer downloads/extracts ZIP archives; it validates a local resource folder and optionally performs folder sync only via folder-source handling.
+- For Railway, the most reliable setup is to mount/copy the unzipped `xsl_xml` folder directly at `COBIEQC_RESOURCE_DIR`.
 - Runtime path env vars (recommended on Railway):
   - `COBIEQC_DATA_DIR=/data/cobieqc`
   - `COBIEQC_JAR_PATH=/data/cobieqc/CobieQcReporter.jar`
