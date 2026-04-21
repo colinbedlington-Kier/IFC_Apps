@@ -271,8 +271,8 @@ def test_key_field_and_cross_reference_diagnostics_are_logged(monkeypatch, tmp_p
     components.append(["CMP-01", "MissingType", "MissingSpace", "UnknownUser"])
     components.append(["CMP-01", "MissingType", "MissingSpace", "UnknownUser"])
     contacts = wb.create_sheet("Contact")
-    contacts.append(["Name", "Email"])
-    contacts.append(["KnownUser", "known@example.com"])
+    contacts.append(["Name", "Email", "CreatedBy", "CreatedOn"])
+    contacts.append(["KnownUser", "known@example.com", "known@example.com", "2024-01-01"])
     wb.save(workbook)
 
     _write_resources(resources)
@@ -284,6 +284,30 @@ def test_key_field_and_cross_reference_diagnostics_are_logged(monkeypatch, tmp_p
     assert "key_field_name_diagnostics entity=Facility blank_name_count=1" in result.stdout
     assert "key_field_name_diagnostics entity=Component blank_name_count=0 duplicate_name_count=1" in result.stdout
     assert "cross_reference_diagnostics space_floor_unresolved=1 component_type_unresolved=2 component_space_unresolved=2" in result.stdout
+    assert "cross_reference_mismatch_report " in result.stdout
+    assert "blank_name_diagnostics_by_entity " in result.stdout
+
+
+def test_contact_email_is_used_for_created_by_cross_reference(monkeypatch, tmp_path):
+    workbook = tmp_path / "contact_email_match.xlsx"
+    resources = tmp_path / "xsl_xml"
+    job_dir = tmp_path / "job"
+    wb = Workbook()
+    facility = wb.active
+    facility.title = "Facility"
+    facility.append(["Name", "CreatedOn", "Currency", "CreatedBy"])
+    facility.append(["HQ", "2024-01-01", "USD", "author@example.com"])
+    contacts = wb.create_sheet("Contact")
+    contacts.append(["Name", "Email", "CreatedOn"])
+    contacts.append(["Author Name", "author@example.com", "2024-01-01"])
+    wb.save(workbook)
+
+    _write_resources(resources)
+    monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "lxml")
+    result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
+
+    assert result.ok
+    assert "created_by_unmatched=0" in result.stdout
 
 
 def test_saxon_executes_compiled_xslt_with_quantified_expression(monkeypatch, tmp_path):

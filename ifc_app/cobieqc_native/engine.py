@@ -17,6 +17,7 @@ LOGGER = logging.getLogger("ifc_app.cobieqc.native")
 APP_ROOT = Path(__file__).resolve().parents[2]
 COBIE_ENTITY_NAMES = ["Contact", "Facility", "Floor", "Space", "Zone", "Type", "Component"]
 KEY_FIELD_DIAGNOSTIC_FIELDS: Dict[str, List[str]] = {
+    "Contact": ["Email", "CreatedBy", "CreatedOn"],
     "Facility": ["Name", "CreatedOn", "Currency"],
     "Floor": ["Name", "CreatedOn"],
     "Space": ["Name", "FloorName", "CreatedOn"],
@@ -24,9 +25,21 @@ KEY_FIELD_DIAGNOSTIC_FIELDS: Dict[str, List[str]] = {
     "Component": ["Name", "TypeName", "Space", "CreatedBy"],
 }
 KEY_FIELD_SOURCE_ALIASES: Dict[str, List[str]] = {
+    "Email": ["Email", "EMail", "ContactEmail"],
+    "Name": ["Name", "Component", "Space", "Type", "Floor", "Facility"],
+    "CreatedBy": ["CreatedBy", "Created By"],
+    "CreatedOn": ["CreatedOn", "Created On"],
     "FloorName": ["FloorName", "Floor"],
     "TypeName": ["TypeName", "Type"],
     "Space": ["Space", "SpaceName"],
+}
+DESKTOP_IDENTITY_COLUMN_ALIASES: Dict[str, List[str]] = {
+    "Contact": ["Email", "Name"],
+    "Facility": ["Name", "Facility"],
+    "Floor": ["Name", "FloorName", "Floor"],
+    "Space": ["Name", "SpaceName", "Space"],
+    "Type": ["Name", "TypeName", "Type"],
+    "Component": ["Name", "ComponentName", "Component"],
 }
 
 
@@ -177,7 +190,7 @@ def _sheet_records_by_row(workbook_path: Path) -> Dict[str, Dict[int, Dict[str, 
             text = "" if value is None else str(value).strip()
             headers.append(text)
         row_map: Dict[int, Dict[str, Any]] = {}
-        for row_idx, row in enumerate(rows[1:], start=1):
+        for row_idx, row in enumerate(rows[1:], start=2):
             if all(cell in (None, "") for cell in row):
                 continue
             row_map[row_idx] = {headers[col_idx]: row[col_idx] for col_idx in range(min(len(headers), len(row)))}
@@ -192,6 +205,18 @@ def _resolve_source_column_name(source_row: Dict[str, Any], field_name: str) -> 
             if column_name.strip().lower() == candidate.strip().lower():
                 return column_name
     return ""
+
+
+def _resolve_source_value_by_aliases(source_row: Dict[str, Any], aliases: List[str]) -> Tuple[str, str]:
+    for alias in aliases:
+        col = _resolve_source_column_name(source_row, alias)
+        if not col:
+            continue
+        value = source_row.get(col)
+        if value is None:
+            return col, ""
+        return col, str(value).strip()
+    return "", ""
 
 
 def _entity_nodes(root: ET.Element, entity_name: str) -> List[ET.Element]:
@@ -227,7 +252,9 @@ def _cross_reference_diagnostics(root: ET.Element) -> Dict[str, Any]:
     floor_names = {_find_child_text(node, "Name") for node in _entity_nodes(root, "Floor")}
     type_names = {_find_child_text(node, "Name") for node in _entity_nodes(root, "Type")}
     space_names = {_find_child_text(node, "Name") for node in _entity_nodes(root, "Space")}
-    contact_names = {_find_child_text(node, "Name") for node in _entity_nodes(root, "Contact")}
+    contact_names = {
+        _find_child_text(node, "Email") or _find_child_text(node, "Name") for node in _entity_nodes(root, "Contact")
+    }
     floor_names.discard("")
     type_names.discard("")
     space_names.discard("")
@@ -243,7 +270,7 @@ def _cross_reference_diagnostics(root: ET.Element) -> Dict[str, Any]:
                 unresolved.append(f"(blank)@{node.attrib.get('sourceSheet', '')}#{node.attrib.get('rowNumber', '')}")
             else:
                 unresolved.append(f"{value}@{node.attrib.get('sourceSheet', '')}#{node.attrib.get('rowNumber', '')}")
-        return {"count": len(unresolved), "samples": unresolved[:10]}
+        return {"count": len(unresolved), "samples": unresolved[:20]}
 
     created_by_unresolved: List[str] = []
     for entity in ("Facility", "Floor", "Space", "Type", "Component", "Zone"):
@@ -259,7 +286,7 @@ def _cross_reference_diagnostics(root: ET.Element) -> Dict[str, Any]:
         "space_floor_name": _collect_unresolved(_entity_nodes(root, "Space"), "FloorName", floor_names),
         "component_type_name": _collect_unresolved(_entity_nodes(root, "Component"), "TypeName", type_names),
         "component_space": _collect_unresolved(_entity_nodes(root, "Component"), "Space", space_names),
-        "created_by": {"count": len(created_by_unresolved), "samples": created_by_unresolved[:10]},
+        "created_by": {"count": len(created_by_unresolved), "samples": created_by_unresolved[:20]},
     }
 
 
@@ -268,8 +295,8 @@ def _build_key_field_diagnostics(workbook_path: Path, cobie_xml_path: Path) -> D
     source_rows = _sheet_records_by_row(workbook_path)
     entity_diagnostics: Dict[str, Any] = {}
     for entity, fields in KEY_FIELD_DIAGNOSTIC_FIELDS.items():
-        samples: List[Dict[str, Any]] = []
-        for node in _entity_nodes(root, entity)[:10]:
+        rows: List[Dict[str, Any]] = []
+        for node in _entity_nodes(root, entity):
             source_sheet = str(node.attrib.get("sourceSheet", ""))
             row_number = int(str(node.attrib.get("rowNumber", "0") or "0"))
             source_row = source_rows.get(source_sheet, {}).get(row_number, {})
@@ -283,27 +310,67 @@ def _build_key_field_diagnostics(workbook_path: Path, cobie_xml_path: Path) -> D
                     "source_column": source_column or "(missing)",
                     "source_value": "" if source_value is None else str(source_value).strip(),
                 }
-            samples.append(
+            identity_aliases = DESKTOP_IDENTITY_COLUMN_ALIASES.get(entity, ["Name"])
+            source_identity_column, source_identity_value = _resolve_source_value_by_aliases(source_row, identity_aliases)
+            xml_identity_value = ""
+            for alias in identity_aliases:
+                xml_identity_value = _find_child_text(node, alias)
+                if xml_identity_value:
+                    break
+            rows.append(
                 {
                     "source_sheet": source_sheet or "(unknown)",
                     "source_row_number": row_number,
                     "fields": field_values,
+                    "identity": {
+                        "aliases": identity_aliases,
+                        "source_column": source_identity_column or "(missing)",
+                        "source_value": source_identity_value,
+                        "xml_value": xml_identity_value,
+                        "matches": source_identity_value == xml_identity_value,
+                    },
                 }
             )
         entity_diagnostics[entity] = {
-            "sample_count": len(samples),
-            "samples": samples,
+            "row_count": len(rows),
+            "rows": rows,
+            "samples": rows[:20],
             **_name_profile(_entity_nodes(root, entity)),
         }
-    return {"entities": entity_diagnostics, "cross_references": _cross_reference_diagnostics(root)}
+    cross_references = _cross_reference_diagnostics(root)
+    mismatch_report = {
+        "floor_name": cross_references["space_floor_name"]["samples"][:20],
+        "type_name": cross_references["component_type_name"]["samples"][:20],
+        "space": cross_references["component_space"]["samples"][:20],
+        "created_by": cross_references["created_by"]["samples"][:20],
+        "blank_name_rows": [],
+    }
+    for entity, profile in entity_diagnostics.items():
+        for sample in profile.get("samples", []):
+            name_data = sample.get("fields", {}).get("Name")
+            if name_data and not name_data.get("xml_value"):
+                mismatch_report["blank_name_rows"].append(
+                    f"{entity}:{sample.get('source_sheet', '')}#{sample.get('source_row_number', 0)}"
+                )
+                if len(mismatch_report["blank_name_rows"]) >= 20:
+                    break
+        if len(mismatch_report["blank_name_rows"]) >= 20:
+            break
+    return {"entities": entity_diagnostics, "cross_references": cross_references, "mismatch_report": mismatch_report}
 
 
 def _cross_reference_created_by(root: ET.Element) -> Dict[str, Any]:
     contact_names = {
         (name_node.text or "").strip()
-        for name_node in root.findall(".//{*}Contacts/{*}Contact/{*}Name")
+        for name_node in root.findall(".//{*}Contacts/{*}Contact/{*}Email")
         if (name_node.text or "").strip()
     }
+    if not contact_names:
+        contact_names = {
+            (name_node.text or "").strip()
+            for name_node in root.findall(".//{*}Contacts/{*}Contact/{*}Name")
+            if (name_node.text or "").strip()
+        }
     unmatched: List[str] = []
     total = 0
     matched = 0
@@ -324,7 +391,7 @@ def _cross_reference_created_by(root: ET.Element) -> Dict[str, Any]:
         "created_by_total": total,
         "created_by_matched": matched,
         "created_by_unmatched": max(total - matched, 0),
-        "unmatched_samples": unmatched[:10],
+        "unmatched_samples": unmatched[:20],
     }
 
 
@@ -526,7 +593,7 @@ class CobieWorkbookXmlBuilder:
 
             header = [_clean_tag(v if v is not None else "Column") for v in rows[0]]
             entity_ordinal = 0
-            for row_idx, row in enumerate(rows[1:], start=1):
+            for row_idx, row in enumerate(rows[1:], start=2):
                 if all(cell in (None, "") for cell in row):
                     continue
                 entity_ordinal += 1
@@ -587,8 +654,8 @@ class CobieWorkbookXmlBuilder:
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
             return parsed.strftime("%Y-%m-%dT%H:%M:%S")
         except Exception:
-            warnings.append(f"CreatedOn value not normalized to ISO8601 value='{text}'")
-            return text
+            warnings.append(f"CreatedOn invalid ISO8601 value dropped value='{text}'")
+            return None
 
 
 class SchematronPipeline:
@@ -1233,6 +1300,12 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
                 f"blank_name_samples={','.join(profile.get('blank_name_samples', [])) or '(none)'} "
                 f"duplicate_name_samples={','.join(profile.get('duplicate_name_samples', [])) or '(none)'}"
             )
+            logs.append(
+                "key_field_audit_summary "
+                f"entity={entity_name} "
+                f"rows={profile.get('row_count', 0)} "
+                f"audit_samples_logged={len(profile.get('samples', []))}"
+            )
             for sample_idx, sample in enumerate(profile.get("samples", []), start=1):
                 field_chunks = []
                 for field_name, field_data in sample.get("fields", {}).items():
@@ -1245,9 +1318,18 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
                     f"sample={sample_idx} "
                     f"source_sheet={sample.get('source_sheet', '(unknown)')} "
                     f"source_row={sample.get('source_row_number', 0)} "
+                    f"identity_source_col={sample.get('identity', {}).get('source_column', '(missing)')} "
+                    f"identity_source={sample.get('identity', {}).get('source_value', '')} "
+                    f"identity_xml={sample.get('identity', {}).get('xml_value', '')} "
+                    f"identity_matches={sample.get('identity', {}).get('matches', False)} "
                     f"values={';'.join(field_chunks) or '(none)'}"
                 )
         cross_diag = key_field_diag["cross_references"]
+        name_diag_parts = []
+        for entity_name in KEY_FIELD_DIAGNOSTIC_FIELDS:
+            profile = key_field_diag["entities"].get(entity_name, {})
+            name_diag_parts.append(f"{entity_name}:{profile.get('blank_name_count', 0)}")
+        logs.append("blank_name_diagnostics_by_entity " + " ".join(name_diag_parts))
         logs.append(
             "cross_reference_diagnostics "
             f"space_floor_unresolved={cross_diag['space_floor_name']['count']} "
@@ -1261,6 +1343,15 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
             f"component_type={','.join(cross_diag['component_type_name']['samples']) or '(none)'} "
             f"component_space={','.join(cross_diag['component_space']['samples']) or '(none)'} "
             f"created_by={','.join(cross_diag['created_by']['samples']) or '(none)'}"
+        )
+        mismatch_report = key_field_diag["mismatch_report"]
+        logs.append(
+            "cross_reference_mismatch_report "
+            f"floor_name_first20={','.join(mismatch_report['floor_name']) or '(none)'} "
+            f"type_name_first20={','.join(mismatch_report['type_name']) or '(none)'} "
+            f"space_first20={','.join(mismatch_report['space']) or '(none)'} "
+            f"created_by_first20={','.join(mismatch_report['created_by']) or '(none)'} "
+            f"blank_name_first20={','.join(mismatch_report['blank_name_rows']) or '(none)'}"
         )
         workbook_style = cobie_diagnostics["root_element_name"] == "COBieWorkbook" or any(
             child == "Sheet" for child in cobie_diagnostics["first_level_children"]
