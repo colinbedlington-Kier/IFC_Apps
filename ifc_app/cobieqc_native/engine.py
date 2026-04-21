@@ -1,5 +1,8 @@
 import logging
+import os
+import shlex
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -8,6 +11,7 @@ from openpyxl import load_workbook
 from xml.etree import ElementTree as ET
 
 LOGGER = logging.getLogger("ifc_app.cobieqc.native")
+APP_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _clean_tag(value: str) -> str:
@@ -91,8 +95,34 @@ class SchematronPipeline:
         svrl_output_path: Path,
         compiled_xslt_output_path: Path,
     ) -> Tuple[Dict[str, int], List[str], str, List[str]]:
+        engine = _get_xslt_engine()
+        logs: List[str] = [f"xslt_engine={engine}"]
+        if engine == "saxon":
+            return self._validate_with_saxon(
+                cobie_xml_path=cobie_xml_path,
+                svrl_output_path=svrl_output_path,
+                compiled_xslt_output_path=compiled_xslt_output_path,
+                logs=logs,
+            )
+        if engine == "lxml":
+            return self._validate_with_lxml(
+                cobie_xml_path=cobie_xml_path,
+                svrl_output_path=svrl_output_path,
+                compiled_xslt_output_path=compiled_xslt_output_path,
+                logs=logs,
+            )
+        raise RuntimeError(
+            f"Unsupported COBIEQC_XSLT_ENGINE='{engine}'. Expected one of: saxon, lxml."
+        )
+
+    def _validate_with_lxml(
+        self,
+        cobie_xml_path: Path,
+        svrl_output_path: Path,
+        compiled_xslt_output_path: Path,
+        logs: List[str],
+    ) -> Tuple[Dict[str, int], List[str], str, List[str]]:
         warnings: List[str] = []
-        logs: List[str] = []
         try:
             from lxml import etree
         except Exception as exc:
@@ -209,12 +239,116 @@ class SchematronPipeline:
             logs,
         )
 
+    def _validate_with_saxon(
+        self,
+        cobie_xml_path: Path,
+        svrl_output_path: Path,
+        compiled_xslt_output_path: Path,
+        logs: List[str],
+    ) -> Tuple[Dict[str, int], List[str], str, List[str]]:
+        warnings: List[str] = []
+        sch_path = self.resources_dir / "COBieRules.sch"
+        compile_xslt_path = self.resources_dir / "iso_svrl_for_xslt2.xsl"
+        skeleton_path = self.resources_dir / "iso_schematron_skeleton_for_saxon.xsl"
+        functions_path = self.resources_dir / "COBieRules_Functions.xsl"
+        if not sch_path.exists():
+            raise RuntimeError(f"COBieRules.sch missing at {sch_path}")
+        if not compile_xslt_path.exists():
+            raise RuntimeError(f"iso_svrl_for_xslt2.xsl missing at {compile_xslt_path}")
+
+        phase_id = self._resolve_phase_id_elementtree(sch_path)
+        if phase_id:
+            logs.append(f"schematron_phase_selected stage={self.stage} phase={phase_id}")
+        else:
+            warnings.append(
+                f"No explicit phase mapping found for stage '{self.stage}'. Running with default Schematron phase."
+            )
+        logs.append(self._phase_log("schematron_source_loaded", sch_path))
+        if skeleton_path.exists():
+            logs.append(self._phase_log("schematron_skeleton_loaded", skeleton_path))
+        if functions_path.exists():
+            logs.append(self._phase_log("schematron_functions_loaded", functions_path))
+
+        compile_stdout, compile_stderr = _run_saxon_xslt(
+            xml_input_path=sch_path,
+            stylesheet_path=compile_xslt_path,
+            output_path=compiled_xslt_output_path,
+            params={"phase": phase_id} if phase_id else {},
+            logs=logs,
+        )
+        logs.append(self._phase_log("schematron_compiled_to_xslt", compiled_xslt_output_path))
+        logs.append(f"compiled_validation_xslt path={compiled_xslt_output_path}")
+        if compile_stdout:
+            logs.append(f"saxon_compile_stdout={compile_stdout.strip()}")
+        if compile_stderr:
+            logs.append(f"saxon_compile_stderr={compile_stderr.strip()}")
+
+        detected_hrefs = self._collect_xslt_dependency_hrefs(compiled_xslt_output_path)
+        logs.append(f"compiled_xslt_dependencies_detected hrefs={','.join(detected_hrefs) or '(none)'}")
+        rewritten = self._rewrite_xslt_dependency_hrefs(compiled_xslt_output_path)
+        for source_href, target_href in rewritten:
+            logs.append(f"compiled_xslt_dependency_rewritten from={source_href} to={target_href}")
+        unresolved = self._find_unresolved_relative_hrefs(compiled_xslt_output_path)
+        if unresolved:
+            warnings.append(
+                f"compiled_xslt_unresolved_relative_dependencies={','.join(unresolved)} "
+                f"base_dir={compiled_xslt_output_path.parent}"
+            )
+            logs.append(f"compiled_xslt_unresolved_relative_dependencies hrefs={','.join(unresolved)}")
+        logs.append(f"validation_resolver_base path={compiled_xslt_output_path.parent}")
+
+        validation_stdout, validation_stderr = _run_saxon_xslt(
+            xml_input_path=cobie_xml_path,
+            stylesheet_path=compiled_xslt_output_path,
+            output_path=svrl_output_path,
+            params={},
+            logs=logs,
+        )
+        logs.append(self._phase_log("validation_xslt_applied", compiled_xslt_output_path))
+        logs.append(self._phase_log("svrl_generated", svrl_output_path))
+        if validation_stdout:
+            logs.append(f"saxon_validation_stdout={validation_stdout.strip()}")
+        if validation_stderr:
+            logs.append(f"saxon_validation_stderr={validation_stderr.strip()}")
+
+        root = ET.parse(str(svrl_output_path)).getroot()
+        failed_asserts = len(root.findall(".//{*}failed-assert"))
+        successful_reports = len(root.findall(".//{*}successful-report"))
+        diagnostics = len(root.findall(".//{*}diagnostic-reference"))
+        return (
+            {
+                "failed_asserts": failed_asserts,
+                "successful_reports": successful_reports,
+                "diagnostics": diagnostics,
+            },
+            warnings,
+            "",
+            logs,
+        )
+
     def _resolve_phase_id(self, sch_doc: Any) -> Optional[str]:
         ns = {"sch": "http://purl.oclc.org/dsdl/schematron"}
         stage_value = (self.stage or "").strip().upper()
         phase_ids = [str(v) for v in sch_doc.xpath("/sch:schema/sch:phase/@id", namespaces=ns)]
         if not phase_ids:
             return None
+        if stage_value in phase_ids:
+            return stage_value
+        stage_keywords = {"D": "design", "C": "construction"}
+        keyword = stage_keywords.get(stage_value, stage_value.lower())
+        for candidate in phase_ids:
+            if keyword and keyword in candidate.lower():
+                return candidate
+        return phase_ids[0]
+
+    def _resolve_phase_id_elementtree(self, sch_path: Path) -> Optional[str]:
+        ns = {"sch": "http://purl.oclc.org/dsdl/schematron"}
+        doc = ET.parse(str(sch_path))
+        root = doc.getroot()
+        phase_ids = [str(el.attrib.get("id", "")).strip() for el in root.findall("sch:phase", ns) if el.attrib.get("id")]
+        if not phase_ids:
+            return None
+        stage_value = (self.stage or "").strip().upper()
         if stage_value in phase_ids:
             return stage_value
         stage_keywords = {"D": "design", "C": "construction"}
@@ -313,6 +447,7 @@ class SvrlHtmlRenderer:
         summary: Dict[str, Any],
         warnings: List[str],
     ) -> Tuple[List[str], str]:
+        engine = _get_xslt_engine()
         logs: List[str] = []
         error = ""
         css_path = self.resources_dir / "SpaceReport.css"
@@ -320,13 +455,6 @@ class SvrlHtmlRenderer:
         if css_path.exists():
             shutil.copy2(css_path, target_css)
             logs.append(f"html_css_copied path={target_css} size_bytes={target_css.stat().st_size}")
-
-        try:
-            from lxml import etree
-        except Exception:
-            self._write_fallback_html(html_output_path, summary, warnings)
-            logs.append(f"html_generated path={html_output_path} size_bytes={html_output_path.stat().st_size}")
-            return logs, error
 
         xslt_candidates = [
             self.resources_dir / "SVRL_HTML_altLocation.xslt",
@@ -337,11 +465,23 @@ class SvrlHtmlRenderer:
             if not xslt_path.exists():
                 continue
             try:
-                svrl_doc = etree.parse(str(svrl_path))
-                xslt_doc = etree.parse(str(xslt_path))
-                transform = etree.XSLT(xslt_doc)
-                html_doc = transform(svrl_doc)
-                html_output_path.write_bytes(etree.tostring(html_doc, encoding="utf-8", pretty_print=True, method="html"))
+                if engine == "saxon":
+                    _run_saxon_xslt(
+                        xml_input_path=svrl_path,
+                        stylesheet_path=xslt_path,
+                        output_path=html_output_path,
+                        params={},
+                        logs=logs,
+                    )
+                else:
+                    from lxml import etree
+                    svrl_doc = etree.parse(str(svrl_path))
+                    xslt_doc = etree.parse(str(xslt_path))
+                    transform = etree.XSLT(xslt_doc)
+                    html_doc = transform(svrl_doc)
+                    html_output_path.write_bytes(
+                        etree.tostring(html_doc, encoding="utf-8", pretty_print=True, method="html")
+                    )
                 logs.append(f"html_generated path={html_output_path} size_bytes={html_output_path.stat().st_size}")
                 return logs, error
             except Exception as exc:
@@ -377,6 +517,71 @@ class SvrlHtmlRenderer:
 </html>
 """
         html_output_path.write_text(html, encoding="utf-8")
+
+
+def _get_xslt_engine() -> str:
+    return os.getenv("COBIEQC_XSLT_ENGINE", "saxon").strip().lower() or "saxon"
+
+
+def _resolve_saxon_command() -> List[str]:
+    configured = os.getenv("COBIEQC_SAXON_CMD", "").strip()
+    if configured:
+        return shlex.split(configured)
+    jar_candidates = [
+        os.getenv("COBIEQC_SAXON_JAR_PATH", "").strip(),
+        str(APP_ROOT / "vendor" / "saxon" / "Saxon-HE.jar"),
+        str(APP_ROOT / "vendor" / "saxon" / "saxon-he.jar"),
+        "/usr/share/java/Saxon-HE.jar",
+        "/usr/share/java/saxon-he.jar",
+    ]
+    for candidate in jar_candidates:
+        if not candidate:
+            continue
+        jar_path = Path(candidate).expanduser().resolve()
+        if jar_path.exists() and jar_path.is_file():
+            java_bin = os.getenv("JAVA_BIN", "java").strip() or "java"
+            return [java_bin, "-jar", str(jar_path)]
+    raise RuntimeError(
+        "Saxon HE is required for COBieQC XSLT 2.0 execution but was not found. "
+        "Set COBIEQC_SAXON_JAR_PATH or COBIEQC_SAXON_CMD."
+    )
+
+
+def _run_saxon_xslt(
+    xml_input_path: Path,
+    stylesheet_path: Path,
+    output_path: Path,
+    params: Dict[str, str],
+    logs: List[str],
+) -> Tuple[str, str]:
+    command = [
+        *_resolve_saxon_command(),
+        f"-s:{xml_input_path}",
+        f"-xsl:{stylesheet_path}",
+        f"-o:{output_path}",
+    ]
+    for key, value in params.items():
+        command.append(f"{key}={value}")
+    logs.append(f"xslt_engine=saxon command={' '.join(shlex.quote(part) for part in command)}")
+    logs.append(f"xslt_engine=saxon input_xml_path={xml_input_path}")
+    logs.append(f"xslt_engine=saxon stylesheet_path={stylesheet_path}")
+    logs.append(f"xslt_engine=saxon output_path={output_path}")
+    completed = subprocess.run(command, capture_output=True, text=True)
+    if completed.stdout.strip():
+        logs.append(f"xslt_engine=saxon stdout={completed.stdout.strip()}")
+    if completed.stderr.strip():
+        logs.append(f"xslt_engine=saxon stderr={completed.stderr.strip()}")
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"Saxon XSLT failed (exit={completed.returncode}) for stylesheet={stylesheet_path} input={xml_input_path}. "
+            f"stderr={completed.stderr.strip()}"
+        )
+    if not output_path.exists():
+        raise RuntimeError(
+            f"Saxon XSLT did not produce expected output file: {output_path} "
+            f"(stylesheet={stylesheet_path}, input={xml_input_path})"
+        )
+    return completed.stdout, completed.stderr
 
 
 def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources_dir: Path) -> CobieQcNativeResult:

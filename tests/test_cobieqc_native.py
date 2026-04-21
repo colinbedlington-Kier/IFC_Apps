@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from openpyxl import Workbook
 
-from ifc_app.cobieqc_native.engine import run_cobieqc_native
+from ifc_app.cobieqc_native.engine import _resolve_saxon_command, run_cobieqc_native
 from cobieqc_service import runner
 
 REQUIRED_RESOURCE_FILES = [
@@ -36,13 +36,16 @@ def _write_resources(path: Path) -> None:
         (path / name).write_text("x", encoding="utf-8")
 
 
-def test_run_cobieqc_native_produces_artifacts(tmp_path):
+def test_run_cobieqc_native_produces_artifacts(monkeypatch, tmp_path):
     workbook = tmp_path / "input.xlsx"
     resources = tmp_path / "xsl_xml"
     job_dir = tmp_path / "job"
     _make_sample_workbook(workbook)
     _write_resources(resources)
 
+    monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "lxml")
+    # These placeholder resources are intentionally non-executable XSLT fixtures,
+    # so use the legacy lxml fallback path for this artifact smoke test.
     result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
 
     assert result.ok
@@ -60,6 +63,7 @@ def test_runner_uses_python_engine_without_jar(monkeypatch, tmp_path):
     _write_resources(resources)
 
     monkeypatch.setenv("COBIEQC_ENGINE", "python")
+    monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "lxml")
     monkeypatch.setenv("COBIEQC_RESOURCE_DIR", str(resources))
     monkeypatch.delenv("COBIEQC_JAR_PATH", raising=False)
 
@@ -151,6 +155,7 @@ def test_schematron_compiled_xslt_rewrites_relative_imports(monkeypatch, tmp_pat
     )
 
     monkeypatch.setenv("COBIEQC_RESOURCE_DIR", str(resources))
+    monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "lxml")
     result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
 
     compiled_xsl = job_dir / "compiled_validation.xsl"
@@ -162,3 +167,79 @@ def test_schematron_compiled_xslt_rewrites_relative_imports(monkeypatch, tmp_pat
         encoding="utf-8"
     )
     assert "import resolved" in svrl_xml.read_text(encoding="utf-8")
+
+
+def test_saxon_executes_compiled_xslt_with_quantified_expression(monkeypatch, tmp_path):
+    try:
+        _resolve_saxon_command()
+    except RuntimeError:
+        pytest.skip("Saxon HE is not available in this environment")
+
+    workbook = tmp_path / "input.xlsx"
+    resources = tmp_path / "xsl_xml"
+    job_dir = tmp_path / "job"
+    _make_sample_workbook(workbook)
+    resources.mkdir(parents=True, exist_ok=True)
+
+    (resources / "COBieRules.sch").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<sch:schema xmlns:sch="http://purl.oclc.org/dsdl/schematron">
+  <sch:phase id="D"/>
+</sch:schema>
+""",
+        encoding="utf-8",
+    )
+    (resources / "iso_svrl_for_xslt2.xsl").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="2.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  xmlns:axsl="urn:test:axsl"
+  xmlns:svrl="http://purl.oclc.org/dsdl/svrl">
+  <xsl:output method="xml" indent="yes"/>
+  <xsl:namespace-alias stylesheet-prefix="axsl" result-prefix="xsl"/>
+  <xsl:param name="phase"/>
+  <xsl:template match="/">
+    <axsl:stylesheet version="2.0" xmlns:svrl="http://purl.oclc.org/dsdl/svrl">
+      <axsl:template match="/">
+        <svrl:schematron-output>
+          <axsl:if test="some $comp in /COBieWorkbook/Sheet[@name='Facility']/Row satisfies string-length($comp/Name) &gt; 0">
+            <svrl:successful-report test="quantified-expression">
+              <svrl:text>quantifier_ok</svrl:text>
+            </svrl:successful-report>
+          </axsl:if>
+        </svrl:schematron-output>
+      </axsl:template>
+    </axsl:stylesheet>
+  </xsl:template>
+</xsl:stylesheet>
+""",
+        encoding="utf-8",
+    )
+    (resources / "COBieExcelTemplate.xml").write_text("<template/>", encoding="utf-8")
+    (resources / "COBieRules_Functions.xsl").write_text("<xsl:stylesheet version='2.0' xmlns:xsl='http://www.w3.org/1999/XSL/Transform'/>", encoding="utf-8")
+    (resources / "iso_schematron_skeleton_for_saxon.xsl").write_text("<!-- skeleton marker -->", encoding="utf-8")
+    (resources / "SpaceReport.css").write_text("body {}", encoding="utf-8")
+    (resources / "SVRL_HTML_altLocation.xslt").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <xsl:template match="/"><html><body>ok</body></html></xsl:template>
+</xsl:stylesheet>
+""",
+        encoding="utf-8",
+    )
+    (resources / "_SVRL_HTML_altLocation.xslt").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <xsl:template match="/"><html><body>ok-fallback</body></html></xsl:template>
+</xsl:stylesheet>
+""",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "saxon")
+    result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
+
+    assert result.ok
+    svrl_text = (job_dir / "validation_result.svrl.xml").read_text(encoding="utf-8")
+    assert "quantifier_ok" in svrl_text
+    assert "some $comp" in (job_dir / "compiled_validation.xsl").read_text(encoding="utf-8")
