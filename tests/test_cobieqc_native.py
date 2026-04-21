@@ -248,6 +248,44 @@ def test_created_on_normalized_to_iso8601(monkeypatch, tmp_path):
     assert "generated_created_on_samples values=2024-01-01T12:00:00" in result.stdout
 
 
+def test_key_field_and_cross_reference_diagnostics_are_logged(monkeypatch, tmp_path):
+    workbook = tmp_path / "diag_input.xlsx"
+    resources = tmp_path / "xsl_xml"
+    job_dir = tmp_path / "job"
+    wb = Workbook()
+    facility = wb.active
+    facility.title = "Facility"
+    facility.append(["Name", "CreatedOn", "Currency", "CreatedBy"])
+    facility.append(["", "2024-01-01", "USD", "UnknownUser"])
+    floors = wb.create_sheet("Floor")
+    floors.append(["Name", "CreatedOn"])
+    floors.append(["L1", "2024-01-01"])
+    spaces = wb.create_sheet("Space")
+    spaces.append(["Name", "FloorName", "CreatedOn", "CreatedBy"])
+    spaces.append(["S-001", "MissingFloor", "2024-01-01", "UnknownUser"])
+    types = wb.create_sheet("Type")
+    types.append(["Name", "CreatedBy", "Manufacturer", "WarrantyGuarantorParts", "WarrantyGuarantorLabor"])
+    types.append(["T-01", "UnknownUser", "ACME", "ACME", "ACME"])
+    components = wb.create_sheet("Component")
+    components.append(["Name", "TypeName", "Space", "CreatedBy"])
+    components.append(["CMP-01", "MissingType", "MissingSpace", "UnknownUser"])
+    components.append(["CMP-01", "MissingType", "MissingSpace", "UnknownUser"])
+    contacts = wb.create_sheet("Contact")
+    contacts.append(["Name", "Email"])
+    contacts.append(["KnownUser", "known@example.com"])
+    wb.save(workbook)
+
+    _write_resources(resources)
+    monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "lxml")
+    result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
+
+    assert result.ok
+    assert "key_field_sample entity=Component sample=1" in result.stdout
+    assert "key_field_name_diagnostics entity=Facility blank_name_count=1" in result.stdout
+    assert "key_field_name_diagnostics entity=Component blank_name_count=0 duplicate_name_count=1" in result.stdout
+    assert "cross_reference_diagnostics space_floor_unresolved=1 component_type_unresolved=2 component_space_unresolved=2" in result.stdout
+
+
 def test_saxon_executes_compiled_xslt_with_quantified_expression(monkeypatch, tmp_path):
     try:
         _resolve_saxon_command()
