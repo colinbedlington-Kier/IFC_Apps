@@ -45,9 +45,9 @@ def test_run_cobieqc_native_produces_artifacts(tmp_path):
     result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
 
     assert result.ok
-    assert (job_dir / "cobie.xml").exists()
-    assert (job_dir / "report.svrl.xml").exists()
-    assert (job_dir / "report.html").exists()
+    assert (job_dir / "generated_cobie.xml").exists()
+    assert (job_dir / "validation_result.svrl.xml").exists()
+    assert (job_dir / "final_report.html").exists()
     assert "failed_asserts" in result.summary
 
 
