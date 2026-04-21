@@ -7,10 +7,13 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from ifc_app.cobieqc_native import run_cobieqc_native
+
 LOGGER = logging.getLogger("ifc_app.cobieqc")
 DEFAULT_TIMEOUT_SECONDS = int(os.getenv("COBIEQC_TIMEOUT_SECONDS", "300"))
 APP_ROOT = Path(__file__).resolve().parents[1]
 COBIEQC_DATA_ROOT = Path(os.getenv("COBIEQC_DATA_DIR", "/data/cobieqc")).expanduser()
+COBIEQC_ENGINE_ENV = "COBIEQC_ENGINE"
 COBIEQC_RUNNER_BUILD_MARKER = "2026-04-10-jvm-memory-guardrails"
 COBIEQC_RUNNER_FLAG_MARKER = "flags=-i,-o,-p"
 COBIEQC_INPUT_ARG = "-i"
@@ -42,6 +45,10 @@ LOGGER.info(
     COBIEQC_RUNNER_BUILD_MARKER,
     __file__,
 )
+
+
+def get_cobieqc_engine() -> str:
+    return os.getenv(COBIEQC_ENGINE_ENV, "python").strip().lower() or "python"
 
 
 def _dedupe_paths(paths: List[Path]) -> List[Path]:
@@ -261,9 +268,14 @@ def get_cobieqc_runtime_diagnostics() -> Dict[str, object]:
     if resource_dir:
         counts = _resource_file_counts(resource_dir)
 
-    enabled = bool(jar_path and resource_dir)
+    selected_engine = get_cobieqc_engine()
+    if selected_engine == "java":
+        enabled = bool(jar_path and resource_dir)
+    else:
+        enabled = bool(resource_dir)
     return {
         "enabled": enabled,
+        "engine": selected_engine,
         "jar_exists": bool(jar_path),
         "resource_dir_exists": bool(resource_dir),
         "jar_path": str(jar_path) if jar_path else None,
@@ -406,7 +418,7 @@ def resolve_java_executable() -> str:
     return _java_executable()
 
 
-def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, object]:
+def _run_cobieqc_java(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, object]:
     if stage not in {"D", "C"}:
         return {"ok": False, "stdout": "", "stderr": "", "error": "Stage must be D or C."}
 
@@ -567,6 +579,38 @@ def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, obj
         "output_filename": output_filename,
         "error": "",
     }
+
+
+def _run_cobieqc_python(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, object]:
+    try:
+        resource_dir = resolve_cobieqc_resource_dir()
+    except RuntimeError as exc:
+        return {"ok": False, "stdout": "", "stderr": "", "error": str(exc)}
+
+    result = run_cobieqc_native(
+        input_xlsx_path=input_xlsx_path,
+        stage=stage,
+        job_dir=job_dir,
+        resources_dir=resource_dir,
+    )
+    return {
+        "ok": result.ok,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "output_html": result.output_html,
+        "output_filename": result.output_filename,
+        "cobie_xml": result.cobie_xml,
+        "svrl_xml": result.svrl_xml,
+        "summary": result.summary,
+        "error": result.error,
+    }
+
+
+def run_cobieqc(input_xlsx_path: str, stage: str, job_dir: str) -> Dict[str, object]:
+    engine = get_cobieqc_engine()
+    if engine == "java":
+        return _run_cobieqc_java(input_xlsx_path, stage, job_dir)
+    return _run_cobieqc_python(input_xlsx_path, stage, job_dir)
 
 
 # Backward-compatible alias for any existing imports.
