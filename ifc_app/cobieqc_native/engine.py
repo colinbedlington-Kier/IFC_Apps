@@ -535,14 +535,19 @@ def _resolve_required_jar_path(env_name: str) -> Path:
     return jar_path
 
 
+def _resolve_saxon_runtime_jars() -> Tuple[Path, Path, Path]:
+    saxon_jar = _resolve_required_jar_path("COBIEQC_SAXON_JAR_PATH")
+    xmlresolver_jar = _resolve_required_jar_path("COBIEQC_SAXON_XMLRESOLVER_JAR_PATH")
+    xmlresolver_data_jar = _resolve_required_jar_path("COBIEQC_SAXON_XMLRESOLVER_DATA_JAR_PATH")
+    return saxon_jar, xmlresolver_jar, xmlresolver_data_jar
+
+
 def _resolve_saxon_command() -> List[str]:
     configured = os.getenv("COBIEQC_SAXON_CMD", "").strip()
     if configured:
         return shlex.split(configured)
     java_bin = os.getenv("JAVA_BIN", "java").strip() or "java"
-    saxon_jar = _resolve_required_jar_path("COBIEQC_SAXON_JAR_PATH")
-    xmlresolver_jar = _resolve_required_jar_path("COBIEQC_SAXON_XMLRESOLVER_JAR_PATH")
-    xmlresolver_data_jar = _resolve_required_jar_path("COBIEQC_SAXON_XMLRESOLVER_DATA_JAR_PATH")
+    saxon_jar, xmlresolver_jar, xmlresolver_data_jar = _resolve_saxon_runtime_jars()
     classpath = os.pathsep.join([str(saxon_jar), str(xmlresolver_jar), str(xmlresolver_data_jar)])
     return [java_bin, "-cp", classpath, "net.sf.saxon.Transform"]
 
@@ -566,9 +571,7 @@ def _run_saxon_xslt(
         ]
         logs.append("saxon_command_source=override:COBIEQC_SAXON_CMD")
     else:
-        saxon_jar = _resolve_required_jar_path("COBIEQC_SAXON_JAR_PATH")
-        xmlresolver_jar = _resolve_required_jar_path("COBIEQC_SAXON_XMLRESOLVER_JAR_PATH")
-        xmlresolver_data_jar = _resolve_required_jar_path("COBIEQC_SAXON_XMLRESOLVER_DATA_JAR_PATH")
+        saxon_jar, xmlresolver_jar, xmlresolver_data_jar = _resolve_saxon_runtime_jars()
         logs.append(f"saxon_jar_path={saxon_jar}")
         logs.append(f"saxon_jar_size_bytes={saxon_jar.stat().st_size}")
         logs.append(f"xmlresolver_jar_path={xmlresolver_jar}")

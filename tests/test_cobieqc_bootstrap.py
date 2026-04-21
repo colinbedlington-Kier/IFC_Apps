@@ -28,6 +28,11 @@ def _write_valid_jar(path: Path, content: bytes = b"ok") -> None:
         archive.writestr("cobieqc.txt", content)
 
 
+def _write_non_empty_file(path: Path, content: bytes = b"ok") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+
+
 def test_bool_env_handles_unset_truthy_falsy_and_invalid(monkeypatch, caplog):
     monkeypatch.delenv("COBIEQC_FORCE_JAR_REFRESH", raising=False)
     assert bootstrap._bool_env("COBIEQC_FORCE_JAR_REFRESH", default=True) is True
@@ -364,3 +369,65 @@ def test_invalid_downloaded_jar_disables_engine(monkeypatch, tmp_path):
     assert status["enabled"] is False
     assert status["jar_ready"] is False
     assert "failed validation" in status["last_error"]
+
+
+def test_bootstrap_downloads_and_validates_saxon_runtime_assets(monkeypatch, tmp_path, caplog):
+    root = tmp_path / "cobie"
+    resource_dir = root / "xsl_xml"
+    jar_path = root / "CobieQcReporter.jar"
+    _write_required_resources(resource_dir)
+    _write_valid_jar(jar_path)
+    saxon_jar = root / "saxon" / "saxon-he-12.9.jar"
+    xmlresolver_jar = root / "saxon" / "lib" / "xmlresolver-5.3.3.jar"
+    xmlresolver_data_jar = root / "saxon" / "lib" / "xmlresolver-5.3.3-data.jar"
+
+    monkeypatch.setenv("COBIEQC_DATA_DIR", str(root))
+    monkeypatch.setenv("COBIEQC_JAR_PATH", str(jar_path))
+    monkeypatch.setenv("COBIEQC_RESOURCE_DIR", str(resource_dir))
+    monkeypatch.setenv("COBIEQC_SAXON_JAR_PATH", str(saxon_jar))
+    monkeypatch.setenv("COBIEQC_SAXON_SOURCE_URL", "https://example.test/saxon-he-12.9.jar")
+    monkeypatch.setenv("COBIEQC_SAXON_XMLRESOLVER_JAR_PATH", str(xmlresolver_jar))
+    monkeypatch.setenv("COBIEQC_SAXON_XMLRESOLVER_SOURCE_URL", "https://example.test/xmlresolver.jar")
+    monkeypatch.setenv("COBIEQC_SAXON_XMLRESOLVER_DATA_JAR_PATH", str(xmlresolver_data_jar))
+    monkeypatch.setenv("COBIEQC_SAXON_XMLRESOLVER_DATA_SOURCE_URL", "https://example.test/xmlresolver-data.jar")
+    caplog.set_level("INFO", logger="ifc_app.cobieqc.bootstrap")
+
+    def _mock_download(url, suffix, _purpose):
+        target = tmp_path / f"download-{url.split('/')[-1]}"
+        _write_non_empty_file(target, content=f"download:{suffix}".encode("utf-8"))
+        return bootstrap.DownloadResult(path=target, content_type="application/octet-stream", content_length="", http_status="200")
+
+    monkeypatch.setattr(bootstrap, "_download_to_temp", _mock_download)
+
+    bootstrap.bootstrap_cobieqc_assets()
+    status = bootstrap.get_cobieqc_bootstrap_status()
+
+    assert status["enabled"] is True
+    assert saxon_jar.exists()
+    assert xmlresolver_jar.exists()
+    assert xmlresolver_data_jar.exists()
+    assert "saxon_dir_created" in caplog.text
+    assert "saxon_downloaded" in caplog.text
+    assert "saxon_resolver_downloaded" in caplog.text
+    assert "saxon_validation" in caplog.text
+    assert "saxon availability summary" in caplog.text
+
+
+def test_bootstrap_logs_saxon_configuration_error_when_source_url_missing(monkeypatch, tmp_path):
+    root = tmp_path / "cobie"
+    resource_dir = root / "xsl_xml"
+    jar_path = root / "CobieQcReporter.jar"
+    _write_required_resources(resource_dir)
+    _write_valid_jar(jar_path)
+    saxon_jar = root / "saxon" / "saxon-he-12.9.jar"
+
+    monkeypatch.setenv("COBIEQC_DATA_DIR", str(root))
+    monkeypatch.setenv("COBIEQC_JAR_PATH", str(jar_path))
+    monkeypatch.setenv("COBIEQC_RESOURCE_DIR", str(resource_dir))
+    monkeypatch.setenv("COBIEQC_SAXON_JAR_PATH", str(saxon_jar))
+    monkeypatch.delenv("COBIEQC_SAXON_SOURCE_URL", raising=False)
+
+    bootstrap.bootstrap_cobieqc_assets()
+    status = bootstrap.get_cobieqc_bootstrap_status()
+
+    assert any("Saxon configuration error: missing path=" in err for err in status["errors"])
