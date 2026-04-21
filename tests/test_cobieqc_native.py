@@ -295,3 +295,49 @@ def test_saxon_missing_jar_path_fails_with_named_env_var(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="COBIEQC_SAXON_JAR_PATH"):
         _resolve_saxon_command()
+
+
+def test_native_pipeline_logs_cobie_and_svrl_diagnostics(monkeypatch, tmp_path):
+    workbook = tmp_path / "input.xlsx"
+    resources = tmp_path / "xsl_xml"
+    job_dir = tmp_path / "job"
+    _make_sample_workbook(workbook)
+    resources.mkdir(parents=True, exist_ok=True)
+    _write_resources(resources)
+
+    monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "lxml")
+    result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
+
+    assert result.ok
+    assert "generated_cobie_xml_diagnostics root_element=COBieWorkbook" in result.stdout
+    assert "generated_cobie_xml_entity_counts" in result.stdout
+    assert "svrl_diagnostics fired_rules=0" in result.stdout
+    assert any("rule contexts likely did not match" in warning for warning in result.summary["warnings"])
+
+
+def test_native_pipeline_compares_against_reference_xml(monkeypatch, tmp_path):
+    workbook = tmp_path / "input.xlsx"
+    resources = tmp_path / "xsl_xml"
+    job_dir = tmp_path / "job"
+    reference_xml = tmp_path / "legacy.xml"
+    _make_sample_workbook(workbook)
+    _write_resources(resources)
+    reference_xml.write_text(
+        """<?xml version='1.0'?>
+<COBie xmlns="urn:example:cobie">
+  <Facilities>
+    <Facility/>
+  </Facilities>
+</COBie>
+""",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "lxml")
+    monkeypatch.setenv("COBIEQC_REFERENCE_XML_PATH", str(reference_xml))
+    result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
+
+    assert result.ok
+    assert "cobie_xml_comparison_summary" in result.stdout
+    assert f"reference_path={reference_xml.resolve()}" in result.stdout
+    assert "cobie_xml_comparison_paths" in result.stdout
