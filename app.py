@@ -56,7 +56,8 @@ from cobieqc_service.runner import get_cobieqc_runtime_diagnostics, get_cobieqc_
 from cobieqc_service.security import sanitize_filename as sanitize_upload_filename
 from cobieqc_service.security import validate_upload
 from ifc_qa_service import REGISTRY as IFC_QA_V2_REGISTRY
-from ifc_qa_service import start_job as start_ifc_qa_v2_job
+from ifc_qa_service import read_session_summary as read_ifc_qa_session_summary
+from ifc_qa_service import start_session_job as start_ifc_qa_session_job
 from backend.ifc_qa.config_loader import (
     REQUIRED_TOP_LEVEL_KEYS,
     build_config_indexes,
@@ -6038,6 +6039,7 @@ def _public_ifc_qa_config(config: Dict[str, Any]) -> Dict[str, Any]:
 @app.post("/api/ifc-qa/run")
 async def ifc_qa_run(
     files: List[UploadFile] = File(...),
+    session_id: Optional[str] = Form(None),
     options_json: Optional[str] = Form(None),
     config_override_json: Optional[str] = Form(None),
 ):
@@ -6077,12 +6079,55 @@ async def ifc_qa_run(
             cfg = merge_config_override(cfg, override)
             cfg["_indexes"] = build_config_indexes(cfg)
 
-    job_id = start_ifc_qa_v2_job(file_records, options, cfg)
+    active_session_id = session_id or SESSION_STORE.create()
+    session_root = Path(SESSION_STORE.ensure(active_session_id)) / "ifc_qa_session"
+    session_root.mkdir(parents=True, exist_ok=True)
+    job_id = start_ifc_qa_session_job(session_root, active_session_id, file_records, options, cfg, mode="replace")
     return {
         "success": True,
         "job_id": job_id,
+        "session_id": active_session_id,
         "files": [{"name": name, "path": path} for name, path in file_records],
     }
+
+
+@app.post("/api/ifc-qa/add-to-zip")
+async def ifc_qa_add_to_zip(
+    files: List[UploadFile] = File(...),
+    session_id: str = Form(...),
+    options_json: Optional[str] = Form(None),
+    config_override_json: Optional[str] = Form(None),
+):
+    if has_active_ifc_qa_job():
+        raise HTTPException(status_code=429, detail="An IFC QA job is already running on this replica. Please retry shortly.")
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one IFC file is required")
+    upload_dir = Path(tempfile.mkdtemp(prefix="ifc_qa_uploads_v2_"))
+    file_records: List[Tuple[str, str]] = []
+    for upload in files:
+        original_name = upload.filename or "upload.ifc"
+        dest = upload_dir / sanitize_filename(original_name)
+        with open(dest, "wb") as handle:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+        enforce_upload_limits(str(dest), endpoint="/api/ifc-qa/add-to-zip")
+        file_records.append((original_name, str(dest)))
+
+    options: Dict[str, Any] = json.loads(options_json) if options_json else {}
+    options["max_workers"] = 1
+    cfg = load_ifc_qa_default_config()
+    if config_override_json:
+        override = json.loads(config_override_json)
+        if isinstance(override, dict):
+            cfg = merge_config_override(cfg, override)
+            cfg["_indexes"] = build_config_indexes(cfg)
+    session_root = Path(SESSION_STORE.ensure(session_id)) / "ifc_qa_session"
+    session_root.mkdir(parents=True, exist_ok=True)
+    job_id = start_ifc_qa_session_job(session_root, session_id, file_records, options, cfg, mode="append")
+    return {"success": True, "job_id": job_id, "session_id": session_id, "files": [{"name": name} for name, _ in file_records]}
 
 
 @app.get("/api/ifc-qa/status/{job_id}")
@@ -6101,21 +6146,29 @@ def ifc_qa_status(job_id: str):
         "per_file_percent": job.get("per_file_percent", {}),
         "per_file_stage": job.get("per_file_stage", {}),
         "processed_counts": job.get("processed_counts", {}),
+        "manifest_summary": job.get("manifest_summary", {}),
+        "session_id": job.get("session_id"),
     }
 
 
-@app.get("/api/ifc-qa/result/{job_id}")
-def ifc_qa_result(job_id: str):
-    job = IFC_QA_V2_REGISTRY.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    result_path = job.get("result_path")
-    if not result_path:
+@app.get("/api/ifc-qa/session/{session_id}/summary")
+def ifc_qa_session_summary(session_id: str):
+    session_root = Path(SESSION_STORE.ensure(session_id)) / "ifc_qa_session"
+    return read_ifc_qa_session_summary(session_root, session_id)
+
+
+@app.get("/api/ifc-qa/result/{ref_id}")
+def ifc_qa_result(ref_id: str):
+    job = IFC_QA_V2_REGISTRY.get(ref_id)
+    if job and job.get("result_path"):
+        path = Path(job.get("result_path"))
+        if path.exists():
+            return FileResponse(path, media_type="application/zip", filename="IFC Output.zip")
+    session_root = Path(SESSION_STORE.ensure(ref_id)) / "ifc_qa_session"
+    zip_path = session_root / "IFC Output.zip"
+    if not zip_path.exists():
         raise HTTPException(status_code=404, detail="Result not ready")
-    path = Path(result_path)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Result file not found")
-    return FileResponse(path, media_type="application/zip", filename="IFC Output.zip")
+    return FileResponse(zip_path, media_type="application/zip", filename="IFC Output.zip")
 
 
 @app.get("/api/ifc-qa/config")

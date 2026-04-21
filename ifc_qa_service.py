@@ -132,7 +132,7 @@ class IfcQaRegistry:
         self.lock = threading.Lock()
         self.ttl_seconds = ttl_hours * 3600
 
-    def create(self) -> str:
+    def create(self, **metadata: Any) -> str:
         with self.lock:
             job_id = uuid.uuid4().hex
             self.jobs[job_id] = {
@@ -146,6 +146,8 @@ class IfcQaRegistry:
                 "per_file_stage": {},
                 "per_file_percent": {},
                 "processed_counts": {},
+                "session_id": metadata.get("session_id"),
+                "manifest_summary": {},
             }
             return job_id
 
@@ -196,6 +198,33 @@ class IfcQaRegistry:
                     "currentStep": stage,
                 }
             )
+
+    def patch_file_state(self, job_id: str, source_file: str, **updates: Any) -> None:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                return
+            files = list(job.get("files", []))
+            changed = False
+            for item in files:
+                if item.get("source_file") == source_file or item.get("name") == source_file:
+                    item.update(updates)
+                    item["name"] = source_file
+                    item["source_file"] = source_file
+                    changed = True
+                    break
+            if changed:
+                totals = [float(f.get("overall_percent", f.get("percent", 0.0)) or 0.0) for f in files]
+                overall = (sum(totals) / len(totals)) if totals else 0.0
+                job.update(
+                    {
+                        "files": files,
+                        "overall_percent": round(overall, 2),
+                        "percent": int(round(overall)),
+                        "currentFile": source_file,
+                        "currentStep": updates.get("stage", job.get("currentStep", "")),
+                    }
+                )
 
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
         self.cleanup()
@@ -841,6 +870,170 @@ def _write_csv(path: Path, header: List[str], rows: List[List[Any]]) -> None:
             w.writerow([_str(x) for x in r])
 
 
+def _session_manifest_path(session_root: Path) -> Path:
+    return session_root / "manifest.json"
+
+
+def _load_manifest(session_root: Path, session_id: str) -> Dict[str, Any]:
+    path = _session_manifest_path(session_root)
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    now = dt.datetime.utcnow().isoformat() + "Z"
+    return {"session_id": session_id, "created_at": now, "updated_at": now, "processed_files": []}
+
+
+def _save_manifest(session_root: Path, manifest: Dict[str, Any]) -> None:
+    manifest["updated_at"] = dt.datetime.utcnow().isoformat() + "Z"
+    path = _session_manifest_path(session_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+
+
+def _remove_existing_outputs(out_root: Path, source_file: str) -> None:
+    patterns = [
+        f"IFC PROJECT - {source_file}.csv",
+        f"IFC OBJECT TYPE - {source_file}.csv",
+        f"IFC PROPERTIES - {source_file}.csv",
+        f"IFC PSET TEMPLATE - {source_file}.csv",
+        f"IFC CLASSIFICATION - {source_file}.csv",
+        f"IFC SPATIAL - {source_file}.csv",
+        f"IFC SYSTEM - {source_file}.csv",
+    ]
+    for pattern in patterns:
+        for path in out_root.rglob(pattern):
+            path.unlink(missing_ok=True)
+
+
+def _collect_output_paths(out_root: Path, source_file: str) -> Dict[str, str]:
+    return {
+        "classification": (out_root / "IFC Classification" / f"IFC CLASSIFICATION - {source_file}.csv").as_posix(),
+        "object_type": (out_root / "IFC Object Type" / f"IFC OBJECT TYPE - {source_file}.csv").as_posix(),
+        "project": (out_root / "IFC Project" / f"IFC PROJECT - {source_file}.csv").as_posix(),
+        "properties": (out_root / "IFC Properties" / f"IFC PROPERTIES - {source_file}.csv").as_posix(),
+        "pset_template": (out_root / "IFC Pset Template" / f"IFC PSET TEMPLATE - {source_file}.csv").as_posix(),
+        "spatial": (out_root / "IFC Spatial Structure" / f"IFC SPATIAL - {source_file}.csv").as_posix(),
+        "system": (out_root / "IFC System" / f"IFC SYSTEM - {source_file}.csv").as_posix(),
+    }
+
+
+def _rebuild_session_zip(session_root: Path, out_root: Path) -> Path:
+    zip_path = session_root / "IFC Output.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for p in out_root.rglob("*.csv"):
+            zf.write(p, p.relative_to(session_root).as_posix())
+    return zip_path
+
+
+def run_session_job(
+    job_id: str,
+    session_root: Path,
+    session_id: str,
+    file_records: List[Tuple[str, str]],
+    options: Dict[str, Any],
+    config: Dict[str, Any],
+    mode: str = "append",
+) -> None:
+    out_root = session_root / "IFC Output"
+    for d in BASE_OUTPUT:
+        (out_root / d).mkdir(parents=True, exist_ok=True)
+    include = options.get("selected_sheets", {
+        "model": True,
+        "project": True,
+        "object": True,
+        "properties": True,
+        "classification": True,
+        "spatial": True,
+        "system": True,
+        "pset_template": True,
+    })
+    manifest = _load_manifest(session_root, session_id)
+    if mode == "replace":
+        manifest["processed_files"] = []
+        shutil.rmtree(out_root, ignore_errors=True)
+        for d in BASE_OUTPUT:
+            (out_root / d).mkdir(parents=True, exist_ok=True)
+    existing_names = {entry.get("source_file", "") for entry in manifest.get("processed_files", [])}
+    now = dt.datetime.utcnow().isoformat() + "Z"
+    files_state = []
+    for original_name, _ in file_records:
+        source_file = Path(original_name).name
+        duplicate = source_file in existing_names
+        files_state.append(
+            {
+                "name": source_file,
+                "source_file": source_file,
+                "status": "uploaded",
+                "upload_percent": 100,
+                "process_percent": 0,
+                "overall_percent": 50,
+                "stage": "uploaded",
+                "message": "Uploaded, waiting to process…" if not duplicate else "Duplicate filename detected, replacing existing outputs.",
+                "added_at": now,
+                "duplicate": duplicate,
+            }
+        )
+    REGISTRY.update(job_id, status="running", currentStep="uploaded", files=files_state, session_id=session_id)
+    try:
+        for _, path in file_records:
+            source = Path(path).name
+            REGISTRY.patch_file_state(job_id, source, status="processing", stage="processing", message="Extracting properties…", process_percent=5, overall_percent=53)
+            if source in existing_names:
+                _remove_existing_outputs(out_root, source)
+                manifest["processed_files"] = [entry for entry in manifest.get("processed_files", []) if entry.get("source_file") != source]
+            model_row = _process_file(job_id, Path(path), out_root, config, include)
+            entry = {
+                "source_file": source,
+                "source_path": str(path),
+                "status": "complete",
+                "added_at": dt.datetime.utcnow().isoformat() + "Z",
+                "outputs": _collect_output_paths(out_root, source),
+                "model_table_row": {
+                    "Source_Path": model_row[0],
+                    "Source_File": model_row[1],
+                    "File_Codes": model_row[2],
+                    "Model_Schema_Status": model_row[3],
+                    "Date_Checked": model_row[4],
+                },
+            }
+            manifest.setdefault("processed_files", []).append(entry)
+            existing_names.add(source)
+            REGISTRY.patch_file_state(job_id, source, status="complete", stage="complete", message="Complete", process_percent=100, overall_percent=100, upload_percent=100)
+
+        model_rows = [
+            [
+                item.get("model_table_row", {}).get("Source_Path", ""),
+                item.get("model_table_row", {}).get("Source_File", ""),
+                item.get("model_table_row", {}).get("File_Codes", ""),
+                item.get("model_table_row", {}).get("Model_Schema_Status", ""),
+                item.get("model_table_row", {}).get("Date_Checked", ""),
+            ]
+            for item in sorted(manifest.get("processed_files", []), key=lambda row: row.get("source_file", ""))
+        ]
+        _write_csv(out_root / "IFC Models" / "IFC MODEL TABLE.csv", HEADERS["model"], model_rows)
+        zip_path = _rebuild_session_zip(session_root, out_root)
+        _save_manifest(session_root, manifest)
+        REGISTRY.update(
+            job_id,
+            status="complete",
+            percent=100,
+            overall_percent=100,
+            currentStep="Complete",
+            result_path=str(zip_path),
+            manifest_summary={
+                "session_id": session_id,
+                "model_count": len(manifest.get("processed_files", [])),
+                "updated_at": manifest.get("updated_at"),
+                "source_files": [x.get("source_file", "") for x in manifest.get("processed_files", [])],
+                "has_zip": zip_path.exists(),
+            },
+        )
+    except Exception as exc:
+        REGISTRY.append_log(job_id, f"Failed: {exc}")
+        REGISTRY.update(job_id, status="failed", currentStep="Failed", percent=100)
+
+
 def run_job(job_id: str, file_records: List[Tuple[str, str]], options: Dict[str, Any], config: Dict[str, Any]) -> None:
     workdir = Path(tempfile.mkdtemp(prefix="ifc_qa_v2_"))
     out_root = workdir / "IFC Output"
@@ -900,6 +1093,37 @@ def start_job(file_records: List[Tuple[str, str]], options: Dict[str, Any], conf
     th = threading.Thread(target=run_job, args=(job_id, file_records, options, config), daemon=True)
     th.start()
     return job_id
+
+
+def start_session_job(
+    session_root: Path,
+    session_id: str,
+    file_records: List[Tuple[str, str]],
+    options: Dict[str, Any],
+    config: Dict[str, Any],
+    mode: str,
+) -> str:
+    job_id = REGISTRY.create(session_id=session_id)
+    th = threading.Thread(
+        target=run_session_job,
+        args=(job_id, session_root, session_id, file_records, options, config, mode),
+        daemon=True,
+    )
+    th.start()
+    return job_id
+
+
+def read_session_summary(session_root: Path, session_id: str) -> Dict[str, Any]:
+    manifest = _load_manifest(session_root, session_id)
+    zip_path = session_root / "IFC Output.zip"
+    processed = manifest.get("processed_files", [])
+    return {
+        "session_id": session_id,
+        "model_count": len(processed),
+        "source_files": [entry.get("source_file", "") for entry in processed],
+        "updated_at": manifest.get("updated_at"),
+        "has_zip": zip_path.exists(),
+    }
 
 
 def default_config_from_dir(reference_dir: Path) -> Dict[str, Any]:
