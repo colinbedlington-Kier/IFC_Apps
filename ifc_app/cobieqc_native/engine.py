@@ -16,6 +16,18 @@ from xml.etree import ElementTree as ET
 LOGGER = logging.getLogger("ifc_app.cobieqc.native")
 APP_ROOT = Path(__file__).resolve().parents[2]
 COBIE_ENTITY_NAMES = ["Contact", "Facility", "Floor", "Space", "Zone", "Type", "Component"]
+KEY_FIELD_DIAGNOSTIC_FIELDS: Dict[str, List[str]] = {
+    "Facility": ["Name", "CreatedOn", "Currency"],
+    "Floor": ["Name", "CreatedOn"],
+    "Space": ["Name", "FloorName", "CreatedOn"],
+    "Type": ["Name", "CreatedBy", "Manufacturer", "WarrantyGuarantorParts", "WarrantyGuarantorLabor"],
+    "Component": ["Name", "TypeName", "Space", "CreatedBy"],
+}
+KEY_FIELD_SOURCE_ALIASES: Dict[str, List[str]] = {
+    "FloorName": ["FloorName", "Floor"],
+    "TypeName": ["TypeName", "Type"],
+    "Space": ["Space", "SpaceName"],
+}
 
 
 def _clean_tag(value: str) -> str:
@@ -143,6 +155,147 @@ def _inspect_cobie_xml(cobie_xml_path: Path) -> Dict[str, Any]:
         "created_on_samples": created_on_samples,
         "cross_reference": cross_ref,
     }
+
+
+def _find_child_text(parent: ET.Element, child_name: str) -> str:
+    needle = child_name.strip().lower()
+    for child in list(parent):
+        if _local_name(child.tag).strip().lower() == needle:
+            return (child.text or "").strip()
+    return ""
+
+
+def _sheet_records_by_row(workbook_path: Path) -> Dict[str, Dict[int, Dict[str, Any]]]:
+    wb = load_workbook(workbook_path, read_only=True, data_only=True)
+    records: Dict[str, Dict[int, Dict[str, Any]]] = {}
+    for sheet in wb.worksheets:
+        rows = list(sheet.iter_rows(values_only=True))
+        if not rows:
+            continue
+        headers: List[str] = []
+        for value in rows[0]:
+            text = "" if value is None else str(value).strip()
+            headers.append(text)
+        row_map: Dict[int, Dict[str, Any]] = {}
+        for row_idx, row in enumerate(rows[1:], start=1):
+            if all(cell in (None, "") for cell in row):
+                continue
+            row_map[row_idx] = {headers[col_idx]: row[col_idx] for col_idx in range(min(len(headers), len(row)))}
+        records[sheet.title] = row_map
+    return records
+
+
+def _resolve_source_column_name(source_row: Dict[str, Any], field_name: str) -> str:
+    candidates = KEY_FIELD_SOURCE_ALIASES.get(field_name, [field_name])
+    for candidate in candidates:
+        for column_name in source_row.keys():
+            if column_name.strip().lower() == candidate.strip().lower():
+                return column_name
+    return ""
+
+
+def _entity_nodes(root: ET.Element, entity_name: str) -> List[ET.Element]:
+    plural = f"{entity_name[:-1]}ies" if entity_name.endswith("y") else f"{entity_name}s"
+    return root.findall(f".//{{*}}{plural}/{{*}}{entity_name}")
+
+
+def _name_profile(entity_nodes: List[ET.Element]) -> Dict[str, Any]:
+    names: List[Tuple[str, str, str]] = []
+    blank_samples: List[str] = []
+    for node in entity_nodes:
+        name_value = _find_child_text(node, "Name")
+        row_ref = f"{node.attrib.get('sourceSheet', '')}#{node.attrib.get('rowNumber', '')}"
+        if not name_value and len(blank_samples) < 10:
+            blank_samples.append(row_ref)
+        names.append((name_value, row_ref, node.attrib.get("sourceSheet", "")))
+    duplicates = [name for name, count in Counter([name for name, _, _ in names if name]).items() if count > 1]
+    duplicate_samples: List[str] = []
+    if duplicates:
+        dup_set = set(duplicates)
+        for name, row_ref, _ in names:
+            if name in dup_set and len(duplicate_samples) < 10:
+                duplicate_samples.append(f"{name}@{row_ref}")
+    return {
+        "blank_name_count": sum(1 for name, _, _ in names if not name),
+        "duplicate_name_count": len(duplicates),
+        "blank_name_samples": blank_samples,
+        "duplicate_name_samples": duplicate_samples,
+    }
+
+
+def _cross_reference_diagnostics(root: ET.Element) -> Dict[str, Any]:
+    floor_names = {_find_child_text(node, "Name") for node in _entity_nodes(root, "Floor")}
+    type_names = {_find_child_text(node, "Name") for node in _entity_nodes(root, "Type")}
+    space_names = {_find_child_text(node, "Name") for node in _entity_nodes(root, "Space")}
+    contact_names = {_find_child_text(node, "Name") for node in _entity_nodes(root, "Contact")}
+    floor_names.discard("")
+    type_names.discard("")
+    space_names.discard("")
+    contact_names.discard("")
+
+    def _collect_unresolved(nodes: List[ET.Element], field_name: str, valid_values: set[str]) -> Dict[str, Any]:
+        unresolved: List[str] = []
+        for node in nodes:
+            value = _find_child_text(node, field_name)
+            if value and value in valid_values:
+                continue
+            if not value:
+                unresolved.append(f"(blank)@{node.attrib.get('sourceSheet', '')}#{node.attrib.get('rowNumber', '')}")
+            else:
+                unresolved.append(f"{value}@{node.attrib.get('sourceSheet', '')}#{node.attrib.get('rowNumber', '')}")
+        return {"count": len(unresolved), "samples": unresolved[:10]}
+
+    created_by_unresolved: List[str] = []
+    for entity in ("Facility", "Floor", "Space", "Type", "Component", "Zone"):
+        for node in _entity_nodes(root, entity):
+            created_by = _find_child_text(node, "CreatedBy")
+            if created_by and created_by in contact_names:
+                continue
+            created_by_unresolved.append(
+                f"{created_by or '(blank)'}@{node.attrib.get('sourceSheet', '')}#{node.attrib.get('rowNumber', '')}"
+            )
+
+    return {
+        "space_floor_name": _collect_unresolved(_entity_nodes(root, "Space"), "FloorName", floor_names),
+        "component_type_name": _collect_unresolved(_entity_nodes(root, "Component"), "TypeName", type_names),
+        "component_space": _collect_unresolved(_entity_nodes(root, "Component"), "Space", space_names),
+        "created_by": {"count": len(created_by_unresolved), "samples": created_by_unresolved[:10]},
+    }
+
+
+def _build_key_field_diagnostics(workbook_path: Path, cobie_xml_path: Path) -> Dict[str, Any]:
+    root = ET.parse(str(cobie_xml_path)).getroot()
+    source_rows = _sheet_records_by_row(workbook_path)
+    entity_diagnostics: Dict[str, Any] = {}
+    for entity, fields in KEY_FIELD_DIAGNOSTIC_FIELDS.items():
+        samples: List[Dict[str, Any]] = []
+        for node in _entity_nodes(root, entity)[:10]:
+            source_sheet = str(node.attrib.get("sourceSheet", ""))
+            row_number = int(str(node.attrib.get("rowNumber", "0") or "0"))
+            source_row = source_rows.get(source_sheet, {}).get(row_number, {})
+            field_values: Dict[str, Dict[str, Any]] = {}
+            for field in fields:
+                xml_value = _find_child_text(node, field)
+                source_column = _resolve_source_column_name(source_row, field)
+                source_value = source_row.get(source_column) if source_column else None
+                field_values[field] = {
+                    "xml_value": xml_value,
+                    "source_column": source_column or "(missing)",
+                    "source_value": "" if source_value is None else str(source_value).strip(),
+                }
+            samples.append(
+                {
+                    "source_sheet": source_sheet or "(unknown)",
+                    "source_row_number": row_number,
+                    "fields": field_values,
+                }
+            )
+        entity_diagnostics[entity] = {
+            "sample_count": len(samples),
+            "samples": samples,
+            **_name_profile(_entity_nodes(root, entity)),
+        }
+    return {"entities": entity_diagnostics, "cross_references": _cross_reference_diagnostics(root)}
 
 
 def _cross_reference_created_by(root: ET.Element) -> Dict[str, Any]:
@@ -1069,6 +1222,46 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
             "generated_cross_reference_unmatched_samples "
             f"samples={','.join(cross_ref['unmatched_samples']) or '(none)'}"
         )
+        key_field_diag = _build_key_field_diagnostics(input_path, cobie_xml_path)
+        for entity_name in KEY_FIELD_DIAGNOSTIC_FIELDS:
+            profile = key_field_diag["entities"].get(entity_name, {})
+            logs.append(
+                "key_field_name_diagnostics "
+                f"entity={entity_name} "
+                f"blank_name_count={profile.get('blank_name_count', 0)} "
+                f"duplicate_name_count={profile.get('duplicate_name_count', 0)} "
+                f"blank_name_samples={','.join(profile.get('blank_name_samples', [])) or '(none)'} "
+                f"duplicate_name_samples={','.join(profile.get('duplicate_name_samples', [])) or '(none)'}"
+            )
+            for sample_idx, sample in enumerate(profile.get("samples", []), start=1):
+                field_chunks = []
+                for field_name, field_data in sample.get("fields", {}).items():
+                    field_chunks.append(
+                        f"{field_name}[xml={field_data.get('xml_value', '')}|source_col={field_data.get('source_column', '')}|source={field_data.get('source_value', '')}]"
+                    )
+                logs.append(
+                    "key_field_sample "
+                    f"entity={entity_name} "
+                    f"sample={sample_idx} "
+                    f"source_sheet={sample.get('source_sheet', '(unknown)')} "
+                    f"source_row={sample.get('source_row_number', 0)} "
+                    f"values={';'.join(field_chunks) or '(none)'}"
+                )
+        cross_diag = key_field_diag["cross_references"]
+        logs.append(
+            "cross_reference_diagnostics "
+            f"space_floor_unresolved={cross_diag['space_floor_name']['count']} "
+            f"component_type_unresolved={cross_diag['component_type_name']['count']} "
+            f"component_space_unresolved={cross_diag['component_space']['count']} "
+            f"created_by_unresolved={cross_diag['created_by']['count']}"
+        )
+        logs.append(
+            "cross_reference_samples "
+            f"space_floor={','.join(cross_diag['space_floor_name']['samples']) or '(none)'} "
+            f"component_type={','.join(cross_diag['component_type_name']['samples']) or '(none)'} "
+            f"component_space={','.join(cross_diag['component_space']['samples']) or '(none)'} "
+            f"created_by={','.join(cross_diag['created_by']['samples']) or '(none)'}"
+        )
         workbook_style = cobie_diagnostics["root_element_name"] == "COBieWorkbook" or any(
             child == "Sheet" for child in cobie_diagnostics["first_level_children"]
         )
@@ -1198,6 +1391,7 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
             "root_element_name": cobie_diagnostics["root_element_name"],
             "root_namespace": cobie_diagnostics["root_namespace"],
             "entity_counts": cobie_diagnostics["entity_counts"],
+            "key_field_diagnostics": key_field_diag,
         }
 
         renderer = SvrlHtmlRenderer(resources_dir=resources_dir)
