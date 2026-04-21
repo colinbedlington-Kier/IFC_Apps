@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from cobieqc_service import bootstrap
+import zipfile
 
 REQUIRED_FILES = [
     "SpaceReport.css",
@@ -18,6 +19,12 @@ def _write_required_resources(directory: Path) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     for name in REQUIRED_FILES:
         (directory / name).write_text("x", encoding="utf-8")
+
+
+def _write_valid_jar(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
 
 
 def test_parse_google_drive_file_id():
@@ -42,7 +49,7 @@ def test_bootstrap_skips_when_assets_already_exist(monkeypatch, tmp_path):
     jar = root / "CobieQcReporter.jar"
     resources = root / "xsl_xml"
     _write_required_resources(resources)
-    jar.write_bytes(b"jar")
+    _write_valid_jar(jar)
 
     monkeypatch.setenv("COBIEQC_DATA_DIR", str(root))
     monkeypatch.setenv("COBIEQC_JAR_PATH", str(jar))
@@ -74,17 +81,15 @@ def test_bootstrap_installs_jar_and_resources_from_json_mapping(monkeypatch, tmp
     mapping = {name: f"https://example.test/{name}" for name in REQUIRED_FILES}
     monkeypatch.setenv("COBIEQC_XML_FILE_URLS_JSON", __import__("json").dumps(mapping))
 
-    jar_bytes = b"jar-binary"
-
     def _mock_download(url, suffix, _purpose):
         if "19wRbk" in url:
             target = tmp_path / f"download{suffix}"
-            target.write_bytes(jar_bytes)
-            return target, "application/octet-stream"
+            _write_valid_jar(target)
+            return bootstrap.DownloadResult(path=target, content_type="application/java-archive", content_length="", http_status="200")
         filename = url.split("/")[-1]
         target = tmp_path / f"resource-{filename}"
         target.write_text(f"resource:{filename}", encoding="utf-8")
-        return target, "application/octet-stream"
+        return bootstrap.DownloadResult(path=target, content_type="application/octet-stream", content_length="", http_status="200")
 
     monkeypatch.setattr(bootstrap, "_download_to_temp", _mock_download)
 
@@ -116,7 +121,7 @@ def test_bootstrap_uses_preferred_data_resources_without_sync(monkeypatch, tmp_p
     root = tmp_path / "cobie"
     preferred = root / "xsl_xml"
     _write_required_resources(preferred)
-    (root / "CobieQcReporter.jar").write_bytes(b"jar")
+    _write_valid_jar(root / "CobieQcReporter.jar")
 
     monkeypatch.setenv("COBIEQC_DATA_DIR", str(root))
     monkeypatch.setenv("COBIEQC_JAR_PATH", str(root / "CobieQcReporter.jar"))
@@ -144,7 +149,7 @@ def test_bootstrap_falls_back_to_vendor_resource_dir(monkeypatch, tmp_path):
     root.mkdir(parents=True)
     fallback = tmp_path / "vendor" / "cobieqc" / "xsl_xml"
     _write_required_resources(fallback)
-    (root / "CobieQcReporter.jar").write_bytes(b"jar")
+    _write_valid_jar(root / "CobieQcReporter.jar")
 
     monkeypatch.setenv("COBIEQC_DATA_DIR", str(root))
     monkeypatch.setenv("COBIEQC_JAR_PATH", str(root / "CobieQcReporter.jar"))
@@ -171,7 +176,7 @@ def test_bootstrap_falls_back_to_vendor_resource_dir(monkeypatch, tmp_path):
 def test_google_drive_folder_source_is_not_treated_as_download(monkeypatch, tmp_path):
     root = tmp_path / "cobie"
     (root / "CobieQcReporter.jar").parent.mkdir(parents=True)
-    (root / "CobieQcReporter.jar").write_bytes(b"jar")
+    _write_valid_jar(root / "CobieQcReporter.jar")
 
     monkeypatch.setenv("COBIEQC_DATA_DIR", str(root))
     monkeypatch.setenv("COBIEQC_JAR_PATH", str(root / "CobieQcReporter.jar"))
@@ -191,7 +196,7 @@ def test_bootstrap_downloads_resource_files_from_json_map(monkeypatch, tmp_path)
     resource_dir = root / "xsl_xml"
     jar_path = root / "CobieQcReporter.jar"
     jar_path.parent.mkdir(parents=True, exist_ok=True)
-    jar_path.write_bytes(b"jar")
+    _write_valid_jar(jar_path)
 
     monkeypatch.setenv("COBIEQC_DATA_DIR", str(root))
     monkeypatch.setenv("COBIEQC_JAR_PATH", str(jar_path))
@@ -203,7 +208,7 @@ def test_bootstrap_downloads_resource_files_from_json_map(monkeypatch, tmp_path)
         filename = url.split("/")[-1]
         target = tmp_path / f"download-{filename}"
         target.write_text(f"downloaded:{filename}", encoding="utf-8")
-        return target, "application/octet-stream"
+        return bootstrap.DownloadResult(path=target, content_type="application/octet-stream", content_length="", http_status="200")
 
     monkeypatch.setattr(bootstrap, "_download_to_temp", _mock_download)
 
@@ -216,3 +221,53 @@ def test_bootstrap_downloads_resource_files_from_json_map(monkeypatch, tmp_path)
     assert status["missing_files"] == []
     for filename in REQUIRED_FILES:
         assert (resource_dir / filename).exists()
+
+
+def test_bootstrap_replaces_invalid_existing_jar(monkeypatch, tmp_path):
+    root = tmp_path / "cobie"
+    jar_path = root / "CobieQcReporter.jar"
+    resource_dir = root / "xsl_xml"
+    _write_required_resources(resource_dir)
+    jar_path.parent.mkdir(parents=True, exist_ok=True)
+    jar_path.write_text("<html>not a jar</html>", encoding="utf-8")
+
+    monkeypatch.setenv("COBIEQC_DATA_DIR", str(root))
+    monkeypatch.setenv("COBIEQC_JAR_PATH", str(jar_path))
+    monkeypatch.setenv("COBIEQC_RESOURCE_DIR", str(resource_dir))
+
+    def _mock_download(_url, suffix, _purpose):
+        target = tmp_path / f"replacement{suffix}"
+        _write_valid_jar(target)
+        return bootstrap.DownloadResult(path=target, content_type="application/java-archive", content_length="10", http_status="200")
+
+    monkeypatch.setattr(bootstrap, "_download_to_temp", _mock_download)
+    bootstrap.bootstrap_cobieqc_assets()
+    status = bootstrap.get_cobieqc_bootstrap_status()
+    assert status["enabled"] is True
+    assert status["jar_valid"] is True
+    assert status["jar_source"] == "downloaded_replacement"
+
+
+def test_bootstrap_force_jar_refresh(monkeypatch, tmp_path):
+    root = tmp_path / "cobie"
+    jar_path = root / "CobieQcReporter.jar"
+    resource_dir = root / "xsl_xml"
+    _write_required_resources(resource_dir)
+    _write_valid_jar(jar_path)
+    monkeypatch.setenv("COBIEQC_DATA_DIR", str(root))
+    monkeypatch.setenv("COBIEQC_JAR_PATH", str(jar_path))
+    monkeypatch.setenv("COBIEQC_RESOURCE_DIR", str(resource_dir))
+    monkeypatch.setenv("COBIEQC_FORCE_JAR_REFRESH", "true")
+    called = {"count": 0}
+
+    def _mock_download(_url, suffix, _purpose):
+        called["count"] += 1
+        target = tmp_path / f"forced{suffix}"
+        _write_valid_jar(target)
+        return bootstrap.DownloadResult(path=target, content_type="application/java-archive", content_length="10", http_status="200")
+
+    monkeypatch.setattr(bootstrap, "_download_to_temp", _mock_download)
+    bootstrap.bootstrap_cobieqc_assets()
+    status = bootstrap.get_cobieqc_bootstrap_status()
+    assert called["count"] == 1
+    assert status["enabled"] is True
