@@ -2,6 +2,7 @@ from pathlib import Path
 import zipfile
 
 from cobieqc_service import bootstrap
+import zipfile
 
 REQUIRED_FILES = [
     "SpaceReport.css",
@@ -90,7 +91,7 @@ def test_bootstrap_installs_jar_and_resources_from_json_mapping(monkeypatch, tmp
         filename = url.split("/")[-1]
         target = tmp_path / f"resource-{filename}"
         target.write_text(f"resource:{filename}", encoding="utf-8")
-        return target, "application/octet-stream"
+        return bootstrap.DownloadResult(path=target, content_type="application/octet-stream", content_length="", http_status="200")
 
     monkeypatch.setattr(bootstrap, "_download_to_temp", _mock_download)
 
@@ -209,7 +210,7 @@ def test_bootstrap_downloads_resource_files_from_json_map(monkeypatch, tmp_path)
         filename = url.split("/")[-1]
         target = tmp_path / f"download-{filename}"
         target.write_text(f"downloaded:{filename}", encoding="utf-8")
-        return target, "application/octet-stream"
+        return bootstrap.DownloadResult(path=target, content_type="application/octet-stream", content_length="", http_status="200")
 
     monkeypatch.setattr(bootstrap, "_download_to_temp", _mock_download)
 

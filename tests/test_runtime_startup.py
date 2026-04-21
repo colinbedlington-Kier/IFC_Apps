@@ -1,4 +1,5 @@
 from pathlib import Path
+import zipfile
 
 import app
 from cobieqc_service import runner
@@ -52,7 +53,8 @@ def test_cobieqc_runtime_uses_env_specified_paths(monkeypatch, tmp_path):
     jar_path = cobie_root / 'CobieQcReporter.jar'
     resource_dir = cobie_root / 'xsl_xml'
     resource_dir.mkdir(parents=True)
-    jar_path.write_bytes(b'jar-binary-placeholder')
+    with zipfile.ZipFile(jar_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
     for filename in REQUIRED_FILES:
         (resource_dir / filename).write_text('x', encoding='utf-8')
 
