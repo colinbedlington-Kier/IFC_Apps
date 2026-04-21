@@ -19,6 +19,11 @@ const qaState = {
   },
   warning: "",
   configLoaded: false,
+  fileQueue: [],
+  lastUpdated: "",
+  modelCount: 0,
+  hasZip: false,
+  sessionSourceFiles: [],
 };
 
 const DEFAULT_SHEETS = [
@@ -48,19 +53,30 @@ function normalizeConfig(raw) {
 
 async function ensureSession() {
   const existing = localStorage.getItem("ifc_session_id") || "";
+  const resp = await fetch("/api/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: existing }),
+  });
+  if (!resp.ok) throw new Error("session error");
+  const data = await resp.json();
+  qaState.sessionId = data.session_id || existing;
+  if (qaState.sessionId) localStorage.setItem("ifc_session_id", qaState.sessionId);
+}
+
+async function refreshSessionSummary() {
+  if (!qaState.sessionId) return;
   try {
-    const resp = await fetch("/api/session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: existing }),
-    });
-    if (!resp.ok) throw new Error("session error");
+    const resp = await fetch(`/api/ifc-qa/session/${qaState.sessionId}/summary`);
+    if (!resp.ok) return;
     const data = await resp.json();
-    qaState.sessionId = data.session_id || existing;
-    if (qaState.sessionId) localStorage.setItem("ifc_session_id", qaState.sessionId);
-  } catch (e) {
-    console.warn("IFC QA session unavailable", e);
-  }
+    qaState.modelCount = data.model_count || 0;
+    qaState.lastUpdated = data.updated_at || "";
+    qaState.hasZip = !!data.has_zip;
+    qaState.sessionSourceFiles = Array.isArray(data.source_files) ? data.source_files : [];
+  } catch (_) {}
+  renderSessionSummary();
+  renderActionButtons();
 }
 
 async function loadQaConfig() {
@@ -110,12 +126,14 @@ function extractorTemplate() {
     <div class="inline">
       <button class="btn secondary" id="qaConfigureBtn" type="button" ${disabledAttr}>Configure</button>
       <button class="btn" id="qaStartBtn" type="button" ${disabledAttr}>Start QA Extraction</button>
+      <button class="btn secondary" id="qaAddBtn" type="button" disabled>Add to ZIP</button>
       <button class="btn secondary" id="qaDownloadBtn" type="button" disabled>Download ZIP</button>
     </div>
 
+    <div id="qaSessionSummary" class="muted"></div>
+
     <div class="progress-track"><div id="qaProgressFill" class="progress-fill" style="width:0%"></div></div>
     <div id="qaProgressLabel" class="muted"></div>
-    <div id="qaPerFile" class="muted"></div>
     <textarea id="qaLog" class="log-box" rows="10" readonly></textarea>
   </div>
 
@@ -148,39 +166,52 @@ function formatBytes(bytes) {
   return `${size.toFixed(precision)} ${units[idx]}`;
 }
 
-function configTemplate() {
-  return `
-  ${warningBanner()}
-  <div class="stack">
-    <div class="section-title"><h3>Current IFC QA Config</h3></div>
-    <textarea id="qaConfigStandalone" rows="22" style="width:100%;font-family:monospace">${JSON.stringify(qaState.qaConfig, null, 2)}</textarea>
-    <div class="inline">
-      <button class="btn secondary" id="qaConfigExportStandalone" type="button">Export JSON</button>
-    </div>
-  </div>`;
+function statusLabel(status) {
+  return ({ queued: "Queued", uploading: "Uploading", uploaded: "Uploaded", processing: "Processing", complete: "Complete", failed: "Failed" }[status] || "Queued");
 }
 
-function dashboardTemplate() {
-  return `
-  ${warningBanner()}
-  <div class="stack">
-    <div class="section-title"><h3>IFC QA Dashboard</h3></div>
-    <p class="muted">Run an extraction from the extractor page to populate progress and downloadable results.</p>
-    <div id="qaDashboardStatus" class="card">No active job.</div>
-  </div>`;
-}
-
-function renderSheetChecks() {
-  const wrap = qs("#qaSheetChecks");
+function renderFileQueue() {
+  const wrap = qs("#qaFileQueue");
   if (!wrap) return;
-  wrap.innerHTML = DEFAULT_SHEETS.map(([k, label]) => `<label><input type="checkbox" data-sheet="${k}" checked /> ${label}</label>`).join("");
+  if (!qaState.fileQueue.length) {
+    wrap.innerHTML = "<div class='muted'>No files selected.</div>";
+    return;
+  }
+  wrap.innerHTML = qaState.fileQueue.map((row) => {
+    const pct = Math.max(0, Math.min(100, row.overallPercent || 0));
+    const dup = row.duplicate ? `<div class='muted' style='color:#b45309'>Duplicate filename detected. Existing outputs will be replaced.</div>` : "";
+    const err = row.error ? `<div class='muted' style='color:#b91c1c'>${row.error}</div>` : "";
+    return `
+      <div class="card" style="padding:10px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;gap:10px"><strong>${row.name}</strong><span>${formatBytes(row.size)}</span></div>
+        <div class="muted" style="margin:4px 0">${statusLabel(row.status)} — ${row.stageText || "Queued"}</div>
+        <div class="progress-track" style="height:8px"><div class="progress-fill" style="width:${pct}%"></div></div>
+        ${dup}
+        ${err}
+      </div>`;
+  }).join("");
+}
+
+function renderSessionSummary() {
+  const el = qs("#qaSessionSummary");
+  if (!el) return;
+  const pending = qaState.fileQueue.filter((row) => ["queued", "uploading", "uploaded", "processing", "failed"].includes(row.status)).length;
+  el.textContent = `Session ZIP contains: ${qaState.modelCount} models | Last updated: ${qaState.lastUpdated || "-"} | Pending selected files: ${pending}`;
+}
+
+function renderActionButtons() {
+  const startBtn = qs("#qaStartBtn");
+  const addBtn = qs("#qaAddBtn");
+  const dlBtn = qs("#qaDownloadBtn");
+  const hasQueued = qaState.fileQueue.some((row) => row.status === "queued" || row.status === "failed");
+  if (startBtn) startBtn.disabled = qaState.isRunning || !hasQueued || qaState.modelCount > 0;
+  if (addBtn) addBtn.disabled = qaState.isRunning || !hasQueued || qaState.modelCount === 0;
+  if (dlBtn) dlBtn.disabled = qaState.isRunning || !qaState.hasZip;
 }
 
 function selectedSheets() {
   const out = {};
-  DEFAULT_SHEETS.forEach(([k]) => {
-    out[k] = !!qs(`[data-sheet="${k}"]`)?.checked;
-  });
+  DEFAULT_SHEETS.forEach(([k]) => { out[k] = !!qs(`[data-sheet="${k}"]`)?.checked; });
   return out;
 }
 
@@ -290,6 +321,7 @@ function startQaUpload(form, fileCount) {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/ifc-qa/run");
     xhr.upload.onprogress = (evt) => {
+      const total = evt.total || row.size || 1;
       const loaded = evt.loaded || 0;
       const total = evt.total || 0;
       const percent = total > 0 ? Math.round((loaded / total) * 100) : qaState.uploadPercent;
@@ -319,47 +351,64 @@ function startQaUpload(form, fileCount) {
         });
         return;
       }
-      resolve(payload);
+      resolve(xhr.response || {});
     };
     xhr.send(form);
   });
 }
 
-function openConfig() {
-  const txt = qs("#qaConfigText");
-  const modal = qs("#qaConfigModal");
-  if (!txt || !modal) return;
-  txt.value = JSON.stringify(qaState.qaConfig, null, 2);
-  modal.hidden = false;
+function updateRowFromStatus(row, statusFile) {
+  row.status = statusFile.status || row.status;
+  row.uploadPercent = statusFile.upload_percent ?? row.uploadPercent;
+  row.processPercent = statusFile.process_percent ?? row.processPercent;
+  row.overallPercent = statusFile.overall_percent ?? row.overallPercent;
+  row.stageText = statusFile.message || statusFile.stage || row.stageText;
 }
-function closeConfig() { const modal = qs("#qaConfigModal"); if (modal) modal.hidden = true; }
-function applyConfig() {
-  try {
-    qaState.qaConfig = JSON.parse(qs("#qaConfigText")?.value || "{}");
-    closeConfig();
-  } catch {
-    alert("Invalid JSON");
+
+async function pollJob(jobId, row) {
+  while (true) {
+    const resp = await fetch(`/api/ifc-qa/status/${jobId}`);
+    if (!resp.ok) throw new Error("status failed");
+    const data = await resp.json();
+    const statusFile = (data.files || []).find((f) => f.source_file === row.name || f.name === row.name);
+    if (statusFile) updateRowFromStatus(row, statusFile);
+    const fill = qs("#qaProgressFill");
+    const label = qs("#qaProgressLabel");
+    const log = qs("#qaLog");
+    if (fill) fill.style.width = `${data.overall_percent || 0}%`;
+    if (label) label.textContent = `${data.currentStep || ""} ${data.currentFile ? `(${data.currentFile})` : ""}`;
+    if (log) log.value = (data.logs || []).join("\n");
+    renderFileQueue();
+    if (data.status === "complete") return;
+    if (data.status === "failed") throw new Error("processing failed");
+    await new Promise((r) => setTimeout(r, 1000));
   }
 }
-function exportConfig(config = qaState.qaConfig) {
-  const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "ifc_qa_config.json";
-  a.click();
-  URL.revokeObjectURL(url);
-}
-function importConfig(ev) {
-  const file = ev.target.files?.[0];
-  if (!file) return;
-  file.text().then((txt) => {
+
+async function runQueue(mode) {
+  if (qaState.isRunning) return;
+  const queued = qaState.fileQueue.filter((row) => row.status === "queued" || row.status === "failed");
+  if (!queued.length) return;
+  qaState.isRunning = true;
+  renderActionButtons();
+  for (const row of queued) {
+    row.error = "";
     try {
-      qaState.qaConfig = JSON.parse(txt);
-      const editor = qs("#qaConfigText");
-      if (editor) editor.value = JSON.stringify(qaState.qaConfig, null, 2);
-    } catch {
-      alert("Invalid JSON");
+      const payload = await uploadSingleFile(row, mode);
+      qaState.activeJobId = payload.job_id || "";
+      qaState.sessionId = payload.session_id || qaState.sessionId;
+      row.status = "uploaded";
+      row.stageText = "Uploaded, waiting to process…";
+      row.overallPercent = Math.max(row.overallPercent, 50);
+      renderFileQueue();
+      await pollJob(qaState.activeJobId, row);
+      row.status = "complete";
+      row.stageText = "Complete";
+      row.overallPercent = 100;
+    } catch (err) {
+      row.status = "failed";
+      row.stageText = "Failed";
+      row.error = err instanceof Error ? err.message : "Failed";
     }
   });
 }
@@ -440,6 +489,8 @@ async function startRun() {
     qaState.isStartingRun = false;
     renderUploadProgress();
   }
+  qaState.isRunning = false;
+  renderActionButtons();
 }
 
 async function pollStatus(jobId) {
@@ -522,21 +573,22 @@ function bindExtractor() {
   qs("#qaConfigureBtn")?.addEventListener("click", openConfig);
   qs("#qaConfigClose")?.addEventListener("click", closeConfig);
   qs("#qaConfigApply")?.addEventListener("click", applyConfig);
-  qs("#qaConfigExport")?.addEventListener("click", () => exportConfig());
-  qs("#qaConfigImport")?.addEventListener("change", importConfig);
-  qs("#qaStartBtn")?.addEventListener("click", startRun);
-  qs("#qaDownloadBtn")?.addEventListener("click", downloadZip);
+  qs("#qaStartBtn")?.addEventListener("click", () => runQueue("run"));
+  qs("#qaAddBtn")?.addEventListener("click", () => runQueue("add"));
+  qs("#qaDownloadBtn")?.addEventListener("click", () => {
+    if (!qaState.sessionId) return;
+    const a = document.createElement("a");
+    a.href = `/api/ifc-qa/result/${qaState.sessionId}`;
+    a.click();
+  });
 }
 
-function bindConfigPage() {
-  qs("#qaConfigExportStandalone")?.addEventListener("click", () => {
-    const text = qs("#qaConfigStandalone")?.value || "{}";
-    try {
-      exportConfig(JSON.parse(text));
-    } catch {
-      alert("Invalid JSON in viewer");
-    }
-  });
+function configTemplate() {
+  return `<div class="stack"><div class="section-title"><h3>Current IFC QA Config</h3></div>
+  <textarea id="qaConfigStandalone" rows="22" style="width:100%;font-family:monospace">${JSON.stringify(qaState.qaConfig, null, 2)}</textarea></div>`;
+}
+function dashboardTemplate() {
+  return `<div class="stack"><div class="section-title"><h3>IFC QA Dashboard</h3></div><div id="qaDashboardStatus" class="card">No active job.</div></div>`;
 }
 
 async function init() {
@@ -544,20 +596,16 @@ async function init() {
   if (!root) return;
   const page = root.dataset.qaPage || "extractor";
 
-  if (page === "extractor") root.innerHTML = extractorTemplate();
-  if (page === "config") root.innerHTML = configTemplate();
-  if (page === "dashboard") root.innerHTML = dashboardTemplate();
-
   await ensureSession();
   await loadQaConfig();
 
   if (page === "extractor") {
     root.innerHTML = extractorTemplate();
     bindExtractor();
+    await refreshSessionSummary();
   } else if (page === "config") {
     root.innerHTML = configTemplate();
-    bindConfigPage();
-  } else if (page === "dashboard") {
+  } else {
     root.innerHTML = dashboardTemplate();
     if (qaState.activeJobId) pollStatus(qaState.activeJobId);
   }
