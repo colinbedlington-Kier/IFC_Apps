@@ -438,7 +438,9 @@ async function runQueue(mode) {
       row.stageText = "Failed";
       row.error = err instanceof Error ? err.message : "Failed";
     }
-  });
+  }
+  qaState.isRunning = false;
+  renderActionButtons();
 }
 
 async function startRun() {
@@ -620,15 +622,37 @@ function dashboardTemplate() {
 }
 
 async function init() {
+  console.info("IFC QA bundle loaded");
+  if (!window.location.pathname.startsWith("/ifc-qa/")) return;
+
   const root = qs("#ifc-qa-root");
-  if (!root) return;
+  if (!root) {
+    console.error("IFC QA mount failed: #ifc-qa-root not found");
+    const errorBox = document.createElement("div");
+    errorBox.style.margin = "12px";
+    errorBox.style.padding = "10px 12px";
+    errorBox.style.background = "#fee2e2";
+    errorBox.style.border = "1px solid #ef4444";
+    errorBox.style.borderRadius = "8px";
+    errorBox.style.color = "#991b1b";
+    errorBox.textContent = "IFC QA mount failed: #ifc-qa-root not found";
+    document.body.appendChild(errorBox);
+    return;
+  }
+  console.info("IFC QA mount target found");
   const page = root.dataset.qaPage || "extractor";
 
-  await ensureSession();
+  try {
+    await ensureSession();
+  } catch (err) {
+    console.error("IFC QA session bootstrap failed", err);
+    qaState.warning = "Failed to bootstrap IFC QA session. Reload and try again.";
+  }
   await loadQaConfig();
 
   if (page === "extractor") {
     root.innerHTML = extractorTemplate();
+    root.insertAdjacentHTML("afterbegin", `<div class="muted" style="margin-bottom:8px">IFC QA UI mounted</div>`);
     bindExtractor();
     await refreshSessionSummary();
   } else if (page === "config") {
@@ -637,6 +661,7 @@ async function init() {
     root.innerHTML = dashboardTemplate();
     if (qaState.activeJobId) pollStatus(qaState.activeJobId);
   }
+  console.info("IFC QA app mounted");
 }
 
 document.addEventListener("DOMContentLoaded", init);
