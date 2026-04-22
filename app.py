@@ -57,7 +57,7 @@ from cobieqc_service.security import sanitize_filename as sanitize_upload_filena
 from cobieqc_service.security import validate_upload
 from ifc_qa_service import REGISTRY as IFC_QA_V2_REGISTRY
 from ifc_qa_service import read_session_summary as read_ifc_qa_session_summary
-from ifc_qa_service import start_session_job as start_ifc_qa_session_job
+from ifc_app.ifc_qa.jobs import start_ifc_qa_session_job
 from backend.ifc_qa.config_loader import (
     REQUIRED_TOP_LEVEL_KEYS,
     build_config_indexes,
@@ -106,6 +106,17 @@ MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
 MAX_IFC_BYTES = int(os.getenv("MAX_IFC_BYTES", str(80 * 1024 * 1024)))
 MAX_EXCEL_BYTES = int(os.getenv("MAX_EXCEL_BYTES", str(25 * 1024 * 1024)))
 HEAVY_JOB_TIMEOUT_SECONDS = int(os.getenv("HEAVY_JOB_TIMEOUT_SECONDS", "900"))
+
+
+def start_ifc_qa_v2_job(file_records: List[Tuple[str, str]], options: Dict[str, Any], config: Dict[str, Any]) -> str:
+    if not callable(start_ifc_qa_session_job):
+        raise RuntimeError("start_ifc_qa_session_job is not callable")
+    session_id = options.get("session_id") if isinstance(options, dict) else None
+    if not session_id:
+        raise RuntimeError("Missing session_id for IFC QA v2 session job")
+    session_root = Path(SESSION_STORE.ensure(session_id)) / "ifc_qa_session"
+    session_root.mkdir(parents=True, exist_ok=True)
+    return start_ifc_qa_session_job(session_root, session_id, file_records, options, config, mode="replace")
 
 def utc_now() -> datetime.datetime:
     return datetime.datetime.now(UTC)
@@ -6102,7 +6113,22 @@ async def ifc_qa_run(
 
         selected_outputs = options.get("selected_sheets", {}) if isinstance(options, dict) else {}
         selected_output_keys = [key for key, enabled in selected_outputs.items() if enabled]
-        job_id = start_ifc_qa_v2_job(file_records, options, cfg)
+        runner = globals().get("start_ifc_qa_v2_job")
+        APP_LOGGER.info("ifc_qa_run_runner_selected runner=%s", getattr(runner, "__name__", str(runner)))
+        if not callable(runner):
+            detail = "No callable IFC QA job runner available for /api/ifc-qa/run"
+            APP_LOGGER.error("ifc_qa_run_rejected reason=job_runner_missing detail=%s", detail)
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "success": False,
+                    "error": "job_runner_missing",
+                    "detail": detail,
+                    "hint": "Check start_ifc_qa_v2_job import",
+                },
+            )
+
+        job_id = runner(file_records, options, cfg)
         session_id = options.get("session_id") if isinstance(options, dict) else None
         APP_LOGGER.info(
             "ifc_qa_run_started session_id=%s job_id=%s file_count=%s outputs=%s request_bytes=%s",
@@ -6129,12 +6155,14 @@ async def ifc_qa_run(
         )
     except Exception as exc:  # pragma: no cover - defensive path
         APP_LOGGER.exception("ifc_qa_run_rejected reason=unexpected_error detail=%s", exc)
+        error_code = "job_runner_missing" if "start_ifc_qa" in str(exc) else "ifc_qa_run_failed"
         return JSONResponse(
             status_code=500,
             content={
                 "success": False,
-                "error": "Failed to start IFC QA job",
+                "error": error_code,
                 "detail": str(exc),
+                "hint": "Check start_ifc_qa_v2_job import",
             },
         )
 

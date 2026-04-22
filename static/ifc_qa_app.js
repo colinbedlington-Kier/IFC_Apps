@@ -39,6 +39,31 @@ const DEFAULT_SHEETS = [
 
 const qs = (s) => document.querySelector(s);
 
+function showErrorToast(message) {
+  let toast = qs("#qaErrorToast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "qaErrorToast";
+    toast.style.position = "fixed";
+    toast.style.right = "16px";
+    toast.style.bottom = "16px";
+    toast.style.zIndex = "9999";
+    toast.style.background = "#b91c1c";
+    toast.style.color = "#fff";
+    toast.style.padding = "10px 12px";
+    toast.style.borderRadius = "8px";
+    toast.style.boxShadow = "0 8px 20px rgba(0,0,0,.25)";
+    toast.style.maxWidth = "420px";
+    toast.style.fontSize = "14px";
+    document.body.appendChild(toast);
+  }
+  toast.textContent = message || "IFC QA run failed.";
+  toast.hidden = false;
+  window.setTimeout(() => {
+    if (toast) toast.hidden = true;
+  }, 5000);
+}
+
 function normalizeConfig(raw) {
   if (!raw || typeof raw !== "object") return qaState.qaConfig;
   const config = raw.config && typeof raw.config === "object" ? raw.config : raw;
@@ -321,7 +346,6 @@ function startQaUpload(form, fileCount) {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/ifc-qa/run");
     xhr.upload.onprogress = (evt) => {
-      const total = evt.total || row.size || 1;
       const loaded = evt.loaded || 0;
       const total = evt.total || 0;
       const percent = total > 0 ? Math.round((loaded / total) * 100) : qaState.uploadPercent;
@@ -344,6 +368,10 @@ function startQaUpload(form, fileCount) {
       }
       console.info("IFC QA /run response", { status: xhr.status, payload });
       if (xhr.status < 200 || xhr.status >= 300) {
+        if (xhr.status >= 500) {
+          const hint = payload?.hint ? ` (${payload.hint})` : "";
+          showErrorToast(`IFC QA start failed: ${payload?.error || "server error"}${hint}`);
+        }
         reject({
           stage: "start",
           message: payload?.error || payload?.detail || `Request failed with status ${xhr.status}`,
