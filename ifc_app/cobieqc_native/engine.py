@@ -491,6 +491,7 @@ def _inspect_svrl(svrl_output_path: Path) -> Dict[str, Any]:
     return {
         "root_element_name": _local_name(root.tag),
         "root_namespace": _namespace_uri(root.tag) or "(none)",
+        "namespaces": _safe_iterparse_namespaces(svrl_output_path),
         "fired_rules": len(fired_rules),
         "failed_asserts": len(failed_asserts),
         "successful_reports": len(successful_reports),
@@ -504,6 +505,37 @@ def _inspect_svrl(svrl_output_path: Path) -> Dict[str, Any]:
         "affected_rows_sample": [key for key, _ in failed_assert_rows.most_common(10)],
         "failed_assert_samples": failed_assert_samples,
     }
+
+
+def _normalize_svrl_for_html_report(svrl_output_path: Path) -> Dict[str, int]:
+    root = ET.parse(str(svrl_output_path)).getroot()
+    changed = {"fired_rule_role_defaults": 0}
+    root_children = list(root)
+    for idx, node in enumerate(root_children):
+        if _local_name(node.tag) != "fired-rule":
+            continue
+        if str(node.attrib.get("role", "")).strip():
+            continue
+        has_failed_assert = False
+        has_successful_report = False
+        for trailing in root_children[idx + 1 :]:
+            trailing_name = _local_name(trailing.tag)
+            if trailing_name in {"fired-rule", "active-pattern"}:
+                break
+            if trailing_name == "failed-assert":
+                has_failed_assert = True
+            elif trailing_name == "successful-report":
+                has_successful_report = True
+        if has_failed_assert:
+            node.set("role", "WorksheetErrors")
+            changed["fired_rule_role_defaults"] += 1
+        elif has_successful_report:
+            node.set("role", "WorksheetCount")
+            changed["fired_rule_role_defaults"] += 1
+
+    if changed["fired_rule_role_defaults"] > 0:
+        svrl_output_path.write_bytes(ET.tostring(root, encoding="utf-8", xml_declaration=True))
+    return changed
 
 
 def _first_lines(path: Path, line_count: int = 50) -> List[str]:
@@ -587,6 +619,9 @@ def _inspect_svrl_html_xslt(xslt_path: Path, svrl_path: Path) -> Dict[str, Any]:
         "affected_row_xpaths": [],
         "checks_performed_xpaths": [],
         "xpath_evaluations": [],
+        "assumptions": [],
+        "svrl_root": "",
+        "svrl_namespaces": {},
     }
     if not xslt_path.exists():
         return details
@@ -603,6 +638,10 @@ def _inspect_svrl_html_xslt(xslt_path: Path, svrl_path: Path) -> Dict[str, Any]:
         details["error"] = f"parse failure: {exc}"
         return details
 
+    svrl_root = svrl_doc.getroot()
+    details["svrl_root"] = etree.QName(svrl_root.tag).localname if svrl_root is not None else "(missing)"
+    details["svrl_namespaces"] = {str(k or "(default)"): str(v) for k, v in (svrl_root.nsmap or {}).items()}
+
     expressions: List[str] = []
     for node in xslt_doc.xpath("//*"):
         for attr_name in ("select", "match"):
@@ -618,10 +657,24 @@ def _inspect_svrl_html_xslt(xslt_path: Path, svrl_path: Path) -> Dict[str, Any]:
     details["checks_performed_xpaths"] = [
         expr for expr in unique_expr if any(token in expr for token in ("fired-rule", "successful-report", "active-pattern"))
     ][:20]
+    if any("svrl:" in expr for expr in unique_expr):
+        details["assumptions"].append("expects_svrl_prefix")
+    if any("WorksheetErrors" in expr for expr in unique_expr):
+        details["assumptions"].append("expects_WorksheetErrors_role")
+    if any("WorksheetCount" in expr for expr in unique_expr):
+        details["assumptions"].append("expects_WorksheetCount_role")
+    if any("*:text/*:location" in expr or "svrl:text/" in expr for expr in unique_expr):
+        details["assumptions"].append("expects_location_below_text")
+    if any("sps:" in expr for expr in unique_expr):
+        details["assumptions"].append("expects_sps_functions")
 
+    xpath_ns = {k: v for k, v in (svrl_root.nsmap or {}).items() if k}
+    if "svrl" not in xpath_ns:
+        xpath_ns["svrl"] = "http://purl.oclc.org/dsdl/svrl"
+    xpath_ns["sps"] = "http://www.schematron-quickfix.com/validator/process"
     for expr in [*details["error_group_xpaths"], *details["affected_row_xpaths"], *details["checks_performed_xpaths"]]:
         try:
-            result = svrl_doc.xpath(expr)
+            result = svrl_doc.xpath(expr, namespaces=xpath_ns)
             details["xpath_evaluations"].append(
                 {"expression": expr, "result_count": len(result) if isinstance(result, list) else 1, "ok": True}
             )
@@ -1521,7 +1574,16 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
         logs.extend(schematron_logs)
 
         warnings = [*parse_warnings, *svrl_warnings]
+        normalization_changes = _normalize_svrl_for_html_report(svrl_xml_path)
+        if normalization_changes["fired_rule_role_defaults"] > 0:
+            logs.append(
+                "svrl_html_normalization "
+                f"fired_rule_role_defaults={normalization_changes['fired_rule_role_defaults']}"
+            )
         svrl_diagnostics = _inspect_svrl(svrl_xml_path)
+        svrl_first_20 = _first_lines(svrl_xml_path, line_count=20)
+        logs.append(f"svrl_first_20 path={svrl_xml_path} lines={' | '.join(svrl_first_20)}")
+        logs.append(f"svrl_namespace_map {svrl_diagnostics['namespaces']}")
         logs.append(
             "svrl_diagnostics "
             f"root_element={svrl_diagnostics['root_element_name']} "
@@ -1628,6 +1690,20 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
             )
             warnings.append(warning)
             logs.append(f"svrl_html_mismatch {warning}")
+            root_for_dump = ET.parse(str(svrl_xml_path)).getroot()
+            failed_nodes = root_for_dump.findall(".//{*}failed-assert")[:5]
+            fired_nodes = root_for_dump.findall(".//{*}fired-rule")[:5]
+            for idx, node in enumerate(failed_nodes, start=1):
+                logs.append(
+                    "svrl_integrity_failed_assert "
+                    f"index={idx} attrs={dict(node.attrib)} text={' '.join(''.join(node.itertext()).split())[:300]}"
+                )
+            for idx, node in enumerate(fired_nodes, start=1):
+                logs.append(f"svrl_integrity_fired_rule index={idx} attrs={dict(node.attrib)}")
+            logs.append(f"svrl_integrity_namespace_map {_safe_iterparse_namespaces(svrl_xml_path)}")
+            warnings.append("SVRL/HTML integrity check failed; replacing misleading HTML report with fallback diagnostic report.")
+            renderer._write_fallback_html(html_path, summary, warnings)
+            html_text = html_path.read_text(encoding='utf-8', errors='replace') if html_path.exists() else html_text
 
         html_xslt_path = None
         for candidate in (
@@ -1642,6 +1718,9 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
             logs.append(
                 "svrl_html_xslt_expectations "
                 f"path={xslt_diag['xslt_path']} "
+                f"svrl_root={xslt_diag.get('svrl_root', '(unknown)')} "
+                f"svrl_namespaces={xslt_diag.get('svrl_namespaces', {})} "
+                f"assumptions={';'.join(xslt_diag.get('assumptions', [])) or '(none)'} "
                 f"error_group_xpaths={';'.join(xslt_diag['error_group_xpaths']) or '(none)'} "
                 f"affected_row_xpaths={';'.join(xslt_diag['affected_row_xpaths']) or '(none)'} "
                 f"checks_performed_xpaths={';'.join(xslt_diag['checks_performed_xpaths']) or '(none)'}"
@@ -1659,6 +1738,26 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
                     )
             if xslt_diag.get("error"):
                 warnings.append(f"SVRL/HTML XPath diagnostic skipped: {xslt_diag['error']}")
+            worksheet_fired = 0
+            worksheet_grouped_failed = 0
+            try:
+                from lxml import etree
+
+                svrl_doc = etree.parse(str(svrl_xml_path))
+                ns = {"svrl": "http://purl.oclc.org/dsdl/svrl"}
+                worksheet_fired = len(svrl_doc.xpath("//svrl:fired-rule[@role='WorksheetErrors']", namespaces=ns))
+                worksheet_grouped_failed = len(
+                    svrl_doc.xpath(
+                        "//svrl:failed-assert[preceding-sibling::svrl:fired-rule[1]/@role='WorksheetErrors']",
+                        namespaces=ns,
+                    )
+                )
+            except Exception as exc:
+                warnings.append(f"WorksheetErrors SVRL probe failed: {exc}")
+            logs.append(
+                "svrl_worksheet_errors_probe "
+                f"fired_rules={worksheet_fired} grouped_failed_asserts={worksheet_grouped_failed}"
+            )
 
         if html_error:
             warnings.append(f"Schematron execution fallback used: html generation failed during SVRL-to-HTML transform: {html_error}")

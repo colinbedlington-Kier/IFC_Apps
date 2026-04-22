@@ -543,6 +543,78 @@ def test_svrl_failed_asserts_trigger_hard_warning_when_html_says_no_errors(monke
     assert "svrl_html_xslt_expectations" in result.stdout
 
 
+def test_svrl_html_normalization_assigns_worksheet_errors_role(monkeypatch, tmp_path):
+    pytest.importorskip("lxml")
+    workbook = tmp_path / "input.xlsx"
+    resources = tmp_path / "xsl_xml"
+    job_dir = tmp_path / "job"
+    _make_sample_workbook(workbook)
+    resources.mkdir(parents=True, exist_ok=True)
+
+    (resources / "COBieRules.sch").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<sch:schema xmlns:sch="http://purl.oclc.org/dsdl/schematron">
+  <sch:phase id="D"/>
+</sch:schema>""",
+        encoding="utf-8",
+    )
+    (resources / "iso_svrl_for_xslt2.xsl").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  xmlns:axsl="urn:test:axsl"
+  xmlns:svrl="http://purl.oclc.org/dsdl/svrl">
+  <xsl:namespace-alias stylesheet-prefix="axsl" result-prefix="xsl"/>
+  <xsl:param name="phase"/>
+  <xsl:template match="/">
+    <axsl:stylesheet version="1.0" xmlns:svrl="http://purl.oclc.org/dsdl/svrl">
+      <axsl:template match="/">
+        <svrl:schematron-output>
+          <svrl:fired-rule context="/COBie/Facilities/Facility"/>
+          <svrl:failed-assert id="ERR-001" location="/COBie/Facilities/Facility[1]">
+            <svrl:text>facility invalid</svrl:text>
+          </svrl:failed-assert>
+        </svrl:schematron-output>
+      </axsl:template>
+    </axsl:stylesheet>
+  </xsl:template>
+</xsl:stylesheet>""",
+        encoding="utf-8",
+    )
+    (resources / "COBieExcelTemplate.xml").write_text("<template/>", encoding="utf-8")
+    (resources / "COBieRules_Functions.xsl").write_text("<xsl:stylesheet version='1.0' xmlns:xsl='http://www.w3.org/1999/XSL/Transform'/>", encoding="utf-8")
+    (resources / "iso_schematron_skeleton_for_saxon.xsl").write_text("<!-- skeleton marker -->", encoding="utf-8")
+    (resources / "SpaceReport.css").write_text("body {}", encoding="utf-8")
+    (resources / "SVRL_HTML_altLocation.xslt").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  xmlns:svrl="http://purl.oclc.org/dsdl/svrl">
+  <xsl:template match="/">
+    <html><body>
+      <xsl:choose>
+        <xsl:when test="count(/svrl:schematron-output/svrl:failed-assert[preceding-sibling::svrl:fired-rule[1]/@role='WorksheetErrors']) &gt; 0">
+          Errors Present
+        </xsl:when>
+        <xsl:otherwise>No Errors</xsl:otherwise>
+      </xsl:choose>
+    </body></html>
+  </xsl:template>
+</xsl:stylesheet>""",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "lxml")
+    result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
+
+    html_text = (job_dir / "final_report.html").read_text(encoding="utf-8")
+    assert result.ok
+    assert "Errors Present" in html_text
+    assert "No Errors" not in html_text
+    assert "svrl_html_normalization fired_rule_role_defaults=1" in result.stdout
+    assert "svrl_worksheet_errors_probe fired_rules=1 grouped_failed_asserts=1" in result.stdout
+
+
 def test_svrl_diagnostic_mode_logs_phase_vs_final_svrl_preview(monkeypatch, tmp_path):
     pytest.importorskip("lxml")
     workbook = tmp_path / "input.xlsx"
