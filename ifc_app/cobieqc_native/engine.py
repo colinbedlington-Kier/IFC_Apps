@@ -507,6 +507,104 @@ def _inspect_svrl(svrl_output_path: Path) -> Dict[str, Any]:
     }
 
 
+def _collect_svrl_locations(node: ET.Element) -> List[str]:
+    locations: List[str] = []
+    attr_location = str(node.attrib.get("location", "")).strip()
+    if attr_location:
+        locations.append(attr_location)
+    for child in node.iter():
+        if child is node:
+            continue
+        if _local_name(child.tag).lower() == "location":
+            value = " ".join("".join(child.itertext()).split()).strip()
+            if value:
+                locations.append(value)
+    deduped: List[str] = []
+    for value in locations:
+        if value not in deduped:
+            deduped.append(value)
+    return deduped
+
+
+def _parse_svrl_report_data(svrl_path: Path) -> Dict[str, Any]:
+    root = ET.parse(str(svrl_path)).getroot()
+    active_patterns = root.findall(".//{*}active-pattern")
+    fired_rules = root.findall(".//{*}fired-rule")
+    failed_asserts = root.findall(".//{*}failed-assert")
+    successful_reports = root.findall(".//{*}successful-report")
+    diagnostics = root.findall(".//{*}diagnostic-reference")
+
+    first_failed_ids: List[str] = []
+    first_fired_rule_pairs: List[str] = []
+    first_locations: List[str] = []
+
+    worksheet_counts: Counter[str] = Counter()
+    rule_counts: Counter[str] = Counter()
+    location_counts: Counter[str] = Counter()
+    grouped_entries: List[Dict[str, Any]] = []
+
+    current_rule_id = "(none)"
+    current_role = "(none)"
+    current_context = "(none)"
+    for node in root.iter():
+        name = _local_name(node.tag)
+        if name == "fired-rule":
+            current_rule_id = str(node.attrib.get("id", "")).strip() or str(node.attrib.get("context", "")).strip() or "(none)"
+            current_role = str(node.attrib.get("role", "")).strip() or "(none)"
+            current_context = str(node.attrib.get("context", "")).strip() or "(none)"
+            if len(first_fired_rule_pairs) < 10:
+                first_fired_rule_pairs.append(f"{current_rule_id}|{current_role}")
+            continue
+        if name != "failed-assert":
+            continue
+
+        assert_id = str(node.attrib.get("id", "")).strip() or str(node.attrib.get("test", "")).strip() or "(none)"
+        if len(first_failed_ids) < 10:
+            first_failed_ids.append(assert_id)
+
+        text_value = " ".join("".join(node.itertext()).split()).strip()
+        locations = _collect_svrl_locations(node) or ["(none)"]
+        for location in locations:
+            if len(first_locations) < 10:
+                first_locations.append(location)
+
+        worksheet = current_role if current_role != "(none)" else "UnknownWorksheet"
+        context_tail = current_context.rsplit("/", 1)[-1] if "/" in current_context else current_context
+        entity = context_tail or "(none)"
+        worksheet_counts[worksheet] += 1
+        rule_counts[assert_id] += 1
+        for location in locations:
+            location_counts[location] += 1
+
+        grouped_entries.append(
+            {
+                "worksheet": worksheet,
+                "entity": entity,
+                "rule_id": assert_id,
+                "context": current_context,
+                "message": text_value or "(none)",
+                "locations": locations,
+            }
+        )
+
+    return {
+        "summary": {
+            "active_patterns": len(active_patterns),
+            "fired_rules": len(fired_rules),
+            "failed_asserts": len(failed_asserts),
+            "successful_reports": len(successful_reports),
+            "diagnostics": len(diagnostics),
+        },
+        "first_failed_assert_ids": first_failed_ids,
+        "first_fired_rule_ids_roles": first_fired_rule_pairs,
+        "first_locations": first_locations,
+        "worksheet_summary": [{"worksheet": k, "failed_asserts": v} for k, v in worksheet_counts.most_common()],
+        "rule_summary": [{"rule_id": k, "failed_asserts": v} for k, v in rule_counts.most_common()],
+        "location_summary": [{"location": k, "failed_asserts": v} for k, v in location_counts.most_common()],
+        "grouped_entries": grouped_entries,
+    }
+
+
 def _normalize_svrl_for_html_report(svrl_output_path: Path) -> Dict[str, int]:
     root = ET.parse(str(svrl_output_path)).getroot()
     changed = {"fired_rule_role_defaults": 0}
@@ -619,6 +717,7 @@ def _inspect_svrl_html_xslt(xslt_path: Path, svrl_path: Path) -> Dict[str, Any]:
         "affected_row_xpaths": [],
         "checks_performed_xpaths": [],
         "xpath_evaluations": [],
+        "xpath_skipped_count": 0,
         "assumptions": [],
         "svrl_root": "",
         "svrl_namespaces": {},
@@ -668,18 +767,11 @@ def _inspect_svrl_html_xslt(xslt_path: Path, svrl_path: Path) -> Dict[str, Any]:
     if any("sps:" in expr for expr in unique_expr):
         details["assumptions"].append("expects_sps_functions")
 
-    xpath_ns = {k: v for k, v in (svrl_root.nsmap or {}).items() if k}
-    if "svrl" not in xpath_ns:
-        xpath_ns["svrl"] = "http://purl.oclc.org/dsdl/svrl"
-    xpath_ns["sps"] = "http://www.schematron-quickfix.com/validator/process"
     for expr in [*details["error_group_xpaths"], *details["affected_row_xpaths"], *details["checks_performed_xpaths"]]:
-        try:
-            result = svrl_doc.xpath(expr, namespaces=xpath_ns)
-            details["xpath_evaluations"].append(
-                {"expression": expr, "result_count": len(result) if isinstance(result, list) else 1, "ok": True}
-            )
-        except Exception as exc:
-            details["xpath_evaluations"].append({"expression": expr, "ok": False, "error": str(exc)})
+        if "current-group(" in expr or "sps:" in expr or "$" in expr:
+            details["xpath_skipped_count"] += 1
+            continue
+        details["xpath_evaluations"].append({"expression": expr, "ok": False, "error": "evaluation skipped in Python diagnostic mode"})
     return details
 
 
@@ -1222,11 +1314,21 @@ class SvrlHtmlRenderer:
         engine = _get_xslt_engine()
         logs: List[str] = [f"html_transform_input path={svrl_path} exists={svrl_path.exists()}"]
         error = ""
+        report_data = _parse_svrl_report_data(svrl_path) if svrl_path.exists() else {
+            "summary": {"failed_asserts": 0, "successful_reports": 0, "diagnostics": 0}
+        }
         css_path = self.resources_dir / "SpaceReport.css"
         target_css = html_output_path.parent / "SpaceReport.css"
         if css_path.exists():
             shutil.copy2(css_path, target_css)
             logs.append(f"html_css_copied path={target_css} size_bytes={target_css.stat().st_size}")
+
+        configured_renderer = os.getenv("COBIEQC_REPORT_RENDERER", "").strip().lower() or "native_svrl"
+        logs.append(f"cobieqc_report_renderer configured={configured_renderer}")
+        if configured_renderer == "native_svrl":
+            self._write_native_svrl_html(html_output_path, summary, warnings, report_data)
+            logs.append(f"html_generated path={html_output_path} size_bytes={html_output_path.stat().st_size}")
+            return logs, ""
 
         xslt_candidates = [
             self.resources_dir / "SVRL_HTML_altLocation.xslt",
@@ -1255,40 +1357,110 @@ class SvrlHtmlRenderer:
                         etree.tostring(html_doc, encoding="utf-8", pretty_print=True, method="html")
                     )
                 logs.append(f"html_generated path={html_output_path} size_bytes={html_output_path.stat().st_size}")
+                html_text = html_output_path.read_text(encoding="utf-8", errors="replace")
+                failed_assert_count = int(report_data["summary"].get("failed_asserts", 0))
+                if failed_assert_count > 0 and "no errors" in html_text.lower():
+                    logs.append(
+                        "cobieqc_report_renderer override=native_svrl reason=legacy_rendered_no_errors_with_failed_asserts"
+                    )
+                    self._write_native_svrl_html(html_output_path, summary, warnings, report_data)
                 return logs, error
             except Exception as exc:
                 error = f"SVRL-to-HTML transform failed: {exc}"
                 continue
 
-        self._write_fallback_html(html_output_path, summary, warnings)
+        self._write_native_svrl_html(html_output_path, summary, warnings, report_data)
         logs.append(f"html_generated path={html_output_path} size_bytes={html_output_path.stat().st_size}")
         if error and svrl_path.exists():
             preview = svrl_path.read_text(encoding="utf-8", errors="replace").splitlines()[:20]
             warnings.append(f"svrl_preview_first_20={' | '.join(preview)}")
         return logs, error
 
-    def _write_fallback_html(self, html_output_path: Path, summary: Dict[str, Any], warnings: List[str]) -> None:
+    def _write_native_svrl_html(
+        self,
+        html_output_path: Path,
+        summary: Dict[str, Any],
+        warnings: List[str],
+        report_data: Dict[str, Any],
+    ) -> None:
+        now_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        summary_counts = report_data.get("summary", {})
+        failed_asserts = int(summary_counts.get("failed_asserts", summary.get("failed_asserts", 0)))
+        successful_reports = int(summary_counts.get("successful_reports", summary.get("successful_reports", 0)))
+        diagnostics = int(summary_counts.get("diagnostics", summary.get("diagnostics", 0)))
+        worksheet_rows = "".join(
+            f"<tr><td>{_xml_escape(item['worksheet'])}</td><td>{int(item['failed_asserts'])}</td></tr>"
+            for item in report_data.get("worksheet_summary", [])
+        ) or "<tr><td>(none)</td><td>0</td></tr>"
+        rule_rows = "".join(
+            f"<tr><td>{_xml_escape(item['rule_id'])}</td><td>{int(item['failed_asserts'])}</td></tr>"
+            for item in report_data.get("rule_summary", [])[:200]
+        ) or "<tr><td>(none)</td><td>0</td></tr>"
+        location_rows = "".join(
+            f"<tr><td>{_xml_escape(item['location'])}</td><td>{int(item['failed_asserts'])}</td></tr>"
+            for item in report_data.get("location_summary", [])[:200]
+        ) or "<tr><td>(none)</td><td>0</td></tr>"
+        grouped_rows = "".join(
+            "<tr>"
+            f"<td>{_xml_escape(item['worksheet'])}</td>"
+            f"<td>{_xml_escape(item['entity'])}</td>"
+            f"<td>{_xml_escape(item['rule_id'])}</td>"
+            f"<td>{_xml_escape(item['context'])}</td>"
+            f"<td>{_xml_escape(item['message'])}</td>"
+            f"<td>{_xml_escape(', '.join(item['locations']))}</td>"
+            "</tr>"
+            for item in report_data.get("grouped_entries", [])[:1000]
+        ) or "<tr><td colspan='6'>(none)</td></tr>"
         warning_items = "".join(f"<li>{_xml_escape(w)}</li>" for w in warnings)
         html = f"""<!doctype html>
 <html>
 <head>
   <meta charset=\"utf-8\" />
-  <title>COBieQC Report</title>
+  <title>COBieQC SVRL Report</title>
   <link rel=\"stylesheet\" href=\"SpaceReport.css\" />
 </head>
 <body>
-  <h1>COBieQC Validation Report</h1>
+  <h1>COBieQC Validation Report (Native SVRL Renderer)</h1>
+  <p><strong>Generated:</strong> {now_utc}</p>
   <ul>
-    <li>Failed asserts: {summary.get('failed_asserts', 0)}</li>
-    <li>Successful reports: {summary.get('successful_reports', 0)}</li>
-    <li>Diagnostics: {summary.get('diagnostics', 0)}</li>
+    <li>Failed asserts: {failed_asserts}</li>
+    <li>Successful reports: {successful_reports}</li>
+    <li>Diagnostics: {diagnostics}</li>
   </ul>
+  <h2>Worksheet Summary</h2>
+  <table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">
+    <tr><th>Worksheet</th><th>Failed Asserts</th></tr>
+    {worksheet_rows}
+  </table>
+  <h2>Errors Grouped by Worksheet / Entity / Rule</h2>
+  <table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">
+    <tr><th>Worksheet</th><th>Entity</th><th>Rule ID</th><th>Context</th><th>Message</th><th>Location</th></tr>
+    {grouped_rows}
+  </table>
+  <h2>Summary by Rule ID</h2>
+  <table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">
+    <tr><th>Rule ID</th><th>Failed Asserts</th></tr>
+    {rule_rows}
+  </table>
+  <h2>Summary by Affected Row / Location</h2>
+  <table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">
+    <tr><th>Location</th><th>Failed Asserts</th></tr>
+    {location_rows}
+  </table>
   <h2>Pipeline Notes</h2>
   <ul>{warning_items or '<li>None</li>'}</ul>
 </body>
 </html>
 """
         html_output_path.write_text(html, encoding="utf-8")
+
+    def _write_fallback_html(self, html_output_path: Path, summary: Dict[str, Any], warnings: List[str]) -> None:
+        self._write_native_svrl_html(
+            html_output_path,
+            summary,
+            warnings,
+            {"summary": summary, "worksheet_summary": [], "rule_summary": [], "location_summary": [], "grouped_entries": []},
+        )
 
 
 def _get_xslt_engine() -> str:
@@ -1581,6 +1753,7 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
                 f"fired_rule_role_defaults={normalization_changes['fired_rule_role_defaults']}"
             )
         svrl_diagnostics = _inspect_svrl(svrl_xml_path)
+        parsed_svrl_report = _parse_svrl_report_data(svrl_xml_path)
         svrl_first_20 = _first_lines(svrl_xml_path, line_count=20)
         logs.append(f"svrl_first_20 path={svrl_xml_path} lines={' | '.join(svrl_first_20)}")
         logs.append(f"svrl_namespace_map {svrl_diagnostics['namespaces']}")
@@ -1614,6 +1787,25 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
                 f"index={idx} id={sample['id']} location={sample['location']} role={sample['role']} "
                 f"text={sample['text']} diagnostics={';'.join(sample['diagnostics']) or '(none)'}"
             )
+        logs.append(
+            "svrl_tree_counts "
+            f"active_patterns={parsed_svrl_report['summary']['active_patterns']} "
+            f"fired_rule={parsed_svrl_report['summary']['fired_rules']} "
+            f"failed_assert={parsed_svrl_report['summary']['failed_asserts']} "
+            f"successful_report={parsed_svrl_report['summary']['successful_reports']}"
+        )
+        logs.append(
+            "svrl_first_10_failed_assert_ids "
+            f"values={','.join(parsed_svrl_report['first_failed_assert_ids']) or '(none)'}"
+        )
+        logs.append(
+            "svrl_first_10_fired_rule_ids_roles "
+            f"values={','.join(parsed_svrl_report['first_fired_rule_ids_roles']) or '(none)'}"
+        )
+        logs.append(
+            "svrl_first_10_locations "
+            f"values={','.join(parsed_svrl_report['first_locations']) or '(none)'}"
+        )
 
         diagnostic_mode = os.getenv("COBIEQC_SVRL_DIAGNOSTIC_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
         if diagnostic_mode:
@@ -1671,6 +1863,11 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
         summary["warnings"] = warnings
         summary["stage"] = stage
         summary["svrl_diagnostics"] = svrl_diagnostics
+        summary["native_report_export"] = {
+            "by_worksheet": parsed_svrl_report["worksheet_summary"],
+            "by_rule_id": parsed_svrl_report["rule_summary"],
+            "by_location": parsed_svrl_report["location_summary"],
+        }
         summary["cobie_xml_diagnostics"] = {
             "root_element_name": cobie_diagnostics["root_element_name"],
             "root_namespace": cobie_diagnostics["root_namespace"],
@@ -1702,7 +1899,7 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
                 logs.append(f"svrl_integrity_fired_rule index={idx} attrs={dict(node.attrib)}")
             logs.append(f"svrl_integrity_namespace_map {_safe_iterparse_namespaces(svrl_xml_path)}")
             warnings.append("SVRL/HTML integrity check failed; replacing misleading HTML report with fallback diagnostic report.")
-            renderer._write_fallback_html(html_path, summary, warnings)
+            renderer._write_native_svrl_html(html_path, summary, warnings, parsed_svrl_report)
             html_text = html_path.read_text(encoding='utf-8', errors='replace') if html_path.exists() else html_text
 
         html_xslt_path = None
@@ -1724,6 +1921,10 @@ def run_cobieqc_native(input_xlsx_path: str, stage: str, job_dir: str, resources
                 f"error_group_xpaths={';'.join(xslt_diag['error_group_xpaths']) or '(none)'} "
                 f"affected_row_xpaths={';'.join(xslt_diag['affected_row_xpaths']) or '(none)'} "
                 f"checks_performed_xpaths={';'.join(xslt_diag['checks_performed_xpaths']) or '(none)'}"
+            )
+            logs.append(
+                "svrl_html_xslt_diagnostic_mode "
+                f"xpath_skipped_count={xslt_diag.get('xpath_skipped_count', 0)}"
             )
             for eval_item in xslt_diag["xpath_evaluations"][:20]:
                 if eval_item.get("ok"):
