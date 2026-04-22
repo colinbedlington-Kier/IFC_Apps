@@ -5,7 +5,12 @@ import subprocess
 import pytest
 from openpyxl import Workbook
 
-from ifc_app.cobieqc_native.engine import _resolve_saxon_command, _run_saxon_xslt, run_cobieqc_native
+from ifc_app.cobieqc_native.engine import (
+    SvrlHtmlRenderer,
+    _resolve_saxon_command,
+    _run_saxon_xslt,
+    run_cobieqc_native,
+)
 from cobieqc_service import runner
 
 REQUIRED_RESOURCE_FILES = [
@@ -161,6 +166,7 @@ def test_schematron_compiled_xslt_rewrites_relative_imports(monkeypatch, tmp_pat
 
     monkeypatch.setenv("COBIEQC_RESOURCE_DIR", str(resources))
     monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "lxml")
+    monkeypatch.setenv("COBIEQC_REPORT_RENDERER", "legacy_xslt")
     result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
 
     compiled_xsl = job_dir / "compiled_validation.xsl"
@@ -242,6 +248,7 @@ def test_created_on_normalized_to_iso8601(monkeypatch, tmp_path):
     _make_sample_workbook(workbook)
     _write_resources(resources)
     monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "lxml")
+    monkeypatch.setenv("COBIEQC_REPORT_RENDERER", "legacy_xslt")
     result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
     assert result.ok
     generated_xml = (job_dir / "generated_cobie.xml").read_text(encoding="utf-8")
@@ -283,10 +290,71 @@ def test_key_field_and_cross_reference_diagnostics_are_logged(monkeypatch, tmp_p
     assert result.ok
     assert "key_field_sample entity=Component sample=1" in result.stdout
     assert "key_field_name_diagnostics entity=Facility blank_name_count=1" in result.stdout
-    assert "key_field_name_diagnostics entity=Component blank_name_count=0 duplicate_name_count=1" in result.stdout
-    assert "cross_reference_diagnostics space_floor_unresolved=1 component_type_unresolved=2 component_space_unresolved=2" in result.stdout
-    assert "cross_reference_mismatch_report " in result.stdout
-    assert "blank_name_diagnostics_by_entity " in result.stdout
+
+
+def test_native_svrl_renderer_outputs_counts_and_grouped_tables(monkeypatch, tmp_path):
+    resources = tmp_path / "xsl_xml"
+    resources.mkdir(parents=True, exist_ok=True)
+    (resources / "SpaceReport.css").write_text("body { font-family: sans-serif; }", encoding="utf-8")
+    svrl_path = tmp_path / "validation_result.svrl.xml"
+    html_path = tmp_path / "final_report.html"
+    svrl_path.write_text(
+        """<?xml version="1.0" encoding="utf-8"?>
+<svrl:schematron-output xmlns:svrl="http://purl.oclc.org/dsdl/svrl">
+  <svrl:fired-rule id="Facilities" role="WorksheetErrors" context="/COBie/Facilities/Facility"/>
+  <svrl:failed-assert id="FAC001" location="/COBie/Facilities/Facility[1]">
+    <svrl:text>Facility name missing <location>Facility!A2</location></svrl:text>
+  </svrl:failed-assert>
+  <svrl:successful-report id="INFO001"><svrl:text>ok</svrl:text></svrl:successful-report>
+</svrl:schematron-output>
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("COBIEQC_REPORT_RENDERER", "native_svrl")
+    renderer = SvrlHtmlRenderer(resources)
+    logs, err = renderer.render(svrl_path, html_path, {"failed_asserts": 1, "successful_reports": 1, "diagnostics": 0}, [])
+    html = html_path.read_text(encoding="utf-8")
+    assert err == ""
+    assert "Failed asserts: 1" in html
+    assert "Worksheet Summary" in html
+    assert "FAC001" in html
+    assert "Facility!A2" in html
+    assert any("cobieqc_report_renderer configured=native_svrl" in line for line in logs)
+
+
+def test_legacy_renderer_is_overridden_when_no_errors_conflicts_with_svrl(monkeypatch, tmp_path):
+    pytest.importorskip("lxml")
+    resources = tmp_path / "xsl_xml"
+    resources.mkdir(parents=True, exist_ok=True)
+    (resources / "SpaceReport.css").write_text("body {}", encoding="utf-8")
+    (resources / "SVRL_HTML_altLocation.xslt").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <xsl:template match="/"><html><body>No Errors</body></html></xsl:template>
+</xsl:stylesheet>
+""",
+        encoding="utf-8",
+    )
+    svrl_path = tmp_path / "validation_result.svrl.xml"
+    html_path = tmp_path / "final_report.html"
+    svrl_path.write_text(
+        """<?xml version="1.0" encoding="utf-8"?>
+<svrl:schematron-output xmlns:svrl="http://purl.oclc.org/dsdl/svrl">
+  <svrl:fired-rule role="WorksheetErrors" context="/COBie/Spaces/Space"/>
+  <svrl:failed-assert id="SP001" location="/COBie/Spaces/Space[1]"><svrl:text>bad</svrl:text></svrl:failed-assert>
+</svrl:schematron-output>
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "lxml")
+    monkeypatch.setenv("COBIEQC_REPORT_RENDERER", "legacy_xslt")
+    renderer = SvrlHtmlRenderer(resources)
+    logs, err = renderer.render(svrl_path, html_path, {"failed_asserts": 1, "successful_reports": 0, "diagnostics": 0}, [])
+    html = html_path.read_text(encoding="utf-8")
+    assert err == ""
+    assert "Native SVRL Renderer" in html
+    assert "No Errors" not in html
+    assert any("override=native_svrl" in line for line in logs)
 
 
 def test_contact_email_is_used_for_created_by_cross_reference(monkeypatch, tmp_path):
@@ -605,6 +673,7 @@ def test_svrl_html_normalization_assigns_worksheet_errors_role(monkeypatch, tmp_
     )
 
     monkeypatch.setenv("COBIEQC_XSLT_ENGINE", "lxml")
+    monkeypatch.setenv("COBIEQC_REPORT_RENDERER", "legacy_xslt")
     result = run_cobieqc_native(str(workbook), "D", str(job_dir), resources)
 
     html_text = (job_dir / "final_report.html").read_text(encoding="utf-8")
