@@ -26,6 +26,8 @@ import ifcopenshell.api
 import ifcopenshell.util.element
 import ifcopenshell.util.placement
 import pandas as pd
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -100,6 +102,7 @@ APP_LOGGER = logging.getLogger("ifc_app")
 RESOURCE_DIR = Path(__file__).resolve().parent / "resources"
 QA_RESOURCE_DIR = Path(__file__).resolve().parent / "app" / "resources" / "ifc_qa"
 DATA_DIR = Path(__file__).resolve().parent / "data"
+BACKEND_CONFIG_DIR = Path(__file__).resolve().parent / "backend" / "config"
 UTC = datetime.timezone.utc
 HEAVY_JOB_SEMAPHORE = threading.Semaphore(1)
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
@@ -1092,7 +1095,7 @@ def parse_required_pairs(raw):
 
 @dataclass
 class ExtractionPlan:
-    include_sheets: Set[str] = field(default_factory=lambda: {"ProjectData", "Elements", "Properties", "COBieMapping", "Uniclass_Pr", "Uniclass_Ss", "Uniclass_EF"})
+    include_sheets: Set[str] = field(default_factory=lambda: {"ProjectData", "Elements", "Types", "RawEntities", "Properties", "COBieMapping", "Uniclass_Pr", "Uniclass_Ss", "Uniclass_EF", "ChangeLog"})
     entity_classes: Set[str] = field(default_factory=set)
     property_sets: Set[str] = field(default_factory=set)
     quantity_sets: Set[str] = field(default_factory=set)
@@ -1185,6 +1188,18 @@ def _parse_excel_extraction_plan(payload: Optional[Dict[str, Any]]) -> Extractio
         include_classifications=include_classifications,
         civil3d_extended=bool(payload.get("civil3d_extended", profile.get("civil3d_extended", False))),
     )
+
+
+_IFC2X3_ENTITY_MAPPING_CACHE: Optional[Dict[str, Any]] = None
+
+
+def load_ifc2x3_entity_mapping() -> Dict[str, Any]:
+    global _IFC2X3_ENTITY_MAPPING_CACHE
+    if _IFC2X3_ENTITY_MAPPING_CACHE is not None:
+        return _IFC2X3_ENTITY_MAPPING_CACHE
+    payload = json.loads((BACKEND_CONFIG_DIR / "ifc2x3_entities_and_predefined_types.json").read_text(encoding="utf-8"))
+    _IFC2X3_ENTITY_MAPPING_CACHE = payload
+    return payload
 
 
 def _normalize_field_key(value: str) -> str:
@@ -1381,8 +1396,12 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
     timer.stop("model_load")
 
     timer.start("entity_index")
-    all_elements = list(ifc.by_type("IfcElement"))
-    elements = [e for e in all_elements if not plan.entity_classes or e.is_a() in plan.entity_classes]
+    all_objects = [e for e in ifc.by_type("IfcObject") if getattr(e, "GlobalId", None)]
+    all_types = [e for e in ifc.by_type("IfcTypeObject") if getattr(e, "GlobalId", None)]
+    all_export_objects = sorted({*all_objects, *all_types}, key=lambda e: e.id())
+    elements = [e for e in all_objects if e.is_a("IfcProduct")]
+    if plan.entity_classes:
+        elements = [e for e in elements if e.is_a() in plan.entity_classes]
     type_by_elem_id: Dict[int, Any] = {}
     psets_cache: Dict[int, Dict[str, Dict[str, Any]]] = {}
     type_psets_cache: Dict[int, Dict[str, Dict[str, Any]]] = {}
@@ -1474,6 +1493,27 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
 
     timer.start("elements_table")
     element_rows: List[Dict[str, Any]] = []
+    type_rows: List[Dict[str, Any]] = []
+    raw_entity_rows: List[Dict[str, Any]] = []
+    def _build_roundtrip_row(obj: Any, is_type_object: bool) -> Dict[str, Any]:
+        current_entity = obj.is_a()
+        current_predefined = getattr(obj, "PredefinedType", "") if hasattr(obj, "PredefinedType") else ""
+        return {
+            "RowKey": f"{obj.GlobalId or ''}:{obj.id()}",
+            "StepId": obj.id(),
+            "GlobalId": getattr(obj, "GlobalId", ""),
+            "CurrentEntity": current_entity,
+            "TargetEntity": current_entity,
+            "CurrentPredefinedType": current_predefined or "",
+            "TargetPredefinedType": current_predefined or "",
+            "Name": getattr(obj, "Name", "") or "",
+            "ObjectType or ElementType": (getattr(obj, "ElementType", "") if is_type_object else getattr(obj, "ObjectType", "")) or "",
+            "ApplicableOccurrence": getattr(obj, "ApplicableOccurrence", "") if is_type_object else "",
+            "IsTypeObject": bool(is_type_object),
+            "Validation": "",
+            "ApplyChange": "No",
+        }
+
     for elem in elements:
         type_obj = _element_type_obj(elem)
         row = {
@@ -1488,8 +1528,24 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
         if plan.civil3d_extended:
             for field_name in CIVIL3D_EXTENDED_FIELDS:
                 row[field_name] = _resolve_field_value(elem, type_obj, field_name, _get_pset_value)
+        row.update(_build_roundtrip_row(elem, is_type_object=False))
         element_rows.append(row)
+    for type_obj in all_types:
+        type_rows.append(_build_roundtrip_row(type_obj, is_type_object=True))
+    for obj in all_export_objects:
+        raw_entity_rows.append(
+            {
+                "StepId": obj.id(),
+                "GlobalId": getattr(obj, "GlobalId", "") or "",
+                "Entity": obj.is_a(),
+                "Name": getattr(obj, "Name", "") or "",
+                "RawStepLine": str(obj),
+            }
+        )
     elements_df = pd.DataFrame(element_rows)
+    types_df = pd.DataFrame(type_rows)
+    raw_entities_df = pd.DataFrame(raw_entity_rows)
+    changelog_df = pd.DataFrame(columns=["RowKey", "GlobalId", "StepId", "Status", "Message", "FromEntity", "ToEntity", "FromPredefinedType", "ToPredefinedType"])
     timer.stop("elements_table")
 
     timer.start("properties_table")
@@ -1614,6 +1670,10 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
             project_df.to_excel(writer, sheet_name="ProjectData", index=False)
         if "Elements" in plan.include_sheets:
             elements_df.to_excel(writer, sheet_name="Elements", index=False)
+        if "Types" in plan.include_sheets:
+            types_df.to_excel(writer, sheet_name="Types", index=False)
+        if "RawEntities" in plan.include_sheets:
+            raw_entities_df.to_excel(writer, sheet_name="RawEntities", index=False)
         if "Properties" in plan.include_sheets:
             props_df.to_excel(writer, sheet_name="Properties", index=False)
         if "COBieMapping" in plan.include_sheets:
@@ -1624,8 +1684,49 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
             uniclass_ss_df.to_excel(writer, sheet_name="Uniclass_Ss", index=False)
         if "Uniclass_EF" in plan.include_sheets:
             uniclass_ef_df.to_excel(writer, sheet_name="Uniclass_EF", index=False)
+        if "ChangeLog" in plan.include_sheets:
+            changelog_df.to_excel(writer, sheet_name="ChangeLog", index=False)
+
+        if ifc.schema.upper() == "IFC2X3":
+            mapping = load_ifc2x3_entity_mapping()
+            entities = sorted((mapping.get("entities") or {}).keys())
+            lookup_rows = [{"Entity": e} for e in entities]
+            entity_lookup_df = pd.DataFrame(lookup_rows)
+            predefined_rows: List[Dict[str, Any]] = []
+            for entity in entities:
+                enum_items = (mapping.get("entities", {}).get(entity, {}) or {}).get("predefined_types", []) or [""]
+                for val in enum_items:
+                    predefined_rows.append({"Entity": entity, "PredefinedType": val or ""})
+            predefined_df = pd.DataFrame(predefined_rows)
+            entity_lookup_df.to_excel(writer, sheet_name="Lists_Entities", index=False)
+            predefined_df.to_excel(writer, sheet_name="Lists_PredefinedTypes", index=False)
+
+            workbook = writer.book
+            for sheet_name in ("Elements", "Types"):
+                if sheet_name not in workbook.sheetnames:
+                    continue
+                ws = workbook[sheet_name]
+                header = [c.value for c in ws[1]]
+                if "TargetEntity" not in header or "TargetPredefinedType" not in header:
+                    continue
+                target_entity_col = get_column_letter(header.index("TargetEntity") + 1)
+                target_predef_col = get_column_letter(header.index("TargetPredefinedType") + 1)
+                max_row = max(ws.max_row, 2)
+                entity_dv = DataValidation(type="list", formula1="=Lists_Entities!$A$2:$A$9999", allow_blank=True)
+                ws.add_data_validation(entity_dv)
+                entity_dv.add(f"{target_entity_col}2:{target_entity_col}{max_row}")
+                predef_dv = DataValidation(
+                    type="list",
+                    formula1=f'=IFERROR(FILTER(Lists_PredefinedTypes!$B$2:$B$20000,Lists_PredefinedTypes!$A$2:$A$20000={target_entity_col}2),"")',
+                    allow_blank=True,
+                )
+                ws.add_data_validation(predef_dv)
+                predef_dv.add(f"{target_predef_col}2:{target_predef_col}{max_row}")
+
+            workbook["Lists_Entities"].sheet_state = "hidden"
+            workbook["Lists_PredefinedTypes"].sheet_state = "hidden"
     timer.stop("excel_write")
-    return {"path": output_path, "timings_ms": timer.as_payload(), "counts": {"elements": len(elements), "properties": len(prop_rows), "cobie_rows": len(cobie_rows)}}
+    return {"path": output_path, "timings_ms": timer.as_payload(), "counts": {"elements": len(elements), "types": len(all_types), "properties": len(prop_rows), "cobie_rows": len(cobie_rows)}}
 
 
 def extract_to_excel(ifc_path: str, output_path: str, plan_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1797,11 +1898,17 @@ def update_ifc_from_excel(
 
     xls = pd.ExcelFile(xls_path)
     elements_df = pd.read_excel(xls, "Elements", usecols=lambda c: c is not None)
+    try:
+        types_df = pd.read_excel(xls, "Types", usecols=lambda c: c is not None)
+    except Exception:
+        types_df = pd.DataFrame()
     props_df = pd.read_excel(xls, "Properties")
     cobie_df = pd.read_excel(xls, "COBieMapping")
     project_df = pd.read_excel(xls, "ProjectData")
     log_memory_stage(stage="workbook load", session_id=session_id, file_name=os.path.basename(xls_path), file_size=os.path.getsize(xls_path), endpoint=endpoint, started_at=started_at)
     _check_heavy_timeout(started_at, endpoint)
+
+    change_log_rows: List[Dict[str, Any]] = []
 
     try:
         uniclass_pr_df = pd.read_excel(xls, "Uniclass_Pr")
@@ -1924,6 +2031,83 @@ def update_ifc_from_excel(
                     row.get("UniclassEnReference"),
                     row.get("UniclassEnName"),
                 )
+
+    if ifc.schema.upper() == "IFC2X3":
+        mapping = load_ifc2x3_entity_mapping()
+    else:
+        mapping = {"entities": {}}
+
+    def _lookup_by_row(row: pd.Series) -> Any:
+        guid = clean_value(row.get("GlobalId"))
+        if guid:
+            try:
+                found = ifc.by_guid(str(guid))
+                if found:
+                    return found
+            except Exception:
+                pass
+        step_id = row.get("StepId")
+        if pd.notna(step_id):
+            try:
+                return ifc.by_id(int(step_id))
+            except Exception:
+                return None
+        return None
+
+    def _apply_entity_predefined_updates(rows_df: pd.DataFrame, expected_kind: str) -> None:
+        if rows_df is None or rows_df.empty:
+            return
+        entities_cfg = mapping.get("entities") or {}
+        for _, row in rows_df.iterrows():
+            target = _lookup_by_row(row)
+            if target is None:
+                continue
+            apply_change = str(clean_value(row.get("ApplyChange")) or "").strip().lower() in {"yes", "y", "true", "1"}
+            current_entity = str(clean_value(row.get("CurrentEntity")) or target.is_a())
+            requested_entity = str(clean_value(row.get("TargetEntity")) or current_entity)
+            current_predef = str(clean_value(row.get("CurrentPredefinedType")) or getattr(target, "PredefinedType", "") or "")
+            requested_predef = str(clean_value(row.get("TargetPredefinedType")) or current_predef)
+            if not apply_change:
+                continue
+
+            result = {"RowKey": row.get("RowKey", ""), "GlobalId": getattr(target, "GlobalId", ""), "StepId": target.id(), "FromEntity": current_entity, "ToEntity": requested_entity, "FromPredefinedType": current_predef, "ToPredefinedType": requested_predef}
+            cfg = entities_cfg.get(requested_entity)
+            if cfg is None:
+                result.update({"Status": "Rejected", "Message": "unsupported target entity"})
+                change_log_rows.append(result)
+                continue
+            target_kind = (cfg.get("kind") or "").lower()
+            if target_kind != expected_kind:
+                result.update({"Status": "Rejected", "Message": "attempt to convert type to occurrence or occurrence to type"})
+                change_log_rows.append(result)
+                continue
+            source_cfg = entities_cfg.get(current_entity, {})
+            if requested_entity != current_entity and requested_entity not in (source_cfg.get("allowed_conversion_targets") or []):
+                result.update({"Status": "Rejected", "Message": "failed entity migration: conversion is not allowed"})
+                change_log_rows.append(result)
+                continue
+
+            migrated = target
+            if requested_entity != current_entity:
+                try:
+                    migrated = ifcopenshell.api.run("root.reassign_class", ifc, product=target, ifc_class=requested_entity)
+                except Exception as exc:
+                    result.update({"Status": "Rejected", "Message": f"failed entity migration: {exc}"})
+                    change_log_rows.append(result)
+                    continue
+
+            allowed_predef = (entities_cfg.get(requested_entity, {}) or {}).get("predefined_types", []) or []
+            if requested_predef and allowed_predef and requested_predef not in allowed_predef:
+                result.update({"Status": "Rejected", "Message": "invalid predefined type for selected entity"})
+                change_log_rows.append(result)
+                continue
+            if requested_predef and hasattr(migrated, "PredefinedType"):
+                migrated.PredefinedType = requested_predef
+            result.update({"Status": "Applied", "Message": "ok"})
+            change_log_rows.append(result)
+
+    _apply_entity_predefined_updates(elements_df, "occurrence")
+    _apply_entity_predefined_updates(types_df, "type")
 
     for _, row in elements_df.iterrows():
         guid = row.get("GlobalId")
@@ -2116,6 +2300,9 @@ def update_ifc_from_excel(
     log_memory_stage(stage="IFC write/export", session_id=session_id, file_name=os.path.basename(output_path), file_size=os.path.getsize(output_path), endpoint=endpoint, started_at=started_at)
 
     xls.close()
+    if change_log_rows:
+        with pd.ExcelWriter(xls_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+            pd.DataFrame(change_log_rows).to_excel(writer, sheet_name="ChangeLog", index=False)
     if gc is not None:
         gc.collect()
     return output_path
