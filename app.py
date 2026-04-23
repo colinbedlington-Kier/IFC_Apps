@@ -3,6 +3,7 @@ import configparser
 import csv
 import datetime
 import difflib
+import hashlib
 import json
 import logging
 import os
@@ -113,6 +114,10 @@ MAX_REQUEST_BODY_BYTES = MAX_UPLOAD_BYTES + REQUEST_BODY_LIMIT_HEADROOM_BYTES
 MAX_IFC_BYTES = int(os.getenv("MAX_IFC_BYTES", str(80 * 1024 * 1024)))
 MAX_EXCEL_BYTES = int(os.getenv("MAX_EXCEL_BYTES", str(25 * 1024 * 1024)))
 HEAVY_JOB_TIMEOUT_SECONDS = int(os.getenv("HEAVY_JOB_TIMEOUT_SECONDS", "900"))
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+HASHED_STATIC_DIR = STATIC_DIR / "_hashed"
+HASHED_NAME_RE = re.compile(r"\.[0-9a-f]{8,}\.")
+ASSET_VERSIONED_FILES = ("app.js", "ifc_qa_app.js", "style.css")
 
 
 IFC_QA_JOB_STARTER = start_ifc_qa_session_job
@@ -152,6 +157,49 @@ def _resolve_git_commit_sha() -> str:
     except Exception:
         pass
     return "unknown"
+
+
+def _build_versioned_asset_map() -> Dict[str, str]:
+    HASHED_STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    assets: Dict[str, str] = {}
+    for relative_name in ASSET_VERSIONED_FILES:
+        source_path = STATIC_DIR / relative_name
+        if not source_path.exists():
+            APP_LOGGER.warning("Static asset missing for versioning: %s", source_path)
+            continue
+        digest = hashlib.sha256(source_path.read_bytes()).hexdigest()[:12]
+        stem = source_path.stem
+        hashed_name = f"{stem}.{digest}{source_path.suffix}"
+        hashed_rel = f"_hashed/{hashed_name}"
+        target_path = STATIC_DIR / hashed_rel
+        if not target_path.exists():
+            target_path.write_bytes(source_path.read_bytes())
+        assets[relative_name] = hashed_rel
+    return assets
+
+
+VERSIONED_ASSET_MAP = _build_versioned_asset_map()
+BUILD_TIMESTAMP_UTC = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+GIT_SHA = _resolve_git_commit_sha()
+FRONTEND_BUNDLE_VERSION = VERSIONED_ASSET_MAP.get("ifc_qa_app.js", "unknown")
+FRONTEND_BUILD_ID = f"{BUILD_TIMESTAMP_UTC}|{GIT_SHA[:8]}|{FRONTEND_BUNDLE_VERSION}"
+
+
+def resolve_asset_url(asset_name: str) -> str:
+    versioned = VERSIONED_ASSET_MAP.get(asset_name, asset_name)
+    return f"/static/{versioned}"
+
+
+class CacheControlledStaticFiles(StaticFiles):
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code=status_code)
+        request_path = scope.get("path", "")
+        is_hashed = bool(HASHED_NAME_RE.search(request_path))
+        if is_hashed:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
 
 
 # ----------------------------------------------------------------------------
@@ -5777,8 +5825,10 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="IFC Toolkit Hub", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", CacheControlledStaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+templates.env.globals["asset_url"] = resolve_asset_url
+templates.env.globals["frontend_build_id"] = FRONTEND_BUILD_ID
 
 
 @app.middleware("http")
@@ -5807,6 +5857,17 @@ async def upload_request_size_guard(request: Request, call_next):
                 )
                 return JSONResponse(status_code=413, content=upload_too_large_payload())
     return await call_next(request)
+
+
+@app.middleware("http")
+async def html_cache_control_guard(request: Request, call_next):
+    response = await call_next(request)
+    content_type = (response.headers.get("content-type") or "").lower()
+    if content_type.startswith("text/html"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 @app.exception_handler(HTTPException)
@@ -6535,6 +6596,16 @@ def ifc_qa_result(ref_id: str):
 @app.get("/api/ifc-qa/config")
 def ifc_qa_config():
     return _public_ifc_qa_config(load_ifc_qa_default_config())
+
+
+@app.get("/api/ifc-qa/build-info")
+def ifc_qa_build_info():
+    return {
+        "git_sha": GIT_SHA,
+        "build_timestamp_utc": BUILD_TIMESTAMP_UTC,
+        "frontend_bundle_version": FRONTEND_BUNDLE_VERSION,
+        "frontend_build_id": FRONTEND_BUILD_ID,
+    }
 
 
 @app.post("/api/ifc-qa/config/validate")

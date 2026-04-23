@@ -11,5 +11,8 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/ifc_qa_app.js?v=20260423a"></script>
+<script>
+  window.__IFC_QA_BUILD_ID__ = "{{ frontend_build_id }}";
+</script>
+<script src="{{ asset_url('ifc_qa_app.js') }}"></script>
 {% endblock %}
