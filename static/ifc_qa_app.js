@@ -261,6 +261,20 @@ function createUploadModel(files) {
   }));
 }
 
+function isValidIfcFile(file) {
+  const name = String(file?.name || "").toLowerCase();
+  const mime = String(file?.type || "").toLowerCase();
+  return name.endsWith(".ifc") || mime === "application/x-step" || mime === "application/octet-stream";
+}
+
+function syncQueueFromSelectedFiles() {
+  qaState.selectedTotalBytes = (qaState.selectedFiles || []).reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+  qaState.fileQueue = createUploadModel(qaState.selectedFiles || []);
+  qaState.statusBanner = qaState.selectedFiles.length
+    ? `${qaState.selectedFiles.length} file${qaState.selectedFiles.length === 1 ? "" : "s"} queued for upload`
+    : "No files selected";
+}
+
 function setUploadWarning(message) {
   qaState.uploadWarning = message || "";
   const el = qs("#qaUploadWarning");
@@ -322,10 +336,20 @@ function renderActionButtons() {
   const startBtn = qs("#qaStartBtn");
   const addBtn = qs("#qaAddBtn");
   const dlBtn = qs("#qaDownloadBtn");
-  const hasQueued = qaState.fileQueue.some((row) => row.status === "queued");
+  const hasQueued = qaState.selectedFiles.length > 0;
   const hasFailed = qaState.fileQueue.some((row) => row.status === "failed");
   const hasUploaded = qaState.fileQueue.some((row) => row.status === "uploaded" || row.status === "complete");
-  if (uploadBtn) uploadBtn.disabled = !qaState.sessionReady || qaState.isStartingRun || qaState.uploadState === "uploading" || !hasQueued;
+  const isUploading = qaState.uploadState === "uploading";
+  const canUpload = qaState.sessionReady && hasQueued && !isUploading;
+  const disableReason = !qaState.sessionReady
+    ? "sessionReady=false"
+    : !hasQueued
+      ? "selectedFiles.length=0"
+      : isUploading
+        ? "isUploading=true"
+        : "ready";
+  console.info(`IFC QA upload button gate: canUpload=${canUpload} because ${disableReason}`);
+  if (uploadBtn) uploadBtn.disabled = !canUpload;
   if (retryBtn) retryBtn.disabled = !qaState.sessionReady || qaState.isStartingRun || qaState.uploadState === "uploading" || !hasFailed;
   if (startBtn) startBtn.disabled = qaState.isRunning || qaState.isStartingRun || !qaState.canRunQa || !qaState.configLoaded;
   if (addBtn) addBtn.disabled = !hasUploaded || qaState.modelCount <= 0;
@@ -341,44 +365,50 @@ function selectedSheets() {
 function bindFilesList() {
   const input = qs("#qaIfcFiles");
   if (!input) return;
-  input.addEventListener("change", () => {
-    const files = Array.from(input.files || []);
-    console.info("IFC QA file input change event", { count: files.length, names: files.map((file) => file.name) });
-    const oversized = files.find((file) => Number(file.size) > qaState.maxUploadBytes);
-    if (oversized) {
+  input.addEventListener("change", (event) => {
+    const rawFiles = event?.target?.files || input.files || [];
+    const files = Array.from(rawFiles);
+    console.info(`IFC QA file input onChange fired, files=${files.length}`);
+    console.info("IFC QA file input change payload", { names: files.map((file) => file.name) });
+    const rejected = [];
+    const acceptedFiles = [];
+    files.forEach((file) => {
+      if (!isValidIfcFile(file)) {
+        rejected.push(`${file.name} is not an IFC file`);
+        return;
+      }
+      if (Number(file.size) > qaState.maxUploadBytes) {
+        rejected.push(`${file.name} exceeds ${qaState.maxUploadDisplay}`);
+        return;
+      }
+      acceptedFiles.push(file);
+    });
+    console.info(`IFC QA acceptedFiles=${acceptedFiles.length}`);
+    if (!acceptedFiles.length) {
       qaState.selectedFiles = [];
-      qaState.selectedTotalBytes = 0;
-      qaState.fileQueue = [];
+      syncQueueFromSelectedFiles();
       qaState.uploadedFiles = [];
       qaState.canRunQa = false;
-      qaState.statusBanner = "No files selected";
-      input.value = "";
-      setUploadWarning(`Upload rejected: ${oversized.name} exceeds the maximum upload size of ${qaState.maxUploadDisplay}.`);
+      qaState.overallProgress = 0;
+      setUploadWarning(rejected.length ? `Upload rejected: ${rejected.join("; ")}` : "No valid IFC files selected.");
       setUploadState("failed", { uploadBytesLoaded: 0, uploadBytesTotal: 0, uploadPercent: 0 });
-      console.warn("IFC QA oversized file rejected before upload", { name: oversized.name, size: oversized.size });
+      console.warn("IFC QA selection rejected", { rejected });
+      renderSelectedFilesState();
       renderFileQueue();
       renderActionButtons();
       return;
     }
-    qaState.selectedFiles = files;
-    console.info("IFC QA files stored to state", { count: qaState.selectedFiles.length });
-    qaState.selectedTotalBytes = files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
-    qaState.fileQueue = createUploadModel(files);
+    qaState.selectedFiles = acceptedFiles;
+    syncQueueFromSelectedFiles();
+    console.info(`IFC QA selectedFiles state=${qaState.selectedFiles.length}`);
     qaState.uploadedFiles = [];
     qaState.canRunQa = false;
     qaState.overallProgress = 0;
-    qaState.statusBanner = files.length ? `${files.length} file${files.length === 1 ? "" : "s"} queued for upload` : "No files selected";
-    setUploadWarning("");
+    setUploadWarning(rejected.length ? `Some files were rejected: ${rejected.join("; ")}` : "");
     setSessionWarning("");
-    console.info("IFC QA upload queue creation", { count: qaState.fileQueue.length, totalBytes: qaState.selectedTotalBytes });
+    console.info("IFC QA upload queue creation", { count: qaState.fileQueue.length, totalBytes: qaState.selectedTotalBytes, rejectedCount: rejected.length });
     renderSelectedFilesState();
     clearRunError();
-    if (!files.length) {
-      setUploadState("idle", { uploadBytesLoaded: 0, uploadBytesTotal: 0, uploadPercent: 0 });
-      renderFileQueue();
-      renderActionButtons();
-      return;
-    }
     setUploadState("queued", { uploadBytesLoaded: 0, uploadBytesTotal: qaState.selectedTotalBytes, uploadPercent: 0 });
     renderFileQueue();
     renderActionButtons();
@@ -486,7 +516,7 @@ function renderUploadProgress() {
   const total = Number(qaState.uploadBytesTotal) || 0;
   const percent = Math.max(0, Math.min(100, Number(qaState.uploadPercent) || 0));
   const isUploading = qaState.uploadState === "uploading";
-  const totalQueued = qaState.fileQueue.length;
+  const totalQueued = qaState.selectedFiles.length;
   const uploadedCount = qaState.fileQueue.filter((row) => row.status === "uploaded" || row.status === "complete").length;
   const uploadingIndex = qaState.fileQueue.findIndex((row) => row.status === "uploading");
   const statusMap = {
