@@ -25,6 +25,10 @@ const state = {
   processingCount: 0,
   updatedIfcName: null,
   excelPreview: null,
+  uploadLimits: {
+    maxBytes: 1_200_000_000,
+    maxDisplay: "1.2 GB",
+  },
 };
 
 
@@ -118,6 +122,28 @@ async function ensureSession() {
     if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Session error. Reload to retry.";
     console.error(err);
   }
+}
+
+async function loadUploadLimits() {
+  try {
+    const resp = await fetchWithTimeout("/api/upload/limits", {}, 8000);
+    if (resp.ok) {
+      const data = await resp.json();
+      if (Number.isFinite(Number(data.max_upload_bytes))) state.uploadLimits.maxBytes = Number(data.max_upload_bytes);
+      if (data.max_upload_display) state.uploadLimits.maxDisplay = data.max_upload_display;
+    }
+  } catch (err) {
+    console.warn("Unable to load upload limits", err);
+  }
+  const hint = el("upload-max-size");
+  if (hint) hint.textContent = `Maximum file size: ${state.uploadLimits.maxDisplay}`;
+}
+
+function parseUploadFailure(payload, statusCode) {
+  if (statusCode === 413 || payload?.code === "UPLOAD_TOO_LARGE" || payload?.detail?.code === "UPLOAD_TOO_LARGE") {
+    return payload?.message || payload?.detail?.message || `File exceeds the maximum upload size of ${state.uploadLimits.maxDisplay}.`;
+  }
+  return payload?.detail || payload?.error || `Upload failed (HTTP ${statusCode})`;
 }
 
 async function refreshFiles() {
@@ -407,12 +433,20 @@ async function uploadFiles() {
   if (state.uploadProgressEl) state.uploadProgressEl.classList.remove("hidden");
   const form = new FormData();
   for (const f of input.files) {
+    if (Number(f.size) > state.uploadLimits.maxBytes) {
+      if (state.uploadStatusEl) state.uploadStatusEl.textContent = `Upload rejected: ${f.name} exceeds the maximum upload size of ${state.uploadLimits.maxDisplay}.`;
+      if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
+      return;
+    }
     form.append("files", f);
   }
   const resp = await fetch(`/api/session/${state.sessionId}/upload`, { method: "POST", body: form });
   if (!resp.ok) {
-    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload failed. Try again.";
-    alert("Upload failed");
+    let payload = {};
+    try {
+      payload = await resp.json();
+    } catch (_) {}
+    if (state.uploadStatusEl) state.uploadStatusEl.textContent = parseUploadFailure(payload, resp.status);
     if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
     return;
   }
@@ -1745,6 +1779,7 @@ function wireEvents() {
 document.addEventListener("DOMContentLoaded", async () => {
   state.uploadStatusEl = el("upload-status") || state.uploadStatusEl;
   state.uploadProgressEl = el("upload-progress") || state.uploadProgressEl;
+  await loadUploadLimits();
   wireEvents();
   renderPendingChanges();
   ensureSession();

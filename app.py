@@ -105,7 +105,11 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 BACKEND_CONFIG_DIR = Path(__file__).resolve().parent / "backend" / "config"
 UTC = datetime.timezone.utc
 HEAVY_JOB_SEMAPHORE = threading.Semaphore(1)
-MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
+MAX_UPLOAD_BYTES = 1_200_000_000
+MAX_UPLOAD_GB = 1.2
+MAX_UPLOAD_DISPLAY = "1.2 GB"
+REQUEST_BODY_LIMIT_HEADROOM_BYTES = 25_000_000
+MAX_REQUEST_BODY_BYTES = MAX_UPLOAD_BYTES + REQUEST_BODY_LIMIT_HEADROOM_BYTES
 MAX_IFC_BYTES = int(os.getenv("MAX_IFC_BYTES", str(80 * 1024 * 1024)))
 MAX_EXCEL_BYTES = int(os.getenv("MAX_EXCEL_BYTES", str(25 * 1024 * 1024)))
 HEAVY_JOB_TIMEOUT_SECONDS = int(os.getenv("HEAVY_JOB_TIMEOUT_SECONDS", "900"))
@@ -202,21 +206,59 @@ def log_memory_stage(
 def enforce_upload_limits(file_path: str, *, endpoint: str) -> None:
     size = os.path.getsize(file_path)
     if size > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File exceeds MAX_UPLOAD_BYTES ({human_size(MAX_UPLOAD_BYTES)}): {os.path.basename(file_path)}",
-        )
-    if file_path.lower().endswith(".ifc") and size > MAX_IFC_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"IFC exceeds MAX_IFC_BYTES ({human_size(MAX_IFC_BYTES)}); use a smaller model or worker tier.",
-        )
-    if file_path.lower().endswith((".xlsx", ".xlsm", ".xls")) and size > MAX_EXCEL_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Excel exceeds MAX_EXCEL_BYTES ({human_size(MAX_EXCEL_BYTES)}).",
+        raise_upload_too_large(
+            endpoint=endpoint,
+            filename=os.path.basename(file_path),
+            actual_size=size,
+            rejection_reason="file_size_exceeds_limit",
         )
     APP_LOGGER.info("upload_limit_check endpoint=%s file=%s bytes=%s", endpoint, file_path, size)
+
+
+def upload_too_large_payload() -> Dict[str, Any]:
+    return {
+        "code": "UPLOAD_TOO_LARGE",
+        "message": "File exceeds the maximum upload size of 1.2 GB.",
+        "max_bytes": MAX_UPLOAD_BYTES,
+        "max_gb": MAX_UPLOAD_GB,
+    }
+
+
+def log_upload_rejection(
+    *,
+    endpoint: str,
+    filename: str,
+    content_length: Optional[int],
+    actual_size: Optional[int],
+    rejection_reason: str,
+) -> None:
+    APP_LOGGER.warning(
+        "upload_rejected_413 endpoint=%s filename=%s content_length=%s actual_size=%s configured_max_upload_bytes=%s rejection_reason=%s",
+        endpoint,
+        filename,
+        content_length if content_length is not None else -1,
+        actual_size if actual_size is not None else -1,
+        MAX_UPLOAD_BYTES,
+        rejection_reason,
+    )
+
+
+def raise_upload_too_large(
+    *,
+    endpoint: str,
+    filename: str,
+    actual_size: Optional[int] = None,
+    content_length: Optional[int] = None,
+    rejection_reason: str = "file_too_large",
+) -> None:
+    log_upload_rejection(
+        endpoint=endpoint,
+        filename=filename,
+        content_length=content_length,
+        actual_size=actual_size,
+        rejection_reason=rejection_reason,
+    )
+    raise HTTPException(status_code=413, detail=upload_too_large_payload())
 
 
 @contextmanager
@@ -5739,6 +5781,41 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 
+@app.middleware("http")
+async def upload_request_size_guard(request: Request, call_next):
+    upload_paths = {
+        "/api/ifc-qa/run",
+        "/api/ifc-qa/add-to-zip",
+        "/api/tools/cobieqc/run",
+    }
+    path = request.url.path
+    is_upload_path = path in upload_paths or path.endswith("/upload")
+    if is_upload_path:
+        content_length_header = request.headers.get("content-length")
+        if content_length_header:
+            try:
+                content_length = int(content_length_header)
+            except ValueError:
+                content_length = None
+            if content_length and content_length > MAX_REQUEST_BODY_BYTES:
+                log_upload_rejection(
+                    endpoint=path,
+                    filename="request-body",
+                    content_length=content_length,
+                    actual_size=None,
+                    rejection_reason="request_content_length_exceeds_limit",
+                )
+                return JSONResponse(status_code=413, content=upload_too_large_payload())
+    return await call_next(request)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    if exc.status_code == 413 and isinstance(exc.detail, dict) and exc.detail.get("code") == "UPLOAD_TOO_LARGE":
+        return JSONResponse(status_code=413, content=exc.detail)
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
 @app.get("/health")
 def health():
     runtime_diag = get_cobieqc_runtime_diagnostics()
@@ -5769,6 +5846,16 @@ def health():
     if last_error:
         payload["cobieqc"]["last_error"] = last_error
     return payload
+
+
+@app.get("/api/upload/limits")
+def upload_limits():
+    return {
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
+        "max_upload_gb": MAX_UPLOAD_GB,
+        "max_upload_display": MAX_UPLOAD_DISPLAY,
+        "max_request_body_bytes": MAX_REQUEST_BODY_BYTES,
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -6040,6 +6127,7 @@ def runtime_build_info():
 @app.post("/api/tools/cobieqc/run")
 async def cobieqc_run(
     background_tasks: BackgroundTasks,
+    request: Request,
     file: UploadFile = File(...),
     stage: str = Form("D"),
 ):
@@ -6068,7 +6156,14 @@ async def cobieqc_run(
             written += len(chunk)
             if written > MAX_UPLOAD_BYTES:
                 input_path.unlink(missing_ok=True)
-                raise HTTPException(status_code=413, detail=f"Upload exceeds MAX_UPLOAD_BYTES ({human_size(MAX_UPLOAD_BYTES)})")
+                content_length = request.headers.get("content-length")
+                raise_upload_too_large(
+                    endpoint="/api/tools/cobieqc/run",
+                    filename=safe_name,
+                    actual_size=written,
+                    content_length=int(content_length) if content_length and content_length.isdigit() else None,
+                    rejection_reason="streamed_upload_exceeded_limit",
+                )
             dst.write(chunk)
     try:
         validate_upload(safe_name, written)
@@ -6217,7 +6312,12 @@ async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
                 if written > MAX_UPLOAD_BYTES:
                     dst.close()
                     os.remove(dest)
-                    raise HTTPException(status_code=413, detail=f"Upload exceeds MAX_UPLOAD_BYTES ({human_size(MAX_UPLOAD_BYTES)}): {safe}")
+                    raise_upload_too_large(
+                        endpoint=f"/api/session/{session_id}/upload",
+                        filename=safe,
+                        actual_size=written,
+                        rejection_reason="streamed_upload_exceeded_limit",
+                    )
                 dst.write(chunk)
         enforce_upload_limits(dest, endpoint="/api/session/{session_id}/upload")
         saved.append({"name": safe, "size": os.path.getsize(dest)})
@@ -6262,10 +6362,11 @@ async def ifc_qa_run(
                     if written > MAX_UPLOAD_BYTES:
                         handle.close()
                         dest.unlink(missing_ok=True)
-                        APP_LOGGER.warning("ifc_qa_run_rejected reason=file_too_large file=%s", original_name)
-                        raise HTTPException(
-                            status_code=413,
-                            detail=f"Upload exceeds MAX_UPLOAD_BYTES ({human_size(MAX_UPLOAD_BYTES)}): {original_name}",
+                        raise_upload_too_large(
+                            endpoint="/api/ifc-qa/run",
+                            filename=original_name,
+                            actual_size=written,
+                            rejection_reason="streamed_upload_exceeded_limit",
                         )
                     handle.write(chunk)
             enforce_upload_limits(str(dest), endpoint="/api/ifc-qa/run")
@@ -6318,6 +6419,8 @@ async def ifc_qa_run(
             "message": "Job started",
         }
     except HTTPException as exc:
+        if exc.status_code == 413 and isinstance(exc.detail, dict) and exc.detail.get("code") == "UPLOAD_TOO_LARGE":
+            return JSONResponse(status_code=413, content=exc.detail)
         return JSONResponse(
             status_code=exc.status_code,
             content={
@@ -6355,10 +6458,21 @@ async def ifc_qa_add_to_zip(
         original_name = upload.filename or "upload.ifc"
         dest = upload_dir / sanitize_filename(original_name)
         with open(dest, "wb") as handle:
+            written = 0
             while True:
                 chunk = await upload.read(1024 * 1024)
                 if not chunk:
                     break
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    handle.close()
+                    dest.unlink(missing_ok=True)
+                    raise_upload_too_large(
+                        endpoint="/api/ifc-qa/add-to-zip",
+                        filename=original_name,
+                        actual_size=written,
+                        rejection_reason="streamed_upload_exceeded_limit",
+                    )
                 handle.write(chunk)
         enforce_upload_limits(str(dest), endpoint="/api/ifc-qa/add-to-zip")
         file_records.append((original_name, str(dest)))

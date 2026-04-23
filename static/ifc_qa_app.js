@@ -31,6 +31,8 @@ const qaState = {
   modelCount: 0,
   hasZip: false,
   sessionSourceFiles: [],
+  maxUploadBytes: 1_200_000_000,
+  maxUploadDisplay: "1.2 GB",
 };
 
 const DEFAULT_SHEETS = [
@@ -137,6 +139,19 @@ async function loadQaConfig() {
   qaState.configLoaded = false;
 }
 
+async function loadUploadLimits() {
+  try {
+    const resp = await fetch("/api/upload/limits");
+    if (resp.ok) {
+      const data = await resp.json();
+      if (Number.isFinite(Number(data.max_upload_bytes))) qaState.maxUploadBytes = Number(data.max_upload_bytes);
+      if (data.max_upload_display) qaState.maxUploadDisplay = String(data.max_upload_display);
+    }
+  } catch (_) {}
+  const hint = qs("#qaMaxUploadHint");
+  if (hint) hint.textContent = `Maximum file size: ${qaState.maxUploadDisplay}`;
+}
+
 function warningBanner() {
   if (!qaState.warning) return "";
   return `<div class="card" style="border-left:4px solid #f59e0b;background:#fff8e6">${qaState.warning}</div>`;
@@ -149,6 +164,7 @@ function extractorTemplate() {
   <div class="stack">
     <label>IFC files</label>
     <input id="qaIfcFiles" type="file" multiple accept=".ifc" />
+    <div class="muted" id="qaMaxUploadHint">Maximum file size: 1.2 GB</div>
     <div id="qaSelectionSummary" class="muted">No files selected.</div>
     <ul id="qaFileList" class="qa-file-list muted"></ul>
     <div id="qaFileQueue" class="qa-file-queue"></div>
@@ -297,6 +313,19 @@ function bindFilesList() {
   if (!input) return;
   input.addEventListener("change", async () => {
     const files = Array.from(input.files || []);
+    const oversized = files.find((file) => Number(file.size) > qaState.maxUploadBytes);
+    if (oversized) {
+      qaState.selectedFiles = [];
+      qaState.selectedTotalBytes = 0;
+      qaState.fileQueue = [];
+      qaState.canRunQa = false;
+      input.value = "";
+      setUploadWarning(`Upload rejected: ${oversized.name} exceeds the maximum upload size of ${qaState.maxUploadDisplay}.`);
+      setUploadState("failed", { uploadBytesLoaded: 0, uploadBytesTotal: 0, uploadPercent: 0 });
+      renderFileQueue();
+      renderActionButtons();
+      return;
+    }
     qaState.selectedFiles = files;
     qaState.selectedTotalBytes = files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
     qaState.fileQueue = createUploadModel(files);
@@ -326,7 +355,17 @@ function bindFilesList() {
     setUploadState("queued", { uploadBytesLoaded: 0, uploadBytesTotal: qaState.selectedTotalBytes, uploadPercent: 0 });
     renderFileQueue();
     renderActionButtons();
-    await uploadSelectedFiles();
+    try {
+      await uploadSelectedFiles();
+      setUploadWarning("");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Upload failed";
+      setUploadWarning(message);
+      setUploadState("failed", { uploadPercent: 0, uploadBytesLoaded: 0, uploadBytesTotal: qaState.selectedTotalBytes });
+      qaState.fileQueue.forEach((row) => { row.status = "failed"; row.stageText = "Failed"; });
+      renderFileQueue();
+      renderActionButtons();
+    }
   });
 }
 
@@ -489,7 +528,16 @@ async function uploadSelectedFiles() {
     xhr.onerror = () => reject(new Error("Network error during upload"));
     xhr.onload = () => {
       if (xhr.status < 200 || xhr.status >= 300) {
-        reject(new Error(`Upload failed with status ${xhr.status}`));
+        let payload = {};
+        try {
+          payload = parseXhrJson(xhr);
+        } catch (_) {}
+        reject(new Error(
+          payload?.message
+          || payload?.detail?.message
+          || payload?.detail
+          || `Upload failed with status ${xhr.status}`
+        ));
         return;
       }
       resolve();
@@ -546,7 +594,7 @@ function startQaUpload(form, fileCount) {
         }
         reject({
           stage: "start",
-          message: payload?.error || payload?.detail || `Request failed with status ${xhr.status}`,
+          message: payload?.message || payload?.error || payload?.detail || `Request failed with status ${xhr.status}`,
           detail: payload?.detail || "",
         });
         return;
@@ -833,6 +881,7 @@ async function init() {
 
   if (page === "extractor") {
     root.innerHTML = extractorTemplate();
+    await loadUploadLimits();
     root.insertAdjacentHTML("afterbegin", `<div class="muted" style="margin-bottom:8px">IFC QA UI mounted</div>`);
     bindExtractor();
     await refreshSessionSummary();
