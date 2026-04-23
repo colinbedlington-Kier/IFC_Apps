@@ -39,6 +39,7 @@ const qaState = {
   statusBanner: "No files selected",
   overallProgress: 0,
   buildInfo: null,
+  selectionErrors: [],
 };
 
 const DEFAULT_SHEETS = [
@@ -179,6 +180,7 @@ function extractorTemplate() {
     <div class="muted" id="qaMaxUploadHint">Maximum file size: 1.2 GB</div>
     <div id="qaSelectionSummary" class="muted">No files selected.</div>
     <ul id="qaFileList" class="qa-file-list muted"></ul>
+    <div id="qaSelectionErrors" class="qa-warning-banner" hidden></div>
     <div id="qaFileQueue" class="qa-file-queue"></div>
     <div class="inline">
       <button class="btn" id="qaUploadBtn" type="button" disabled>Upload Selected Files</button>
@@ -247,6 +249,31 @@ function formatBytes(bytes) {
 
 function makeFileId(file, idx) {
   return `${file.name}::${file.size}::${file.lastModified || 0}::${idx}`;
+}
+
+function validateSelectedFiles(files) {
+  const acceptedFiles = [];
+  const rejectedFiles = [];
+  const seenKeys = new Set();
+  files.forEach((file) => {
+    const key = `${file.name}::${file.size}::${file.lastModified || 0}`;
+    const lowerName = String(file.name || "").toLowerCase();
+    if (!lowerName.endsWith(".ifc")) {
+      rejectedFiles.push({ name: file.name, reason: "Only .ifc files are allowed." });
+      return;
+    }
+    if (Number(file.size) > qaState.maxUploadBytes) {
+      rejectedFiles.push({ name: file.name, reason: `Exceeds maximum upload size of ${qaState.maxUploadDisplay}.` });
+      return;
+    }
+    if (seenKeys.has(key)) {
+      rejectedFiles.push({ name: file.name, reason: "Duplicate file in selection." });
+      return;
+    }
+    seenKeys.add(key);
+    acceptedFiles.push(file);
+  });
+  return { acceptedFiles, rejectedFiles };
 }
 
 function createUploadModel(files) {
@@ -354,6 +381,20 @@ function renderActionButtons() {
   if (startBtn) startBtn.disabled = qaState.isRunning || qaState.isStartingRun || !qaState.canRunQa || !qaState.configLoaded;
   if (addBtn) addBtn.disabled = !hasUploaded || qaState.modelCount <= 0;
   if (dlBtn) dlBtn.disabled = qaState.isRunning || !qaState.hasZip;
+  if (canUpload) {
+    console.info("canUpload=true");
+  } else {
+    const reason = !qaState.sessionReady
+      ? "sessionReady===false"
+      : qaState.selectedFiles.length <= 0
+        ? "selectedFiles.length===0"
+        : isUploading
+          ? "isUploading===true"
+          : qaState.isStartingRun
+            ? "isStartingRun===true"
+            : "unknown";
+    console.info(`canUpload=false because ${reason}`);
+  }
 }
 
 function selectedSheets() {
@@ -422,7 +463,12 @@ function setUploadControlsDisabled(disabled) {
 
 function renderSelectedFilesState() {
   const files = Array.from(qaState.selectedFiles || []);
-  const names = files.map((f) => `<li><span>${f.name}</span><span>${formatBytes(f.size)}</span></li>`).join("");
+  const queueByName = new Map((qaState.fileQueue || []).map((row) => [row.name, row]));
+  const names = files.map((f) => {
+    const row = queueByName.get(f.name);
+    const status = row?.status || "queued";
+    return `<li><span>${f.name}</span><span>${formatBytes(f.size)} • ${statusLabel(status).toLowerCase()}</span></li>`;
+  }).join("");
   const list = qs("#qaFileList");
   if (list) list.innerHTML = names || "<li>No files selected.</li>";
   const summary = qs("#qaSelectionSummary");
@@ -430,6 +476,18 @@ function renderSelectedFilesState() {
     summary.textContent = files.length
       ? `${files.length} file${files.length === 1 ? "" : "s"} selected • ${formatBytes(qaState.selectedTotalBytes)} total`
       : "No files selected.";
+  }
+  const errorsEl = qs("#qaSelectionErrors");
+  if (errorsEl) {
+    if (!qaState.selectionErrors.length) {
+      errorsEl.innerHTML = "";
+      errorsEl.hidden = true;
+    } else {
+      errorsEl.hidden = false;
+      errorsEl.innerHTML = qaState.selectionErrors
+        .map((entry) => `<div>${entry.name}: ${entry.reason}</div>`)
+        .join("");
+    }
   }
 }
 
