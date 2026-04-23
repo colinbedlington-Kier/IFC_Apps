@@ -27,6 +27,7 @@ import ifcopenshell.api
 import ifcopenshell.util.element
 import ifcopenshell.util.placement
 import pandas as pd
+from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -1292,6 +1293,19 @@ def load_ifc2x3_entity_mapping() -> Dict[str, Any]:
     return payload
 
 
+def _excel_range(sheet_name: str, column_letter: str, start_row: int, end_row: int) -> str:
+    return f"'{sheet_name}'!${column_letter}${start_row}:${column_letter}${end_row}"
+
+
+def _upsert_workbook_defined_name(workbook: Any, name: str, attr_text: str) -> None:
+    # Workbook-level named ranges back DataValidation dropdowns. This avoids long inline list
+    # formulas, which can generate invalid XML and trigger Excel repair warnings.
+    existing = workbook.defined_names.get(name)
+    if existing is not None:
+        workbook.defined_names.delete(name)
+    workbook.defined_names.add(DefinedName(name=name, attr_text=attr_text))
+
+
 def _normalize_field_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (value or "").strip().lower())
 
@@ -1604,8 +1618,10 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
             "ApplyChange": "No",
         }
 
+    source_file_name = os.path.basename(ifc_path)
     for elem in elements:
         type_obj = _element_type_obj(elem)
+        current_predefined = getattr(elem, "PredefinedType", "") if hasattr(elem, "PredefinedType") else ""
         row = {
             "GlobalId": elem.GlobalId,
             "Class": elem.is_a(),
@@ -1614,6 +1630,12 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
             "TypeName": getattr(type_obj, "Name", "") if type_obj else "",
             "TypeDescription": getattr(elem, "Description", ""),
             "IFCPresentationLayer": _get_layers_name(elem, ifc),
+            "ExpressLine": str(elem),
+            "IfcEntity": elem.is_a(),
+            "PredefinedType": current_predefined or "",
+            "Name": getattr(elem, "Name", "") or "",
+            "ObjectType": getattr(elem, "ObjectType", "") or "",
+            "SourceFile": source_file_name,
         }
         if plan.civil3d_extended:
             for field_name in CIVIL3D_EXTENDED_FIELDS:
@@ -1777,44 +1799,60 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
         if "ChangeLog" in plan.include_sheets:
             changelog_df.to_excel(writer, sheet_name="ChangeLog", index=False)
 
-        if ifc.schema.upper() == "IFC2X3":
-            mapping = load_ifc2x3_entity_mapping()
-            entities = sorted((mapping.get("entities") or {}).keys())
-            lookup_rows = [{"Entity": e} for e in entities]
-            entity_lookup_df = pd.DataFrame(lookup_rows)
-            predefined_rows: List[Dict[str, Any]] = []
-            for entity in entities:
-                enum_items = (mapping.get("entities", {}).get(entity, {}) or {}).get("predefined_types", []) or [""]
-                for val in enum_items:
-                    predefined_rows.append({"Entity": entity, "PredefinedType": val or ""})
-            predefined_df = pd.DataFrame(predefined_rows)
-            entity_lookup_df.to_excel(writer, sheet_name="Lists_Entities", index=False)
-            predefined_df.to_excel(writer, sheet_name="Lists_PredefinedTypes", index=False)
+        mapping = load_ifc2x3_entity_mapping()
+        entities = sorted((mapping.get("entities") or {}).keys())
+        predefined_values = sorted(
+            {
+                (predefined or "").strip()
+                for entity in entities
+                for predefined in ((mapping.get("entities", {}).get(entity, {}) or {}).get("predefined_types", []) or [])
+                if (predefined or "").strip()
+            }
+        )
+        entity_lookup_df = pd.DataFrame({"IfcEntity": entities})
+        predefined_lookup_df = pd.DataFrame({"PredefinedType": predefined_values})
+        entity_predefined_map_rows: List[Dict[str, str]] = []
+        for entity in entities:
+            enum_items = (mapping.get("entities", {}).get(entity, {}) or {}).get("predefined_types", []) or []
+            for val in enum_items:
+                cleaned = (val or "").strip()
+                if cleaned:
+                    entity_predefined_map_rows.append({"IfcEntity": entity, "PredefinedType": cleaned})
+        entity_predefined_map_df = pd.DataFrame(entity_predefined_map_rows, columns=["IfcEntity", "PredefinedType"])
+        entity_lookup_df.to_excel(writer, sheet_name="IfcEntities", index=False)
+        predefined_lookup_df.to_excel(writer, sheet_name="PredefinedTypes", index=False)
+        entity_predefined_map_df.to_excel(writer, sheet_name="EntityPredefinedTypeMap", index=False)
 
-            workbook = writer.book
-            for sheet_name in ("Elements", "Types"):
-                if sheet_name not in workbook.sheetnames:
-                    continue
-                ws = workbook[sheet_name]
-                header = [c.value for c in ws[1]]
-                if "TargetEntity" not in header or "TargetPredefinedType" not in header:
-                    continue
-                target_entity_col = get_column_letter(header.index("TargetEntity") + 1)
-                target_predef_col = get_column_letter(header.index("TargetPredefinedType") + 1)
-                max_row = max(ws.max_row, 2)
-                entity_dv = DataValidation(type="list", formula1="=Lists_Entities!$A$2:$A$9999", allow_blank=True)
+        workbook = writer.book
+        if len(entities) > 0:
+            _upsert_workbook_defined_name(
+                workbook,
+                "IfcEntityList",
+                _excel_range("IfcEntities", "A", 2, len(entities) + 1),
+            )
+        if len(predefined_values) > 0:
+            _upsert_workbook_defined_name(
+                workbook,
+                "PredefinedTypeList",
+                _excel_range("PredefinedTypes", "A", 2, len(predefined_values) + 1),
+            )
+
+        if "Elements" in workbook.sheetnames:
+            ws = workbook["Elements"]
+            header = [c.value for c in ws[1]]
+            if "IfcEntity" in header and len(entities) > 0 and ws.max_row >= 2:
+                entity_col = get_column_letter(header.index("IfcEntity") + 1)
+                entity_dv = DataValidation(type="list", formula1="=IfcEntityList", allow_blank=True)
                 ws.add_data_validation(entity_dv)
-                entity_dv.add(f"{target_entity_col}2:{target_entity_col}{max_row}")
-                predef_dv = DataValidation(
-                    type="list",
-                    formula1=f'=IFERROR(FILTER(Lists_PredefinedTypes!$B$2:$B$20000,Lists_PredefinedTypes!$A$2:$A$20000={target_entity_col}2),"")',
-                    allow_blank=True,
-                )
+                entity_dv.add(f"{entity_col}2:{entity_col}{ws.max_row}")
+            if "PredefinedType" in header and len(predefined_values) > 0 and ws.max_row >= 2:
+                predef_col = get_column_letter(header.index("PredefinedType") + 1)
+                predef_dv = DataValidation(type="list", formula1="=PredefinedTypeList", allow_blank=True)
                 ws.add_data_validation(predef_dv)
-                predef_dv.add(f"{target_predef_col}2:{target_predef_col}{max_row}")
+                predef_dv.add(f"{predef_col}2:{predef_col}{ws.max_row}")
 
-            workbook["Lists_Entities"].sheet_state = "hidden"
-            workbook["Lists_PredefinedTypes"].sheet_state = "hidden"
+        for lookup_sheet in ("IfcEntities", "PredefinedTypes", "EntityPredefinedTypeMap"):
+            workbook[lookup_sheet].sheet_state = "hidden"
     timer.stop("excel_write")
     return {"path": output_path, "timings_ms": timer.as_payload(), "counts": {"elements": len(elements), "types": len(all_types), "properties": len(prop_rows), "cobie_rows": len(cobie_rows)}}
 
