@@ -40,6 +40,7 @@ const qaState = {
   overallProgress: 0,
   buildInfo: null,
   selectionErrors: [],
+  lastUploadResult: "none",
 };
 
 const DEFAULT_SHEETS = [
@@ -114,6 +115,7 @@ async function ensureSession() {
   if (qaState.sessionId) localStorage.setItem("ifc_session_id", qaState.sessionId);
   renderSessionState();
   renderActionButtons();
+  renderDebugState();
   return qaState.sessionId;
 }
 
@@ -133,6 +135,7 @@ async function refreshSessionSummary() {
   } catch (_) {}
   renderSessionSummary();
   renderActionButtons();
+  renderDebugState();
 }
 
 async function loadQaConfig() {
@@ -180,6 +183,8 @@ function extractorTemplate() {
     <div class="muted" id="qaMaxUploadHint">Maximum file size: 1.2 GB</div>
     <div id="qaSelectionSummary" class="muted">No files selected.</div>
     <ul id="qaFileList" class="qa-file-list muted"></ul>
+    <div id="qaSessionFilesSummary" class="muted">No files uploaded to session.</div>
+    <ul id="qaSessionFileList" class="qa-file-list muted"></ul>
     <div id="qaSelectionErrors" class="qa-warning-banner" hidden></div>
     <div id="qaFileQueue" class="qa-file-queue"></div>
     <div class="inline">
@@ -212,6 +217,7 @@ function extractorTemplate() {
 
     <div id="qaSessionSummary" class="muted"></div>
     <div id="qaBuildInfo" class="muted">Build: loading…</div>
+    <div id="qaDebugState" class="muted" style="font-family:monospace;border:1px dashed #cbd5e1;padding:8px;border-radius:6px"></div>
 
     <div class="progress-track"><div id="qaProgressFill" class="progress-fill" style="width:0%"></div></div>
     <div id="qaProgressLabel" class="muted"></div>
@@ -332,7 +338,7 @@ function renderFileQueue() {
   const wrap = qs("#qaFileQueue");
   if (!wrap) return;
   if (!qaState.fileQueue.length) {
-    wrap.innerHTML = "<div class='muted'>No files selected.</div>";
+    wrap.innerHTML = "<div class='muted'>No local upload queue items.</div>";
     return;
   }
   wrap.innerHTML = qaState.fileQueue.map((row) => {
@@ -378,7 +384,8 @@ function renderActionButtons() {
   console.info(`IFC QA upload button gate: canUpload=${canUpload} because ${disableReason}`);
   if (uploadBtn) uploadBtn.disabled = !canUpload;
   if (retryBtn) retryBtn.disabled = !qaState.sessionReady || qaState.isStartingRun || qaState.uploadState === "uploading" || !hasFailed;
-  if (startBtn) startBtn.disabled = qaState.isRunning || qaState.isStartingRun || !qaState.canRunQa || !qaState.configLoaded;
+  const hasSessionFiles = (qaState.sessionFiles || []).length > 0;
+  if (startBtn) startBtn.disabled = qaState.isRunning || qaState.isStartingRun || !hasSessionFiles || !qaState.configLoaded;
   if (addBtn) addBtn.disabled = !hasUploaded || qaState.modelCount <= 0;
   if (dlBtn) dlBtn.disabled = qaState.isRunning || !qaState.hasZip;
   if (canUpload) {
@@ -428,8 +435,6 @@ function bindFilesList() {
     if (!acceptedFiles.length) {
       qaState.selectedFiles = [];
       syncQueueFromSelectedFiles();
-      qaState.uploadedFiles = [];
-      qaState.canRunQa = false;
       qaState.overallProgress = 0;
       setUploadWarning(rejected.length ? `Upload rejected: ${rejected.join("; ")}` : "No valid IFC files selected.");
       setUploadState("failed", { uploadBytesLoaded: 0, uploadBytesTotal: 0, uploadPercent: 0 });
@@ -442,8 +447,6 @@ function bindFilesList() {
     qaState.selectedFiles = acceptedFiles;
     syncQueueFromSelectedFiles();
     console.info(`IFC QA selectedFiles state=${qaState.selectedFiles.length}`);
-    qaState.uploadedFiles = [];
-    qaState.canRunQa = false;
     qaState.overallProgress = 0;
     setUploadWarning(rejected.length ? `Some files were rejected: ${rejected.join("; ")}` : "");
     setSessionWarning("");
@@ -473,9 +476,14 @@ function renderSelectedFilesState() {
   if (list) list.innerHTML = names || "<li>No files selected.</li>";
   const summary = qs("#qaSelectionSummary");
   if (summary) {
-    summary.textContent = files.length
-      ? `${files.length} file${files.length === 1 ? "" : "s"} selected • ${formatBytes(qaState.selectedTotalBytes)} total`
-      : "No files selected.";
+    if (files.length) {
+      summary.textContent = `${files.length} file${files.length === 1 ? "" : "s"} selected • ${formatBytes(qaState.selectedTotalBytes)} total`;
+    } else if ((qaState.sessionFiles || []).length > 0) {
+      const count = qaState.sessionFiles.length;
+      summary.textContent = `${count} file${count === 1 ? "" : "s"} uploaded to session`;
+    } else {
+      summary.textContent = "No files selected.";
+    }
   }
   const errorsEl = qs("#qaSelectionErrors");
   if (errorsEl) {
@@ -491,6 +499,41 @@ function renderSelectedFilesState() {
   }
 }
 
+function renderSessionFiles() {
+  const files = Array.isArray(qaState.sessionFiles) ? qaState.sessionFiles : [];
+  const summary = qs("#qaSessionFilesSummary");
+  const list = qs("#qaSessionFileList");
+  if (summary) {
+    summary.textContent = files.length
+      ? `Uploaded session files (${files.length})`
+      : "No files uploaded to session.";
+  }
+  if (!list) return;
+  if (!files.length) {
+    list.innerHTML = "<li>No uploaded session files.</li>";
+    return;
+  }
+  list.innerHTML = files.map((f) => {
+    const name = f.name || f.filename || "unknown";
+    const size = Number(f.size || f.bytes || 0);
+    const status = f.status || "uploaded";
+    return `<li><span>${name}</span><span>${formatBytes(size)} • ${statusLabel(status).toLowerCase()}</span></li>`;
+  }).join("");
+}
+
+function renderDebugState() {
+  const el = qs("#qaDebugState");
+  if (!el) return;
+  el.innerHTML = [
+    `<strong>Debug state</strong>`,
+    `sessionId: ${qaState.sessionId || "-"}`,
+    `selectedFiles: ${(qaState.selectedFiles || []).length}`,
+    `uploadQueue: ${(qaState.fileQueue || []).length}`,
+    `sessionFiles: ${(qaState.sessionFiles || []).length}`,
+    `lastUploadResult: ${qaState.lastUploadResult || "none"}`,
+  ].join("<br>");
+}
+
 function renderBuildInfo() {
   const el = qs("#qaBuildInfo");
   if (!el) return;
@@ -502,6 +545,7 @@ function renderBuildInfo() {
   }
   const shortSha = (info.git_sha || "unknown").slice(0, 8);
   el.textContent = `Build: ${info.frontend_build_id || "unknown"} (sha ${shortSha})`;
+  renderDebugState();
 }
 
 async function loadBuildInfo() {
@@ -577,8 +621,9 @@ function renderUploadProgress() {
   const totalQueued = qaState.selectedFiles.length;
   const uploadedCount = qaState.fileQueue.filter((row) => row.status === "uploaded" || row.status === "complete").length;
   const uploadingIndex = qaState.fileQueue.findIndex((row) => row.status === "uploading");
+  const sessionCount = (qaState.sessionFiles || []).length;
   const statusMap = {
-    idle: "No files selected",
+    idle: sessionCount > 0 ? `${sessionCount} file${sessionCount === 1 ? "" : "s"} uploaded to session` : "No files selected",
     queued: `${totalQueued} file${totalQueued === 1 ? "" : "s"} queued for upload`,
     uploading: uploadingIndex >= 0 ? `Uploading ${uploadingIndex + 1} of ${totalQueued} files...` : "Uploading files...",
     uploaded: `${uploadedCount} file${uploadedCount === 1 ? "" : "s"} uploaded successfully`,
@@ -587,7 +632,7 @@ function renderUploadProgress() {
     failed: "Upload failed",
   };
 
-  qaState.statusBanner = statusMap[qaState.uploadState] || "No files selected";
+  qaState.statusBanner = statusMap[qaState.uploadState] || (sessionCount > 0 ? `${sessionCount} file${sessionCount === 1 ? "" : "s"} uploaded to session` : "No files selected");
   if (status) status.textContent = qaState.statusBanner;
   if (pct) pct.textContent = `${percent}%`;
   if (bar) bar.style.width = `${percent}%`;
@@ -595,6 +640,7 @@ function renderUploadProgress() {
   if (track) track.classList.toggle("indeterminate", isUploading && total <= 0);
   setUploadControlsDisabled(isUploading || qaState.isStartingRun);
   renderActionButtons();
+  renderDebugState();
 }
 
 function parseXhrJson(xhr) {
@@ -625,7 +671,11 @@ function reconcileSessionFiles(files) {
   qaState.canRunQa = uploadedIfc.length > 0;
   console.info("IFC QA canRunQa update", { canRunQa: qaState.canRunQa, uploadedIfcCount: uploadedIfc.length });
   renderFileQueue();
+  renderSessionFiles();
+  renderSelectedFilesState();
+  renderSessionSummary();
   renderActionButtons();
+  renderDebugState();
 }
 
 async function fetchSessionFilesWithRetry(maxAttempts = 3) {
@@ -696,6 +746,7 @@ async function uploadSelectedFiles(targetStatuses = ["queued"]) {
     };
     xhr.send(form);
   });
+  qaState.lastUploadResult = `success @ ${new Date().toISOString()}`;
   if (qaState.sessionId !== baselineSessionId) {
     setSessionWarning("Session changed during upload. Please reselect files before running QA.");
     return;
@@ -721,6 +772,7 @@ async function triggerUpload(targetStatuses = ["queued"]) {
     const message = err instanceof Error ? err.message : "Upload failed";
     console.error("IFC QA upload failure", { message, err });
     setUploadWarning(message);
+    qaState.lastUploadResult = `failed: ${message}`;
     setUploadState("failed", { uploadPercent: 0, uploadBytesLoaded: 0, uploadBytesTotal: qaState.selectedTotalBytes });
     qaState.fileQueue
       .filter((row) => targetStatuses.includes(row.status) || row.status === "uploading")
@@ -839,20 +891,13 @@ async function startRun() {
     return;
   }
   const files = Array.from(qaState.selectedFiles || []);
-  if (!files.length || !qaState.fileQueue.length) {
+  const sessionFiles = Array.from(qaState.sessionFiles || []).filter((f) => String(f.name || f.filename || "").toLowerCase().endsWith(".ifc"));
+  if (!sessionFiles.length) {
     setRunError("upload", "Upload at least one IFC file before starting extraction.");
     return;
   }
-  if (!qaState.canRunQa) {
-    setRunError("upload", "Upload at least one IFC file before starting extraction.");
-    return;
-  }
-  const uploadedNames = new Set((qaState.uploadedFiles || []).map((file) => file.name));
+  const uploadedNames = new Set(sessionFiles.map((file) => file.name || file.filename));
   const filesForRun = files.filter((file) => uploadedNames.has(file.name));
-  if (!filesForRun.length) {
-    setRunError("upload", "Upload at least one IFC file before starting extraction.");
-    return;
-  }
   const selected = selectedSheets();
   if (!Object.values(selected).some(Boolean)) {
     setRunError("start", "Select at least one output table before starting.");
@@ -876,8 +921,8 @@ async function startRun() {
 
   const form = new FormData();
   console.info("IFC QA run request", {
-    fileCount: filesForRun.length,
-    fileNames: filesForRun.map((f) => f.name),
+    fileCount: filesForRun.length || sessionFiles.length,
+    fileNames: filesForRun.length ? filesForRun.map((f) => f.name) : sessionFiles.map((f) => f.name || f.filename),
     selectedOutputs: Object.entries(selected).filter(([, enabled]) => enabled).map(([key]) => key),
     configLoaded: qaState.configLoaded,
   });
@@ -886,8 +931,9 @@ async function startRun() {
   form.append("config_override_json", JSON.stringify(qaState.qaConfig || {}));
 
   try {
-    console.info("IFC QA job upload started", { fileCount: files.length });
-    const data = await startQaUpload(form, files.length);
+    const runFileCount = filesForRun.length || sessionFiles.length;
+    console.info("IFC QA job upload started", { fileCount: runFileCount });
+    const data = await startQaUpload(form, runFileCount);
     setUploadState("uploaded", {
       uploadPercent: 100,
       uploadBytesLoaded: qaState.uploadBytesTotal || qaState.uploadBytesLoaded,
@@ -1007,7 +1053,9 @@ function bindExtractor() {
   renderSessionState();
   renderSelectedFilesState();
   renderFileQueue();
+  renderSessionFiles();
   renderBuildInfo();
+  renderDebugState();
   qs("#qaConfigureBtn")?.addEventListener("click", openConfig);
   qs("#qaConfigClose")?.addEventListener("click", closeConfig);
   qs("#qaConfigApply")?.addEventListener("click", applyConfig);
@@ -1068,7 +1116,11 @@ async function init() {
     root.insertAdjacentHTML("afterbegin", `<div class="muted" style="margin-bottom:8px">IFC QA UI mounted</div>`);
     bindExtractor();
     ensureSession()
-      .then(() => refreshSessionSummary())
+      .then(async () => {
+        await refreshSessionSummary();
+        const filesFromSession = await fetchSessionFilesWithRetry(1);
+        reconcileSessionFiles(filesFromSession);
+      })
       .catch((err) => {
         console.error("IFC QA session bootstrap failed", err);
         qaState.sessionReady = false;
@@ -1076,6 +1128,7 @@ async function init() {
         setSessionWarning("Failed to establish session. Retry shortly.");
         renderSessionState();
         renderActionButtons();
+        renderDebugState();
       });
     await loadQaConfig();
     renderActionButtons();
