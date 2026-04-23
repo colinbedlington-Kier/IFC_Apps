@@ -102,19 +102,16 @@ window.withProcessing = withProcessing;
 
 async function ensureSession() {
   try {
-    const existing = localStorage.getItem("ifc_session_id");
-    const resp = await fetchWithTimeout("/api/session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: existing }),
-    });
-    if (!resp.ok) {
-      throw new Error(`Session request failed (${resp.status})`);
+    const shared = window.IFCSession;
+    const resolved = shared ? await shared.ensureSession({ createIfMissing: true }) : "";
+    state.sessionId = resolved || state.sessionId;
+    if (!state.sessionId) throw new Error("No active session");
+    if (shared) {
+      shared.setCurrentSessionId(state.sessionId);
+      setSessionBadge(`Session ${shared.shortSessionId(state.sessionId)}`, true);
+    } else {
+      setSessionBadge(`Session ${state.sessionId.slice(0, 8)}`, true);
     }
-    const data = await resp.json();
-    state.sessionId = data.session_id;
-    localStorage.setItem("ifc_session_id", state.sessionId);
-    setSessionBadge(`Session ${state.sessionId.slice(0, 8)}…`, true);
     await refreshFiles();
     if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Session ready.";
   } catch (err) {
@@ -149,10 +146,14 @@ function parseUploadFailure(payload, statusCode) {
 async function refreshFiles() {
   if (!state.sessionId) return;
   try {
-    const resp = await fetchWithTimeout(`/api/session/${state.sessionId}/files`, {}, 8000);
-    if (!resp.ok) throw new Error("Could not list files");
-    const data = await resp.json();
-    state.files = data.files || [];
+    if (window.IFCSession?.getSessionFiles) {
+      state.files = await window.IFCSession.getSessionFiles(state.sessionId);
+    } else {
+      const resp = await fetchWithTimeout(`/api/session/${state.sessionId}/files`, {}, 8000);
+      if (!resp.ok) throw new Error("Could not list files");
+      const data = await resp.json();
+      state.files = data.files || [];
+    }
     renderFilesLists();
     populateFileSelects();
   } catch (err) {
@@ -459,7 +460,8 @@ async function uploadFiles() {
 async function endSession() {
   if (!state.sessionId) return;
   await fetch(`/api/session/${state.sessionId}`, { method: "DELETE" });
-  localStorage.removeItem("ifc_session_id");
+  if (window.IFCSession?.setCurrentSessionId) window.IFCSession.setCurrentSessionId("");
+  else localStorage.removeItem("ifc_session_id");
   state.sessionId = null;
   state.files = [];
   state.selectedFiles = new Set();
