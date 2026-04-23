@@ -6110,6 +6110,72 @@ def list_files(session_id: str):
     return {"files": files}
 
 
+def _is_ifc_compatible(name: str) -> bool:
+    lower = str(name or "").lower()
+    return lower.endswith(".ifc") or lower.endswith(".ifczip")
+
+
+def _resolve_session_ifc_records(session_id: str, file_names: List[str]) -> List[Tuple[str, str]]:
+    root = Path(SESSION_STORE.ensure(session_id))
+    records: List[Tuple[str, str]] = []
+    for incoming in file_names:
+        safe = sanitize_filename(os.path.basename(str(incoming or "")))
+        if not safe:
+            raise HTTPException(status_code=400, detail=f"Invalid file reference: {incoming!r}")
+        if not _is_ifc_compatible(safe):
+            raise HTTPException(status_code=400, detail=f"Unsupported IFC file type: {safe}")
+        source_path = root / safe
+        if not source_path.exists() or not source_path.is_file():
+            raise HTTPException(status_code=404, detail=f"Session file not found: {safe}")
+        records.append((safe, str(source_path)))
+    if not records:
+        raise HTTPException(status_code=400, detail="At least one IFC session file must be selected")
+    return records
+
+
+@app.post("/api/session/{session_id}/ifc-qa/extract")
+def ifc_qa_extract_from_session(
+    session_id: str,
+    payload: Dict[str, Any] = Body(...),
+):
+    if has_active_ifc_qa_job():
+        raise HTTPException(status_code=429, detail="An IFC QA job is already running on this replica. Please retry shortly.")
+
+    raw_ids = payload.get("file_ids")
+    raw_names = payload.get("file_names")
+    requested = raw_ids if isinstance(raw_ids, list) and raw_ids else raw_names
+    if not isinstance(requested, list):
+        raise HTTPException(status_code=400, detail="Provide file_ids or file_names as an array")
+
+    options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    options["max_workers"] = 1
+    options["session_id"] = session_id
+
+    cfg = load_ifc_qa_default_config()
+    override = payload.get("config_override")
+    if isinstance(override, dict):
+        cfg = merge_config_override(cfg, override)
+        cfg["_indexes"] = build_config_indexes(cfg)
+
+    file_records = _resolve_session_ifc_records(session_id, [str(item) for item in requested])
+    APP_LOGGER.info(
+        "ifc_qa_session_extract_start session_id=%s file_count=%s selected=%s",
+        session_id,
+        len(file_records),
+        ",".join(name for name, _ in file_records),
+    )
+    session_root = Path(SESSION_STORE.ensure(session_id)) / "ifc_qa_session"
+    session_root.mkdir(parents=True, exist_ok=True)
+    job_id = IFC_QA_JOB_STARTER(session_root, session_id, file_records, options, cfg, mode="replace")
+    return {
+        "success": True,
+        "job_id": job_id,
+        "session_id": session_id,
+        "selected_files": [{"file_id": name, "file_name": name} for name, _ in file_records],
+        "status_url": f"/api/ifc-qa/status/{job_id}",
+    }
+
+
 @app.post("/api/ifc-tools/reduce-file-size/analyse")
 def api_reduce_file_size_analyse(payload: Dict[str, Any] = Body(...)):
     session_id = payload.get("session_id")

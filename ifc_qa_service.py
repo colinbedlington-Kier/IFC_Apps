@@ -975,31 +975,37 @@ def run_session_job(
             }
         )
     REGISTRY.update(job_id, status="running", currentStep="uploaded", files=files_state, session_id=session_id)
+    had_failures = False
     try:
         for _, path in file_records:
             source = Path(path).name
-            REGISTRY.patch_file_state(job_id, source, status="processing", stage="processing", message="Extracting properties…", process_percent=5, overall_percent=53)
-            if source in existing_names:
-                _remove_existing_outputs(out_root, source)
-                manifest["processed_files"] = [entry for entry in manifest.get("processed_files", []) if entry.get("source_file") != source]
-            model_row = _process_file(job_id, Path(path), out_root, config, include)
-            entry = {
-                "source_file": source,
-                "source_path": str(path),
-                "status": "complete",
-                "added_at": dt.datetime.utcnow().isoformat() + "Z",
-                "outputs": _collect_output_paths(out_root, source),
-                "model_table_row": {
-                    "Source_Path": model_row[0],
-                    "Source_File": model_row[1],
-                    "File_Codes": model_row[2],
-                    "Model_Schema_Status": model_row[3],
-                    "Date_Checked": model_row[4],
-                },
-            }
-            manifest.setdefault("processed_files", []).append(entry)
-            existing_names.add(source)
-            REGISTRY.patch_file_state(job_id, source, status="complete", stage="complete", message="Complete", process_percent=100, overall_percent=100, upload_percent=100)
+            try:
+                REGISTRY.patch_file_state(job_id, source, status="processing", stage="processing", message="Extracting properties…", process_percent=5, overall_percent=53)
+                if source in existing_names:
+                    _remove_existing_outputs(out_root, source)
+                    manifest["processed_files"] = [entry for entry in manifest.get("processed_files", []) if entry.get("source_file") != source]
+                model_row = _process_file(job_id, Path(path), out_root, config, include)
+                entry = {
+                    "source_file": source,
+                    "source_path": str(path),
+                    "status": "complete",
+                    "added_at": dt.datetime.utcnow().isoformat() + "Z",
+                    "outputs": _collect_output_paths(out_root, source),
+                    "model_table_row": {
+                        "Source_Path": model_row[0],
+                        "Source_File": model_row[1],
+                        "File_Codes": model_row[2],
+                        "Model_Schema_Status": model_row[3],
+                        "Date_Checked": model_row[4],
+                    },
+                }
+                manifest.setdefault("processed_files", []).append(entry)
+                existing_names.add(source)
+                REGISTRY.patch_file_state(job_id, source, status="complete", stage="complete", message="Complete", process_percent=100, overall_percent=100, upload_percent=100, success=True, outputs=entry["outputs"], error="")
+            except Exception as exc:
+                had_failures = True
+                REGISTRY.append_log(job_id, f"Failed {source}: {exc}")
+                REGISTRY.patch_file_state(job_id, source, status="failed", stage="failed", message=f"Failed: {exc}", process_percent=100, overall_percent=100, success=False, outputs={}, error=str(exc))
 
         model_rows = [
             [
@@ -1013,13 +1019,16 @@ def run_session_job(
         ]
         _write_csv(out_root / "IFC Models" / "IFC MODEL TABLE.csv", HEADERS["model"], model_rows)
         zip_path = _rebuild_session_zip(session_root, out_root)
+        parent_session_root = session_root.parent
+        if parent_session_root.exists():
+            shutil.copy2(zip_path, parent_session_root / "IFC QA Output.zip")
         _save_manifest(session_root, manifest)
         REGISTRY.update(
             job_id,
-            status="complete",
+            status="complete_with_errors" if had_failures else "complete",
             percent=100,
             overall_percent=100,
-            currentStep="Complete",
+            currentStep="Complete with errors" if had_failures else "Complete",
             result_path=str(zip_path),
             manifest_summary={
                 "session_id": session_id,
@@ -1027,6 +1036,7 @@ def run_session_job(
                 "updated_at": manifest.get("updated_at"),
                 "source_files": [x.get("source_file", "") for x in manifest.get("processed_files", [])],
                 "has_zip": zip_path.exists(),
+                "failed_count": sum(1 for item in REGISTRY.get(job_id).get("files", []) if item.get("status") == "failed") if REGISTRY.get(job_id) else 0,
             },
         )
     except Exception as exc:

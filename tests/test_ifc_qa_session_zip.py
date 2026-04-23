@@ -65,3 +65,30 @@ def test_add_to_zip_appends_and_duplicate_replaces(tmp_path, monkeypatch):
     assert "IFC Output/IFC Models/IFC MODEL TABLE.csv" in members
     assert "IFC Output/IFC Project/IFC PROJECT - A.ifc.csv" in members
     assert "IFC Output/IFC Project/IFC PROJECT - B.ifc.csv" in members
+
+
+def test_session_job_continues_when_one_file_fails(tmp_path, monkeypatch):
+    def _sometimes_failing(job_id, ifc_path, out_root, config, include):
+        source = Path(ifc_path).name
+        if source == "Bad.ifc":
+            raise RuntimeError("broken file")
+        return _fake_process_file(job_id, ifc_path, out_root, config, include)
+
+    monkeypatch.setattr(ifc_qa_service, "_process_file", _sometimes_failing)
+    session_root = tmp_path / "session"
+    session_root.mkdir()
+    file_good = tmp_path / "Good.ifc"
+    file_bad = tmp_path / "Bad.ifc"
+    file_good.write_text("IFC", encoding="utf-8")
+    file_bad.write_text("IFC", encoding="utf-8")
+
+    job_id = ifc_qa_service.REGISTRY.create(session_id="s3")
+    ifc_qa_service.run_session_job(job_id, session_root, "s3", [("Good.ifc", str(file_good)), ("Bad.ifc", str(file_bad))], {}, {}, mode="replace")
+
+    summary = ifc_qa_service.read_session_summary(session_root, "s3")
+    assert summary["model_count"] == 1
+    job = ifc_qa_service.REGISTRY.get(job_id)
+    assert job["status"] == "complete_with_errors"
+    per_file = {row["source_file"]: row["status"] for row in job["files"]}
+    assert per_file["Good.ifc"] == "complete"
+    assert per_file["Bad.ifc"] == "failed"
