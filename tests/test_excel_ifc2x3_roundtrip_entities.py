@@ -42,10 +42,37 @@ def test_export_includes_types_raw_entities_and_dropdowns(tmp_path):
     assert "IfcBuildingElementProxyType" in set(types["CurrentEntity"])
     assert proxy_type.GlobalId in set(types["GlobalId"])
     assert "RawStepLine" in raw.columns
+    for required_col in ("ExpressLine", "GlobalId", "IfcEntity", "PredefinedType", "Name", "ObjectType", "TypeName", "SourceFile"):
+        assert required_col in elements.columns
 
     wb = load_workbook(str(xlsx))
-    assert wb["Lists_Entities"].sheet_state == "hidden"
-    assert wb["Lists_PredefinedTypes"].sheet_state == "hidden"
+    assert wb["IfcEntities"].sheet_state == "hidden"
+    assert wb["PredefinedTypes"].sheet_state == "hidden"
+    assert wb["EntityPredefinedTypeMap"].sheet_state == "hidden"
+
+
+def test_workbook_lookup_validations_roundtrip_safe(tmp_path):
+    model, _, _, _ = _build_ifc2x3_model(tmp_path)
+    src = tmp_path / "src.ifc"
+    xlsx = tmp_path / "out.xlsx"
+    rewritten = tmp_path / "rewritten.xlsx"
+    model.write(str(src))
+
+    extract_to_excel(str(src), str(xlsx))
+
+    wb = load_workbook(str(xlsx))
+    assert {"Elements", "Properties", "IfcEntities", "PredefinedTypes", "EntityPredefinedTypeMap"}.issubset(set(wb.sheetnames))
+    assert wb.defined_names.get("IfcEntityList") is not None
+    assert wb.defined_names.get("PredefinedTypeList") is not None
+
+    elements_ws = wb["Elements"]
+    validations = list(elements_ws.data_validations.dataValidation)
+    formulas = {dv.formula1 for dv in validations}
+    assert "=IfcEntityList" in formulas
+    assert "=PredefinedTypeList" in formulas
+    assert all(dv.sqref for dv in validations)
+
+    wb.save(str(rewritten))
 
 
 def test_reupload_predefined_only_and_valid_type_reclassification(tmp_path):
