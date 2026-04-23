@@ -23,10 +23,8 @@ On Railway Hobby-sized memory budgets, this can exceed container limits during l
   - COBieQC launch,
   - response complete.
 - **Single-flight heavy job guard** to prevent concurrent heavy IFC mutation tasks per replica.
-- **Upload and file-size protective limits** via env vars:
-  - `MAX_UPLOAD_BYTES`
-  - `MAX_IFC_BYTES`
-  - `MAX_EXCEL_BYTES`
+- **Upload and file-size protective limits**:
+  - `MAX_UPLOAD_BYTES = 1_200_000_000` (1.2 GB source-of-truth)
 - **Heavy-job timeout guard** via `HEAVY_JOB_TIMEOUT_SECONDS`.
 - **COBieQC Java heap cap** via `COBIEQC_JAVA_XMX_MB` (default `512`) plus `-Xms128m`.
 - **COBieQC bootstrap hardening**:
@@ -34,6 +32,7 @@ On Railway Hobby-sized memory budgets, this can exceed container limits during l
   - avoids ZIP download/extract paths for XML/XSL resources,
   - falls back cleanly to disabled state if resources are unavailable.
 - **Streaming upload writes** to disk for IFC QA/COBieQC/session uploads to avoid large request-body copies in RAM.
+- **Proxy/runtime headroom requirement**: keep reverse-proxy body limits above 1.2 GB (for nginx, `client_max_body_size 1300M;` or higher).
 - **Explicit cleanup/gc hooks** after heavy Excel→IFC update processing.
 
 ## Recommended Railway sizing
