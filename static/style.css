@@ -375,6 +375,32 @@ nav {
   border-radius: 10px;
   padding: 10px 12px;
 }
+.qa-warning-banner {
+  border: 1px solid #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+  color: #fde68a;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.qa-file-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.qa-file-row {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.02);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.qa-file-row-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
 .inline {
   display: flex;
   gap: 10px;
