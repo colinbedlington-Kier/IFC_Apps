@@ -38,6 +38,7 @@ const qaState = {
   maxUploadDisplay: "1.2 GB",
   statusBanner: "No files selected",
   overallProgress: 0,
+  buildInfo: null,
 };
 
 const DEFAULT_SHEETS = [
@@ -208,6 +209,7 @@ function extractorTemplate() {
     </div>
 
     <div id="qaSessionSummary" class="muted"></div>
+    <div id="qaBuildInfo" class="muted">Build: loading…</div>
 
     <div class="progress-track"><div id="qaProgressFill" class="progress-fill" style="width:0%"></div></div>
     <div id="qaProgressLabel" class="muted"></div>
@@ -369,15 +371,7 @@ function bindFilesList() {
     setUploadWarning("");
     setSessionWarning("");
     console.info("IFC QA upload queue creation", { count: qaState.fileQueue.length, totalBytes: qaState.selectedTotalBytes });
-    const names = files.map((f) => `<li><span>${f.name}</span><span>${formatBytes(f.size)}</span></li>`).join("");
-    const list = qs("#qaFileList");
-    if (list) list.innerHTML = names || "<li>No files selected.</li>";
-    const summary = qs("#qaSelectionSummary");
-    if (summary) {
-      summary.textContent = files.length
-        ? `${files.length} file${files.length === 1 ? "" : "s"} selected • ${formatBytes(qaState.selectedTotalBytes)} total`
-        : "No files selected.";
-    }
+    renderSelectedFilesState();
     clearRunError();
     if (!files.length) {
       setUploadState("idle", { uploadBytesLoaded: 0, uploadBytesTotal: 0, uploadPercent: 0 });
@@ -394,6 +388,45 @@ function bindFilesList() {
 function setUploadControlsDisabled(disabled) {
   const fileInput = qs("#qaIfcFiles");
   if (fileInput) fileInput.disabled = disabled;
+}
+
+function renderSelectedFilesState() {
+  const files = Array.from(qaState.selectedFiles || []);
+  const names = files.map((f) => `<li><span>${f.name}</span><span>${formatBytes(f.size)}</span></li>`).join("");
+  const list = qs("#qaFileList");
+  if (list) list.innerHTML = names || "<li>No files selected.</li>";
+  const summary = qs("#qaSelectionSummary");
+  if (summary) {
+    summary.textContent = files.length
+      ? `${files.length} file${files.length === 1 ? "" : "s"} selected • ${formatBytes(qaState.selectedTotalBytes)} total`
+      : "No files selected.";
+  }
+}
+
+function renderBuildInfo() {
+  const el = qs("#qaBuildInfo");
+  if (!el) return;
+  const info = qaState.buildInfo;
+  if (!info) {
+    const fallback = window.__IFC_QA_BUILD_ID__ || "unknown";
+    el.textContent = `Build: ${fallback}`;
+    return;
+  }
+  const shortSha = (info.git_sha || "unknown").slice(0, 8);
+  el.textContent = `Build: ${info.frontend_build_id || "unknown"} (sha ${shortSha})`;
+}
+
+async function loadBuildInfo() {
+  try {
+    const resp = await fetch("/api/ifc-qa/build-info");
+    if (!resp.ok) return;
+    const data = await resp.json();
+    qaState.buildInfo = data;
+    console.info("IFC QA frontend build info", data);
+    renderBuildInfo();
+  } catch (_) {
+    renderBuildInfo();
+  }
 }
 
 function clearRunError() {
@@ -884,7 +917,9 @@ function bindExtractor() {
   setUploadState("idle");
   clearRunError();
   renderSessionState();
+  renderSelectedFilesState();
   renderFileQueue();
+  renderBuildInfo();
   qs("#qaConfigureBtn")?.addEventListener("click", openConfig);
   qs("#qaConfigClose")?.addEventListener("click", closeConfig);
   qs("#qaConfigApply")?.addEventListener("click", applyConfig);
@@ -916,7 +951,7 @@ function dashboardTemplate() {
 }
 
 async function init() {
-  console.info("IFC QA bundle loaded");
+  console.info("IFC QA bundle loaded", { buildId: window.__IFC_QA_BUILD_ID__ || "unknown" });
   if (!window.location.pathname.startsWith("/ifc-qa/")) return;
 
   const root = qs("#ifc-qa-root");
@@ -940,6 +975,7 @@ async function init() {
 
   if (page === "extractor") {
     root.innerHTML = extractorTemplate();
+    await loadBuildInfo();
     await loadUploadLimits();
     root.insertAdjacentHTML("afterbegin", `<div class="muted" style="margin-bottom:8px">IFC QA UI mounted</div>`);
     bindExtractor();
