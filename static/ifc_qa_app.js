@@ -39,6 +39,7 @@ const qaState = {
   statusBanner: "No files selected",
   overallProgress: 0,
   buildInfo: null,
+  selectionErrors: [],
 };
 
 const DEFAULT_SHEETS = [
@@ -179,6 +180,7 @@ function extractorTemplate() {
     <div class="muted" id="qaMaxUploadHint">Maximum file size: 1.2 GB</div>
     <div id="qaSelectionSummary" class="muted">No files selected.</div>
     <ul id="qaFileList" class="qa-file-list muted"></ul>
+    <div id="qaSelectionErrors" class="qa-warning-banner" hidden></div>
     <div id="qaFileQueue" class="qa-file-queue"></div>
     <div class="inline">
       <button class="btn" id="qaUploadBtn" type="button" disabled>Upload Selected Files</button>
@@ -247,6 +249,31 @@ function formatBytes(bytes) {
 
 function makeFileId(file, idx) {
   return `${file.name}::${file.size}::${file.lastModified || 0}::${idx}`;
+}
+
+function validateSelectedFiles(files) {
+  const acceptedFiles = [];
+  const rejectedFiles = [];
+  const seenKeys = new Set();
+  files.forEach((file) => {
+    const key = `${file.name}::${file.size}::${file.lastModified || 0}`;
+    const lowerName = String(file.name || "").toLowerCase();
+    if (!lowerName.endsWith(".ifc")) {
+      rejectedFiles.push({ name: file.name, reason: "Only .ifc files are allowed." });
+      return;
+    }
+    if (Number(file.size) > qaState.maxUploadBytes) {
+      rejectedFiles.push({ name: file.name, reason: `Exceeds maximum upload size of ${qaState.maxUploadDisplay}.` });
+      return;
+    }
+    if (seenKeys.has(key)) {
+      rejectedFiles.push({ name: file.name, reason: "Duplicate file in selection." });
+      return;
+    }
+    seenKeys.add(key);
+    acceptedFiles.push(file);
+  });
+  return { acceptedFiles, rejectedFiles };
 }
 
 function createUploadModel(files) {
@@ -322,14 +349,29 @@ function renderActionButtons() {
   const startBtn = qs("#qaStartBtn");
   const addBtn = qs("#qaAddBtn");
   const dlBtn = qs("#qaDownloadBtn");
-  const hasQueued = qaState.fileQueue.some((row) => row.status === "queued");
+  const isUploading = qaState.uploadState === "uploading";
+  const canUpload = !!qaState.sessionReady && qaState.selectedFiles.length > 0 && !isUploading && !qaState.isStartingRun;
   const hasFailed = qaState.fileQueue.some((row) => row.status === "failed");
   const hasUploaded = qaState.fileQueue.some((row) => row.status === "uploaded" || row.status === "complete");
-  if (uploadBtn) uploadBtn.disabled = !qaState.sessionReady || qaState.isStartingRun || qaState.uploadState === "uploading" || !hasQueued;
-  if (retryBtn) retryBtn.disabled = !qaState.sessionReady || qaState.isStartingRun || qaState.uploadState === "uploading" || !hasFailed;
+  if (uploadBtn) uploadBtn.disabled = !canUpload;
+  if (retryBtn) retryBtn.disabled = !qaState.sessionReady || qaState.isStartingRun || isUploading || !hasFailed;
   if (startBtn) startBtn.disabled = qaState.isRunning || qaState.isStartingRun || !qaState.canRunQa || !qaState.configLoaded;
   if (addBtn) addBtn.disabled = !hasUploaded || qaState.modelCount <= 0;
   if (dlBtn) dlBtn.disabled = qaState.isRunning || !qaState.hasZip;
+  if (canUpload) {
+    console.info("canUpload=true");
+  } else {
+    const reason = !qaState.sessionReady
+      ? "sessionReady===false"
+      : qaState.selectedFiles.length <= 0
+        ? "selectedFiles.length===0"
+        : isUploading
+          ? "isUploading===true"
+          : qaState.isStartingRun
+            ? "isStartingRun===true"
+            : "unknown";
+    console.info(`canUpload=false because ${reason}`);
+  }
 }
 
 function selectedSheets() {
@@ -341,39 +383,32 @@ function selectedSheets() {
 function bindFilesList() {
   const input = qs("#qaIfcFiles");
   if (!input) return;
-  input.addEventListener("change", () => {
-    const files = Array.from(input.files || []);
-    console.info("IFC QA file input change event", { count: files.length, names: files.map((file) => file.name) });
-    const oversized = files.find((file) => Number(file.size) > qaState.maxUploadBytes);
-    if (oversized) {
-      qaState.selectedFiles = [];
-      qaState.selectedTotalBytes = 0;
-      qaState.fileQueue = [];
-      qaState.uploadedFiles = [];
-      qaState.canRunQa = false;
-      qaState.statusBanner = "No files selected";
-      input.value = "";
-      setUploadWarning(`Upload rejected: ${oversized.name} exceeds the maximum upload size of ${qaState.maxUploadDisplay}.`);
-      setUploadState("failed", { uploadBytesLoaded: 0, uploadBytesTotal: 0, uploadPercent: 0 });
-      console.warn("IFC QA oversized file rejected before upload", { name: oversized.name, size: oversized.size });
-      renderFileQueue();
-      renderActionButtons();
-      return;
-    }
-    qaState.selectedFiles = files;
-    console.info("IFC QA files stored to state", { count: qaState.selectedFiles.length });
-    qaState.selectedTotalBytes = files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
-    qaState.fileQueue = createUploadModel(files);
+  input.addEventListener("change", (event) => {
+    const sourceFiles = Array.from(event?.target?.files || []);
+    console.info(`onChange files count: ${sourceFiles.length}`);
+    console.info("files received from event.target.files", { names: sourceFiles.map((file) => file.name) });
+    const { acceptedFiles, rejectedFiles } = validateSelectedFiles(sourceFiles);
+    console.info(`acceptedFiles count: ${acceptedFiles.length}`);
+    qaState.selectionErrors = rejectedFiles;
+    qaState.selectedFiles = acceptedFiles;
+    qaState.selectedTotalBytes = acceptedFiles.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+    qaState.fileQueue = createUploadModel(acceptedFiles);
     qaState.uploadedFiles = [];
     qaState.canRunQa = false;
     qaState.overallProgress = 0;
-    qaState.statusBanner = files.length ? `${files.length} file${files.length === 1 ? "" : "s"} queued for upload` : "No files selected";
-    setUploadWarning("");
+    qaState.statusBanner = acceptedFiles.length ? `${acceptedFiles.length} file${acceptedFiles.length === 1 ? "" : "s"} queued for upload` : "No files selected";
+    if (rejectedFiles.length > 0) {
+      const firstRejection = rejectedFiles[0];
+      setUploadWarning(`Some files were rejected. ${firstRejection.name}: ${firstRejection.reason}`);
+    } else {
+      setUploadWarning("");
+    }
     setSessionWarning("");
     console.info("IFC QA upload queue creation", { count: qaState.fileQueue.length, totalBytes: qaState.selectedTotalBytes });
+    console.info(`selectedFiles state count: ${qaState.selectedFiles.length}`);
     renderSelectedFilesState();
     clearRunError();
-    if (!files.length) {
+    if (!acceptedFiles.length) {
       setUploadState("idle", { uploadBytesLoaded: 0, uploadBytesTotal: 0, uploadPercent: 0 });
       renderFileQueue();
       renderActionButtons();
@@ -392,7 +427,12 @@ function setUploadControlsDisabled(disabled) {
 
 function renderSelectedFilesState() {
   const files = Array.from(qaState.selectedFiles || []);
-  const names = files.map((f) => `<li><span>${f.name}</span><span>${formatBytes(f.size)}</span></li>`).join("");
+  const queueByName = new Map((qaState.fileQueue || []).map((row) => [row.name, row]));
+  const names = files.map((f) => {
+    const row = queueByName.get(f.name);
+    const status = row?.status || "queued";
+    return `<li><span>${f.name}</span><span>${formatBytes(f.size)} • ${statusLabel(status).toLowerCase()}</span></li>`;
+  }).join("");
   const list = qs("#qaFileList");
   if (list) list.innerHTML = names || "<li>No files selected.</li>";
   const summary = qs("#qaSelectionSummary");
@@ -400,6 +440,18 @@ function renderSelectedFilesState() {
     summary.textContent = files.length
       ? `${files.length} file${files.length === 1 ? "" : "s"} selected • ${formatBytes(qaState.selectedTotalBytes)} total`
       : "No files selected.";
+  }
+  const errorsEl = qs("#qaSelectionErrors");
+  if (errorsEl) {
+    if (!qaState.selectionErrors.length) {
+      errorsEl.innerHTML = "";
+      errorsEl.hidden = true;
+    } else {
+      errorsEl.hidden = false;
+      errorsEl.innerHTML = qaState.selectionErrors
+        .map((entry) => `<div>${entry.name}: ${entry.reason}</div>`)
+        .join("");
+    }
   }
 }
 
