@@ -6517,11 +6517,11 @@ def session_debug_routes():
 
 def _is_ifc_compatible(name: str) -> bool:
     lower = str(name or "").lower()
-    return lower.endswith(".ifc") or lower.endswith(".ifczip")
+    return lower.endswith(".ifc") or lower.endswith(".ifczip") or lower.endswith(".ifcxml")
 
 
 def _resolve_session_ifc_records(session_id: str, file_names: List[str]) -> List[Tuple[str, str]]:
-    root = Path(SESSION_STORE.ensure(session_id))
+    root = Path(SESSION_STORE.ensure(session_id)).resolve()
     records: List[Tuple[str, str]] = []
     for incoming in file_names:
         safe = sanitize_filename(os.path.basename(str(incoming or "")))
@@ -6529,7 +6529,9 @@ def _resolve_session_ifc_records(session_id: str, file_names: List[str]) -> List
             raise HTTPException(status_code=400, detail=f"Invalid file reference: {incoming!r}")
         if not _is_ifc_compatible(safe):
             raise HTTPException(status_code=400, detail=f"Unsupported IFC file type: {safe}")
-        source_path = root / safe
+        source_path = (root / safe).resolve()
+        if root not in source_path.parents and source_path != root:
+            raise HTTPException(status_code=400, detail=f"Session file path escapes session directory: {safe}")
         if not source_path.exists() or not source_path.is_file():
             raise HTTPException(status_code=404, detail=f"Session file not found: {safe}")
         records.append((safe, str(source_path)))
@@ -6579,6 +6581,14 @@ def ifc_qa_extract_from_session(
         "selected_files": [{"file_id": name, "file_name": name} for name, _ in file_records],
         "status_url": f"/api/ifc-qa/status/{job_id}",
     }
+
+
+@app.post("/api/ifc-data-qa/extract")
+def ifc_data_qa_extract(payload: Dict[str, Any] = Body(...)):
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    return ifc_qa_extract_from_session(session_id=session_id, payload=payload)
 
 
 @app.post("/api/ifc-tools/reduce-file-size/analyse")
