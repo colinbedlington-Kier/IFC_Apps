@@ -6887,6 +6887,7 @@ def area_spaces_session_files(session_id: str):
 def area_spaces_scan(payload: Dict[str, Any] = Body(...)):
     session_id = str(payload.get("session_id") or "").strip()
     requested = payload.get("file_names") or payload.get("file_ids")
+    debug_mode = bool(payload.get("debug_mode") or payload.get("debug"))
     try:
         if not session_id:
             return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_SCAN_FAILED", "message": "session_id is required", "stage": "ifc_open"})
@@ -6896,7 +6897,7 @@ def area_spaces_scan(payload: Dict[str, Any] = Body(...)):
             return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_SCAN_FAILED", "message": "Process one IFC at a time for memory safety.", "stage": "scan_spaces"})
         ifc_records = _resolve_session_ifc_file_paths(session_id, [str(item) for item in requested])
         source_name, path = ifc_records[0]
-        result = scan_ifc_for_area_spaces(path)
+        result = scan_ifc_for_area_spaces(path, debug_mode=debug_mode)
         APP_LOGGER.info("area_spaces_scan %s", area_space_log_payload(result))
         scan_payload = {
             "source_file": result.source_file,
