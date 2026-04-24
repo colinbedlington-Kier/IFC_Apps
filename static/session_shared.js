@@ -102,15 +102,37 @@
     const sid = String(sessionId || "").trim();
     if (!sid) return [];
     const resp = await fetch(`/api/session/${sid}/files`);
-    if (!resp.ok) throw new Error(`Failed to list session files (HTTP ${resp.status})`);
-    const data = await resp.json();
-    const records = Array.isArray(data?.files) ? data.files : [];
+    let data = null;
+    let bodyText = "";
+    try {
+      data = await resp.json();
+    } catch (_) {
+      try {
+        bodyText = await resp.text();
+      } catch (_) {
+        bodyText = "";
+      }
+    }
+    if (!resp.ok) {
+      const message = `Failed to list session files (HTTP ${resp.status})`;
+      const err = new Error(message);
+      err.status = resp.status;
+      err.body = data ?? bodyText;
+      throw err;
+    }
+    const records = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.files)
+        ? data.files
+        : Array.isArray(data?.items)
+          ? data.items
+          : [];
     return records.map((record) => normalizeSessionFile(record));
   }
 
   function isIfcCandidate(file) {
     const name = String(file?.name || file?.filename || file?.display_name || file?.path || "").toLowerCase();
-    return name.endsWith(".ifc") || name.endsWith(".ifczip");
+    return name.endsWith(".ifc") || name.endsWith(".ifczip") || name.endsWith(".ifcxml");
   }
 
   function subscribe(listener) {
