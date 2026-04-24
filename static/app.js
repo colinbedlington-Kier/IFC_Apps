@@ -285,7 +285,7 @@ function renderUploadPanelFromState(uploadProgress) {
   const percent = Math.max(0, Math.min(100, Number(uploadProgress.percent) || 0));
   const bytesText = `${formatBytes(uploadProgress.loaded)} / ${formatBytes(uploadProgress.total)}`;
   const speedText = uploadProgress.speedBytesPerSecond > 0 ? ` — ${formatTransferSpeed(uploadProgress.speedBytesPerSecond)}` : "";
-  panelText.textContent = `${uploadProgress.statusText || "Preparing upload..."} ${filename} — ${percent}% — ${bytesText}${speedText}`;
+  panelText.textContent = `${uploadProgress.statusText || "Preparing upload…"} ${filename} — ${percent}% — ${bytesText}${speedText}`;
   panelFill.style.width = `${percent}%`;
 }
 
@@ -383,6 +383,16 @@ function renderPerFileProgress(rows) {
       </div>
     `;
   }).join("");
+}
+
+function updateUploadStatus(text) {
+  const message = String(text ?? "");
+  if (state.uploadStatusEl) state.uploadStatusEl.textContent = message;
+  const statusEl = document.querySelector("[data-upload-status]");
+  if (statusEl) statusEl.textContent = message;
+  const fallbackEl = document.getElementById("upload-status");
+  if (fallbackEl && fallbackEl !== state.uploadStatusEl) fallbackEl.textContent = message;
+  console.log("[upload-status]", message);
 }
 
 function updateUploadProgress({ percent, message, done = false, error = false, indeterminate = false, bytesText = "", speedText = "", fileRows = [] }) {
@@ -596,8 +606,8 @@ async function uploadFiles() {
     activeSessionId,
     badgeSessionText: getBadgeSessionIdText(),
   });
-  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Preparing upload…";
   resetUploadProgress();
+  updateUploadStatus("Uploading...");
   setUploadState("preparing");
   updateUploadProgress({
     percent: 0,
@@ -611,7 +621,7 @@ async function uploadFiles() {
   const totalBytes = files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
   for (const f of input.files) {
     if (Number(f.size) > state.uploadLimits.maxBytes) {
-      if (state.uploadStatusEl) state.uploadStatusEl.textContent = `Upload rejected: ${f.name} exceeds the maximum upload size of ${state.uploadLimits.maxDisplay}.`;
+      updateUploadStatus(`Upload failed: ${f.name} exceeds the maximum upload size of ${state.uploadLimits.maxDisplay}.`);
       updateUploadProgress({ percent: 0, message: `Failed — ${f.name} exceeds maximum size.`, error: true });
       return;
     }
@@ -620,7 +630,7 @@ async function uploadFiles() {
   const speedTracker = createRollingSpeedTracker();
   const uploadProgress = {
     status: "preparing",
-    statusText: "Preparing upload...",
+    statusText: "Preparing upload…",
     filename: files[0]?.name || "file",
     loaded: 0,
     total: files[0]?.size || 0,
@@ -663,7 +673,7 @@ async function uploadFiles() {
         if (activeFile) activeFile.speedBytesPerSecond = speedTracker.bytesPerSecond(timestamp);
         const stateText = lengthComputable ? "uploading" : "preparing";
         uploadProgress.status = stateText;
-        uploadProgress.statusText = stateText === "uploading" ? "Uploading" : "Preparing upload...";
+        uploadProgress.statusText = stateText === "uploading" ? "Uploading…" : "Preparing upload…";
         uploadProgress.filename = activeFile?.name || files[0]?.name || "file";
         uploadProgress.loaded = Math.max(0, loaded);
         uploadProgress.total = progressTotal || files[0]?.size || 0;
@@ -691,14 +701,21 @@ async function uploadFiles() {
           speedText: speedLabel,
           fileRows: perFile,
         });
-        if (state.uploadStatusEl) state.uploadStatusEl.textContent = stateText === "uploading" ? "Uploading…" : "Preparing upload…";
+        if (activeFile) {
+          updateUploadStatus(`Uploading ${activeFile.name} — ${Math.round(percent)}% — ${bytesLabel}`);
+        } else {
+          updateUploadStatus(stateText === "uploading" ? "Uploading..." : "Preparing upload…");
+        }
+        if (Math.round(percent) >= 100) {
+          updateUploadStatus("Upload complete — processing on server...");
+        }
       },
     });
   } catch (err) {
     clearInterval(progressTimer);
     const message = String(err?.message || "");
     setUploadState("failed");
-    if (state.uploadStatusEl) state.uploadStatusEl.textContent = message || "Upload failed.";
+    updateUploadStatus(`Upload failed: ${message || "Upload failed."}`);
     updateUploadProgress({ percent: 100, message: `Failed — ${message || "Upload failed"}. Retry upload.`, error: true, fileRows: buildPerFileProgress(files, 0) });
     return;
   }
@@ -711,7 +728,7 @@ async function uploadFiles() {
   uploadProgress.speedBytesPerSecond = 0;
   renderUploadPanelFromState(uploadProgress);
   setUploadState("processing");
-  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload complete — processing on server...";
+  updateUploadStatus("Upload complete — processing on server...");
   updateUploadProgress({
     percent: 100,
     message: "Upload complete — processing on server...",
@@ -733,7 +750,7 @@ async function uploadFiles() {
   }
   if (confirmed) {
     setUploadState("complete");
-    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Complete — added to session.";
+    updateUploadStatus("Complete — added to session");
     updateUploadProgress({
       percent: 100,
       message: "Complete — added to session",
@@ -744,7 +761,7 @@ async function uploadFiles() {
     });
   } else {
     setUploadState("failed");
-    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload finished but session confirmation failed.";
+    updateUploadStatus("Upload failed: Upload finished but session confirmation failed.");
     updateUploadProgress({
       percent: 100,
       message: "Upload finished — processing on server is taking longer than expected.",
