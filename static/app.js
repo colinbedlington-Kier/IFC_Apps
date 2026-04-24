@@ -597,38 +597,13 @@ async function uploadFiles() {
     fileRows: buildPerFileProgress(files, totalBytes),
   });
   input.value = "";
-  const waitUntil = Date.now() + 10000;
-  let confirmed = false;
-  while (Date.now() < waitUntil) {
-    await refreshFiles();
-    const names = new Set((state.files || []).map((item) => item.name));
-    if (targetNames.every((name) => names.has(name))) {
-      confirmed = true;
-      break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 700));
+  if (window.IFCSession?.setCurrentSessionId && state.sessionId) {
+    window.IFCSession.setCurrentSessionId(state.sessionId);
   }
-  if (confirmed) {
-    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Complete — added to session.";
-    updateUploadProgress({
-      percent: 100,
-      message: "Complete — added to session",
-      done: true,
-      bytesText: `${formatBytes(totalBytes)} / ${formatBytes(totalBytes)}`,
-      speedText: "0.0 MB/s",
-      fileRows: buildPerFileProgress(files, totalBytes),
-    });
-  } else {
-    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload finished but session confirmation failed.";
-    updateUploadProgress({
-      percent: 100,
-      message: "Upload finished — processing on server is taking longer than expected.",
-      error: true,
-      bytesText: `${formatBytes(totalBytes)} / ${formatBytes(totalBytes)}`,
-      speedText: "0.0 MB/s",
-      fileRows: buildPerFileProgress(files, totalBytes),
-    });
-  }
+  await refreshFiles();
+  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload complete.";
+  updateUploadProgress({ percent: 100, message: "Upload complete.", done: true });
+  if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
 }
 
 async function endSession() {

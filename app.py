@@ -6616,10 +6616,9 @@ def end_session(session_id: str):
 
 
 @app.get("/api/session/{session_id}/files")
-def list_files(session_id: str):
+def list_files(session_id: str, request: Request = None):
     normalized = _require_valid_session_id(session_id)
     root = _ensure_session_dir_for_upload(normalized)
-    APP_LOGGER.info("session_file_list session_id=%s root=%s", session_id, root)
     files = []
     for fname in sorted(os.listdir(root)):
         fpath = os.path.join(root, fname)
@@ -6639,6 +6638,18 @@ def list_files(session_id: str):
                 "created_at": created_at,
                 "path": fpath,
             })
+    ifc_count = sum(1 for item in files if _is_ifc_compatible(item.get("name", "")))
+    page_name = "unknown"
+    if request is not None:
+        page_name = (request.query_params.get("page") or request.headers.get("x-ifc-tool-page") or "unknown").strip() or "unknown"
+    APP_LOGGER.info(
+        "session_file_list page=%s session_id=%s root=%s files_returned=%s ifc_files=%s",
+        page_name,
+        session_id,
+        root,
+        len(files),
+        ifc_count,
+    )
     return {"files": files}
 
 
