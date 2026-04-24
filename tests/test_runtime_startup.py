@@ -36,6 +36,15 @@ def test_resolve_server_host_port_uses_env_port(monkeypatch):
     assert port == 43123
 
 
+def test_area_spaces_routes_registered_on_startup():
+    route_methods = {
+        (getattr(route, "path", ""), tuple(sorted((getattr(route, "methods", set()) or set()) - {"HEAD", "OPTIONS"})))
+        for route in app.app.routes
+    }
+    assert ("/api/ifc/area-spaces/scan", ("POST",)) in route_methods
+    assert ("/api/ifc/area-spaces/purge", ("POST",)) in route_methods
+
+
 def test_cobieqc_runtime_degrades_when_assets_missing(monkeypatch, tmp_path):
     missing_root = tmp_path / 'missing-assets'
     monkeypatch.setenv('COBIEQC_DATA_DIR', str(missing_root))
