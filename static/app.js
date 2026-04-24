@@ -659,7 +659,7 @@ async function uploadFiles() {
   console.log("[upload] activeSessionId", activeSessionId);
   console.log("[upload] uploadUrl", uploadUrl);
   try {
-    await uploadWithProgress(uploadUrl, form, {
+    const uploadPayload = await uploadWithProgress(uploadUrl, form, {
       onProgress: ({ loaded, total, lengthComputable, timestamp }) => {
         sawProgressEvent = true;
         const progressTotal = lengthComputable && total > 0 ? total : totalBytes || (files[0]?.size || 0);
@@ -707,10 +707,13 @@ async function uploadFiles() {
           updateUploadStatus(stateText === "uploading" ? "Uploading..." : "Preparing upload…");
         }
         if (Math.round(percent) >= 100) {
-          updateUploadStatus("Upload complete — processing on server...");
+          updateUploadStatus("Saving file to session storage...");
         }
       },
     });
+    if (uploadPayload?.files && Array.isArray(uploadPayload.files)) {
+      state.files = uploadPayload.files;
+    }
   } catch (err) {
     clearInterval(progressTimer);
     const message = String(err?.message || "");
@@ -721,57 +724,37 @@ async function uploadFiles() {
   }
   clearInterval(progressTimer);
   uploadProgress.status = "processing";
-  uploadProgress.statusText = "Processing on server...";
+  uploadProgress.statusText = "Saving file to session storage...";
   uploadProgress.loaded = totalBytes;
   uploadProgress.total = totalBytes;
   uploadProgress.percent = 100;
   uploadProgress.speedBytesPerSecond = 0;
   renderUploadPanelFromState(uploadProgress);
   setUploadState("processing");
-  updateUploadStatus("Upload complete — processing on server...");
+  updateUploadStatus("Saving file to session storage...");
   updateUploadProgress({
     percent: 100,
-    message: "Upload complete — processing on server...",
+    message: "Saving file to session storage...",
     bytesText: `${formatBytes(totalBytes)} / ${formatBytes(totalBytes)}`,
     speedText: "0.0 MB/s",
     fileRows: buildPerFileProgress(files, totalBytes),
   });
   input.value = "";
-  const waitUntil = Date.now() + 10000;
-  let confirmed = false;
-  while (Date.now() < waitUntil) {
-    await refreshFiles();
-    const names = new Set((state.files || []).map((item) => item.name));
-    if (targetNames.every((name) => names.has(name))) {
-      confirmed = true;
-      break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 700));
-  }
-  if (confirmed) {
-    setUploadState("complete");
-    updateUploadStatus("Complete — added to session");
-    updateUploadProgress({
-      percent: 100,
-      message: "Complete — added to session",
-      done: true,
-      bytesText: `${formatBytes(totalBytes)} / ${formatBytes(totalBytes)}`,
-      speedText: "0.0 MB/s",
-      fileRows: buildPerFileProgress(files, totalBytes),
-    });
-  } else {
-    setUploadState("failed");
-    updateUploadStatus("Upload failed: Upload finished but session confirmation failed.");
-    updateUploadProgress({
-      percent: 100,
-      message: "Upload finished — processing on server is taking longer than expected.",
-      error: true,
-      bytesText: `${formatBytes(totalBytes)} / ${formatBytes(totalBytes)}`,
-      speedText: "0.0 MB/s",
-      fileRows: buildPerFileProgress(files, totalBytes),
-    });
-  }
   await refreshFiles();
+  const names = new Set((state.files || []).map((item) => item.name));
+  if (!targetNames.every((name) => names.has(name))) {
+    await refreshFiles();
+  }
+  setUploadState("complete");
+  updateUploadStatus("Complete — added to session");
+  updateUploadProgress({
+    percent: 100,
+    message: "Complete — added to session",
+    done: true,
+    bytesText: `${formatBytes(totalBytes)} / ${formatBytes(totalBytes)}`,
+    speedText: "0.0 MB/s",
+    fileRows: buildPerFileProgress(files, totalBytes),
+  });
   console.info("[upload] completed refresh", { activeSessionId, badgeSessionText: getBadgeSessionIdText() });
 }
 

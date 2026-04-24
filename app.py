@@ -6619,25 +6619,20 @@ def end_session(session_id: str):
 def list_files(session_id: str, request: Request = None):
     normalized = _require_valid_session_id(session_id)
     root = _ensure_session_dir_for_upload(normalized)
+    list_start = time.perf_counter()
+    APP_LOGGER.info("file_index_refresh_start session_id=%s root=%s", session_id, root)
     files = []
     for fname in sorted(os.listdir(root)):
         fpath = os.path.join(root, fname)
         if os.path.isfile(fpath):
-            stat = os.stat(fpath)
-            created_at = datetime.datetime.fromtimestamp(stat.st_ctime, tz=UTC).isoformat()
-            extension = Path(fname).suffix.lower()
-            mime_type = mimetypes.guess_type(fname)[0] or "application/octet-stream"
-            files.append({
-                "id": fname,
-                "filename": fname,
-                "name": fname,
-                "size": stat.st_size,
-                "modified": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                "mime_type": mime_type,
-                "extension": extension,
-                "created_at": created_at,
-                "path": fpath,
-            })
+            files.append(_build_session_file_metadata(root, fname))
+    list_duration_ms = int((time.perf_counter() - list_start) * 1000)
+    APP_LOGGER.info(
+        "file_index_refresh_complete session_id=%s duration_ms=%s files_returned=%s",
+        session_id,
+        list_duration_ms,
+        len(files),
+    )
     ifc_count = sum(1 for item in files if _is_ifc_compatible(item.get("name", "")))
     page_name = "unknown"
     if request is not None:
@@ -6707,6 +6702,40 @@ def session_debug_routes():
 def _is_ifc_compatible(name: str) -> bool:
     lower = str(name or "").lower()
     return lower.endswith(".ifc") or lower.endswith(".ifczip") or lower.endswith(".ifcxml")
+
+
+def _session_file_kind(name: str) -> str:
+    extension = Path(name or "").suffix.lower()
+    if extension in {".ifc", ".ifczip", ".ifcxml"}:
+        return "ifc"
+    if extension in {".xlsx", ".xls"}:
+        return "excel"
+    if extension == ".zip":
+        return "zip"
+    if extension in {".json", ".xml", ".csv"}:
+        return "data"
+    return "file"
+
+
+def _build_session_file_metadata(root: str, file_name: str) -> Dict[str, Any]:
+    fpath = Path(root) / file_name
+    stat = fpath.stat()
+    created_at = datetime.datetime.fromtimestamp(stat.st_ctime, tz=UTC).isoformat()
+    modified = datetime.datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()
+    extension = fpath.suffix.lower()
+    mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+    return {
+        "id": file_name,
+        "filename": file_name,
+        "name": file_name,
+        "size": stat.st_size,
+        "kind": _session_file_kind(file_name),
+        "modified": modified,
+        "mime_type": mime_type,
+        "extension": extension,
+        "created_at": created_at,
+        "path": file_name,
+    }
 
 
 def _resolve_session_ifc_records(session_id: str, file_names: List[str]) -> List[Tuple[str, str]]:
@@ -7182,10 +7211,15 @@ def get_step2ifc_status(session_id: str, job_id: str):
 
 @app.post("/api/session/{session_id}/upload")
 async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
+    endpoint_start = time.perf_counter()
+    APP_LOGGER.info("upload_endpoint_start session_id=%s file_count=%s", session_id, len(files or []))
     normalized = _require_valid_session_id(session_id)
     root = _ensure_session_dir_for_upload(normalized)
     APP_LOGGER.info("session_upload_start session_id=%s file_count=%s root=%s", session_id, len(files or []), root)
     saved = []
+    APP_LOGGER.info("stream_write_start session_id=%s root=%s", session_id, root)
+    write_start = time.perf_counter()
+    bytes_written_total = 0
     for f in files:
         safe = sanitize_filename(os.path.basename(f.filename))
         dest = os.path.join(root, safe)
@@ -7212,20 +7246,26 @@ async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
                         rejection_reason="streamed_upload_exceeded_limit",
                     )
                 dst.write(chunk)
+        bytes_written_total += written
         enforce_upload_limits(dest, endpoint="/api/session/{session_id}/upload")
-        stat = os.stat(dest)
-        saved.append({
-            "id": safe,
-            "filename": safe,
-            "name": safe,
-            "size": stat.st_size,
-            "mime_type": mimetypes.guess_type(safe)[0] or "application/octet-stream",
-            "extension": Path(safe).suffix.lower(),
-            "created_at": datetime.datetime.fromtimestamp(stat.st_ctime, tz=UTC).isoformat(),
-            "path": dest,
-        })
+        saved.append(_build_session_file_metadata(root, safe))
+    write_duration_ms = int((time.perf_counter() - write_start) * 1000)
+    APP_LOGGER.info(
+        "stream_write_complete session_id=%s duration_ms=%s bytes_written=%s files_saved=%s",
+        session_id,
+        write_duration_ms,
+        bytes_written_total,
+        len(saved),
+    )
+    APP_LOGGER.info("file_index_refresh_start session_id=%s root=%s", session_id, root)
+    index_start = time.perf_counter()
+    saved = [_build_session_file_metadata(root, item["name"]) for item in saved]
+    index_duration_ms = int((time.perf_counter() - index_start) * 1000)
+    APP_LOGGER.info("file_index_refresh_complete session_id=%s duration_ms=%s", session_id, index_duration_ms)
     APP_LOGGER.info("session_upload_complete session_id=%s saved=%s", session_id, len(saved))
-    return {"files": saved}
+    total_duration_ms = int((time.perf_counter() - endpoint_start) * 1000)
+    APP_LOGGER.info("upload_response_sent session_id=%s duration_ms=%s", session_id, total_duration_ms)
+    return {"ok": True, "session_id": normalized, "files": saved}
 
 
 @app.post("/api/upload/session/{session_id}/upload")
