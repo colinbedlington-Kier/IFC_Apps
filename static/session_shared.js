@@ -1,6 +1,7 @@
 (function initIfcSessionShared(global) {
-  const STORAGE_KEY = "ifcToolkitSessionId";
+  const STORAGE_KEY = "ifc_toolkit_session_id";
   const LEGACY_STORAGE_KEYS = [
+    "ifcToolkitSessionId",
     "ifc_session_id",
     "sessionId",
     "ifcSessionId",
@@ -79,6 +80,10 @@
     if (currentSessionId) return currentSessionId;
     currentSessionId = readStoredSessionId();
     return currentSessionId;
+  }
+
+  function getActiveSessionId() {
+    return getCurrentSessionId();
   }
 
   async function ensureSession(options = {}) {
@@ -174,6 +179,7 @@
     legacyStorageKeys: LEGACY_STORAGE_KEYS.slice(),
     sessionChangeEvent: SESSION_CHANGE_EVENT,
     getCurrentSessionId,
+    getActiveSessionId,
     setCurrentSessionId,
     ensureSession,
     shortSessionId,

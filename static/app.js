@@ -451,6 +451,9 @@ async function uploadFiles() {
     return;
   }
   input.value = "";
+  if (window.IFCSession?.setCurrentSessionId && state.sessionId) {
+    window.IFCSession.setCurrentSessionId(state.sessionId);
+  }
   await refreshFiles();
   if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload complete.";
   updateUploadProgress({ percent: 100, message: "Upload complete.", done: true });

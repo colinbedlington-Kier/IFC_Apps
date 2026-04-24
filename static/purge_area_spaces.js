@@ -14,8 +14,20 @@
   const outputs = byId("pasOutputs");
   const log = byId("pasLog");
   const purgeBtn = byId("pasPurgeBtn");
+  const PAGE_NAME = "purge-area-spaces";
 
-  const getSessionId = () => localStorage.getItem("ifc_session_id");
+  const getActiveSessionId = () => {
+    const shared = window.IFCSession;
+    if (shared?.getActiveSessionId) return shared.getActiveSessionId();
+    if (shared?.getCurrentSessionId) return shared.getCurrentSessionId();
+    return "";
+  };
+
+  const getShortSessionId = (sessionId) => {
+    const shared = window.IFCSession;
+    if (shared?.shortSessionId) return shared.shortSessionId(sessionId);
+    return String(sessionId || "").slice(0, 8);
+  };
 
   function renderSummary() {
     const filesScanned = state.scanResults.length;
@@ -69,20 +81,36 @@
   }
 
   async function loadSessionFiles() {
-    const sessionId = getSessionId();
+    const sessionId = getActiveSessionId();
     if (!sessionId) {
       status.textContent = "No active session. Create/upload in Upload & Session first.";
+      filesSelect.innerHTML = "";
+      console.info("[ifc-tools]", { page: PAGE_NAME, sessionId, filesReturned: 0, ifcFiles: 0 });
       return;
     }
-    status.textContent = "resolving session files";
-    const resp = await fetch(`/api/ifc/area-spaces/session-files?session_id=${encodeURIComponent(sessionId)}`);
+    status.textContent = `Session ${getShortSessionId(sessionId)} • resolving session files`;
+    const resp = await fetch(`/api/session/${encodeURIComponent(sessionId)}/files?page=${encodeURIComponent(PAGE_NAME)}`);
     const data = await resp.json();
     if (!resp.ok) {
       status.textContent = `Failed to load session files: ${data.detail || "Unknown error"}`;
       return;
     }
-    filesSelect.innerHTML = (data.files || []).map((item) => `<option value="${item.name}">${item.name}</option>`).join("");
-    status.textContent = `Session ${sessionId} • ${data.count} IFC files found`;
+    const allFiles = Array.isArray(data?.files) ? data.files : [];
+    const ifcFiles = allFiles.filter((item) => String(item?.name || item?.filename || "").toLowerCase().endsWith(".ifc"));
+    filesSelect.innerHTML = ifcFiles.map((item) => `<option value="${item.name}">${item.name}</option>`).join("");
+    if (!allFiles.length) {
+      status.textContent = "Active session found, but no IFC files are available.";
+    } else if (!ifcFiles.length) {
+      status.textContent = "Session has files, but none are .ifc files.";
+    } else {
+      status.textContent = `Session ${getShortSessionId(sessionId)} • ${ifcFiles.length} IFC files found`;
+    }
+    console.info("[ifc-tools]", {
+      page: PAGE_NAME,
+      sessionId,
+      filesReturned: allFiles.length,
+      ifcFiles: ifcFiles.length,
+    });
   }
 
   function getSelectedFiles() {
@@ -90,7 +118,7 @@
   }
 
   async function runScan() {
-    const sessionId = getSessionId();
+    const sessionId = getActiveSessionId();
     const fileNames = getSelectedFiles();
     if (!sessionId || fileNames.length === 0) {
       status.textContent = "Select at least one session IFC file before scanning.";
@@ -121,7 +149,7 @@
   }
 
   async function runPurge() {
-    const sessionId = getSessionId();
+    const sessionId = getActiveSessionId();
     if (!sessionId || state.selectedKeys.size === 0) {
       status.textContent = "Select at least one candidate before purge.";
       return;
