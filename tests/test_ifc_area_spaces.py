@@ -126,6 +126,32 @@ def test_area_spaces_scan_api_shape(tmp_path: Path, monkeypatch):
     assert "reason" in candidate
 
 
+
+
+def test_area_spaces_scan_rejects_large_inline_files(monkeypatch):
+    session_id = app.SESSION_STORE.create()
+    root = Path(app.SESSION_STORE.ensure(session_id))
+    source_name = "areas.ifc"
+    (root / source_name).write_text("ISO-10303-21;\nENDSEC;\n", encoding="utf-8")
+
+    called = {"scan": False}
+
+    def _should_not_run(*_, **__):
+        called["scan"] = True
+        raise RuntimeError("scan should not run for oversize files")
+
+    monkeypatch.setenv("AREA_SPACE_MAX_INLINE_MB", "-1")
+    monkeypatch.setattr(app, "scan_ifc_for_area_spaces", _should_not_run)
+
+    resp = asyncio.run(app.area_spaces_scan({"session_id": session_id, "file_names": [source_name]}))
+    assert resp.status_code == 400
+    payload = json.loads(resp.body.decode("utf-8"))
+    assert payload["status"] == "error"
+    assert payload["file"] == source_name
+    assert "File too large for inline processing" in payload["message"]
+    assert called["scan"] is False
+
+
 def test_purge_area_spaces_frontend_uses_active_session_and_shared_files_endpoint():
     root = Path(__file__).resolve().parent.parent
     purge_js = (root / "static" / "purge_area_spaces.js").read_text(encoding="utf-8")
@@ -212,7 +238,7 @@ def test_scan_waits_for_job_semaphore(monkeypatch):
     root = Path(app.SESSION_STORE.ensure(session_id))
     (root / "areas.ifc").write_text("ISO-10303-21;\nENDSEC;\n", encoding="utf-8")
     fake_result = ScanResult(source_file="areas.ifc", total_spaces=0, candidates=[])
-    monkeypatch.setattr(app, "scan_ifc_for_area_spaces", lambda _: fake_result)
+    monkeypatch.setattr(app, "scan_ifc_for_area_spaces", lambda _, **__: fake_result)
 
     async def _run():
         await app.AREA_SPACE_JOB_SEMAPHORE.acquire()
