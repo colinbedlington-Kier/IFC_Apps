@@ -6902,7 +6902,15 @@ async def area_spaces_scan(payload: Dict[str, Any] = Body(...)):
             return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_SCAN_FAILED", "message": "Process one IFC at a time for memory safety.", "stage": "scan_spaces"})
         ifc_records = _resolve_session_ifc_file_paths(session_id, [str(item) for item in requested])
         source_name, path = ifc_records[0]
-        result = scan_ifc_for_area_spaces(path, debug_mode=debug_mode)
+        wait_start = time.perf_counter()
+        semaphore_locked = AREA_SPACE_JOB_SEMAPHORE.locked()
+        if semaphore_locked:
+            APP_LOGGER.info("area_space_job_wait_start stage=scan filename=%s", source_name)
+        async with AREA_SPACE_JOB_SEMAPHORE:
+            wait_ms = int((time.perf_counter() - wait_start) * 1000)
+            APP_LOGGER.info("area_space_job_acquired stage=scan wait_ms=%s", wait_ms)
+            result = scan_ifc_for_area_spaces(path, debug_mode=debug_mode)
+            APP_LOGGER.info("area_space_job_released stage=scan")
         APP_LOGGER.info("area_spaces_scan %s", area_space_log_payload(result))
         scan_payload = {
             "source_file": result.source_file,
@@ -6914,11 +6922,15 @@ async def area_spaces_scan(payload: Dict[str, Any] = Body(...)):
         threshold_mb = float(os.getenv("AREA_SPACES_LARGE_IFC_WARNING_MB", "200"))
         if size_mb >= threshold_mb:
             warning = f"Large IFC detected ({size_mb} MB). Scan continues in memory-safe mode."
+        status_messages = []
+        if semaphore_locked:
+            status_messages.append("Another IFC job is running. Waiting for available processing slot...")
+        status_messages += ["ifc_open complete", "scan_spaces complete"]
         return {
             "ok": True,
             "session_id": session_id,
             "progress": "candidates found",
-            "status_messages": (["Another IFC job is running. Waiting for available processing slot..."] if semaphore_locked else []) + ["ifc_open complete", "scan_spaces complete"],
+            "status_messages": status_messages,
             "warning": warning,
             "files_scanned": 1,
             "total_spaces": result.total_spaces,
