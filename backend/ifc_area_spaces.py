@@ -472,7 +472,7 @@ def _scan_ifc_for_area_spaces_ifcopenshell(path: Path) -> ScanResult:
     open_started = time.perf_counter()
     try:
         LOGGER.info("ifc_open_start filename=%s", path.name)
-        model = ifcopenshell.open(str(path))
+        model = ifcopenshell.open(str(path), lazy=True)
         LOGGER.info("ifc_open_complete filename=%s duration_ms=%d", path.name, int((time.perf_counter() - open_started) * 1000))
     except Exception as exc:
         raise AreaSpaceError(f"Unable to open IFC file {path.name}: {exc}") from exc
