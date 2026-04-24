@@ -58,7 +58,9 @@ def test_ifc_data_qa_frontend_uses_shared_session_module_and_ifc_filtering():
     assert "localStorage.getItem(\"ifc_session_id\")" not in qa_js
     assert ".ifcxml" in qa_js
     assert "ensureSession({ createIfMissing: true })" in upload_js
-    assert "ifcToolkitSessionId" in upload_js
+    assert "setCurrentSessionId(state.sessionId)" in upload_js
+    assert "ifc_toolkit_session_id" in shared_js
     assert "ifcToolkitSessionId" in shared_js
+    assert "getActiveSessionId" in shared_js
     assert "ifc-toolkit-session-changed" in shared_js
     assert "legacyStorageKeys" in shared_js

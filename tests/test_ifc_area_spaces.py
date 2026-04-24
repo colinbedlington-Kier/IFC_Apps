@@ -121,3 +121,16 @@ def test_area_spaces_scan_api_shape(tmp_path: Path, monkeypatch):
     assert "global_id" in candidate
     assert "matched_source" in candidate
     assert "reason" in candidate
+
+
+def test_purge_area_spaces_frontend_uses_active_session_and_shared_files_endpoint():
+    root = Path(__file__).resolve().parent.parent
+    purge_js = (root / "static" / "purge_area_spaces.js").read_text(encoding="utf-8")
+
+    assert "getActiveSessionId" in purge_js
+    assert "/api/session/${encodeURIComponent(sessionId)}/files?page=${encodeURIComponent(PAGE_NAME)}" in purge_js
+    assert ".endsWith(\".ifc\")" in purge_js
+    assert "No active session. Create/upload in Upload & Session first." in purge_js
+    assert "Active session found, but no IFC files are available." in purge_js
+    assert "Session has files, but none are .ifc files." in purge_js
+    assert "localStorage.getItem(\"ifc_session_id\")" not in purge_js

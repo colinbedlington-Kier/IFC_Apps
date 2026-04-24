@@ -666,6 +666,10 @@ async function uploadFiles() {
       fileRows: buildPerFileProgress(files, totalBytes),
     });
   }
+  await refreshFiles();
+  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload complete.";
+  updateUploadProgress({ percent: 100, message: "Upload complete.", done: true });
+  if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
 }
 
 async function endSession() {
