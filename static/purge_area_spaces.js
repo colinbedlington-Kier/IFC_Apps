@@ -125,14 +125,25 @@
       return;
     }
     status.textContent = "scanning IFC";
-    const resp = await window.withProcessing("Scanning IFC for area spaces…", async () => fetch("/api/ifc/area-spaces/scan", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: sessionId, file_names: fileNames }),
-    }));
-    const data = await resp.json();
+    let resp;
+    let data = {};
+    try {
+      resp = await window.withProcessing("Scanning IFC for area spaces…", async () => fetch("/api/ifc/area-spaces/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId, file_names: fileNames }),
+      }));
+      data = await resp.json();
+    } catch (err) {
+      status.textContent = "Processing failed or server restarted. The IFC may be too large for the current memory-safe purge path.";
+      return;
+    }
     if (!resp.ok) {
-      status.textContent = `Scan failed: ${data.detail || "Unknown error"}`;
+      if (resp.status === 404) {
+        status.textContent = "Area Spaces API is not mounted in this deployment. Check backend router registration.";
+        return;
+      }
+      status.textContent = `Scan failed: ${data.message || data.detail || "Unknown error"}`;
       return;
     }
     state.scanResults = data.results || [];
@@ -168,14 +179,25 @@
     }
 
     status.textContent = "purging";
-    const resp = await window.withProcessing("Purging area-derived IfcSpace entities…", async () => fetch("/api/ifc/area-spaces/purge", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: sessionId, selected_candidates: selected, file_names: getSelectedFiles() }),
-    }));
-    const data = await resp.json();
+    let resp;
+    let data = {};
+    try {
+      resp = await window.withProcessing("Purging area-derived IfcSpace entities…", async () => fetch("/api/ifc/area-spaces/purge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId, selected_candidates: selected, file_names: getSelectedFiles() }),
+      }));
+      data = await resp.json();
+    } catch (err) {
+      status.textContent = "Processing failed or server restarted. The IFC may be too large for the current memory-safe purge path.";
+      return;
+    }
     if (!resp.ok) {
-      status.textContent = `Purge failed: ${data.detail || "Unknown error"}`;
+      if (resp.status === 404) {
+        status.textContent = "Area Spaces API is not mounted in this deployment. Check backend router registration.";
+        return;
+      }
+      status.textContent = `Purge failed: ${data.message || data.detail || "Unknown error"}`;
       return;
     }
     status.textContent = "writing cleaned IFC → complete";

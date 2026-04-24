@@ -85,6 +85,7 @@ from backend.ifc_area_spaces import (
     result_to_log_payload as area_space_log_payload,
     scan_ifc_for_area_spaces,
 )
+from backend.ifc_area_spaces_router import build_area_spaces_router
 from backend.ifc_move_rotate import TransformRequest, transform_ifc_file
 from backend.project_tables import get_tables_for_project_slug
 
@@ -6350,10 +6351,23 @@ def _log_session_route_registration() -> None:
         APP_LOGGER.warning("SESSION_UPLOAD_ROUTES_REGISTERED:\n- <none>")
 
 
+def _log_area_spaces_route_registration() -> None:
+    lines: List[str] = []
+    for route in app.routes:
+        path = getattr(route, "path", "")
+        if "area-spaces" not in path:
+            continue
+        methods = sorted((getattr(route, "methods", set()) or set()) - {"HEAD", "OPTIONS"})
+        for method in methods:
+            lines.append(f"- {method} {path}")
+    APP_LOGGER.info("AREA_SPACES_ROUTES_REGISTERED:\n%s", "\n".join(sorted(lines)) if lines else "- <none>")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     startup_cleanup()
     _log_session_route_registration()
+    _log_area_spaces_route_registration()
     try:
         yield
     finally:
@@ -6860,7 +6874,6 @@ def _resolve_session_ifc_file_paths(session_id: str, file_names: List[str]) -> L
     return output
 
 
-@app.get("/api/ifc/area-spaces/session-files")
 def area_spaces_session_files(session_id: str):
     normalized = _require_valid_session_id(session_id)
     root = Path(_ensure_session_dir_for_upload(normalized))
@@ -6871,58 +6884,62 @@ def area_spaces_session_files(session_id: str):
     return {"session_id": normalized, "files": files, "count": len(files)}
 
 
-@app.post("/api/ifc/area-spaces/scan")
 def area_spaces_scan(payload: Dict[str, Any] = Body(...)):
     session_id = str(payload.get("session_id") or "").strip()
     requested = payload.get("file_names") or payload.get("file_ids")
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id is required")
-    if not isinstance(requested, list) or not requested:
-        raise HTTPException(status_code=400, detail="file_names (or file_ids) array is required")
-    ifc_records = _resolve_session_ifc_file_paths(session_id, [str(item) for item in requested])
-
-    scans = []
-    total_spaces = 0
-    total_candidates = 0
-    for source_name, path in ifc_records:
-        try:
-            result = scan_ifc_for_area_spaces(path)
-        except AreaSpaceError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Scan failed for {source_name}: {exc}") from exc
+    try:
+        if not session_id:
+            return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_SCAN_FAILED", "message": "session_id is required", "stage": "ifc_open"})
+        if not isinstance(requested, list) or not requested:
+            return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_SCAN_FAILED", "message": "file_names (or file_ids) array is required", "stage": "ifc_open"})
+        if len(requested) != 1:
+            return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_SCAN_FAILED", "message": "Process one IFC at a time for memory safety.", "stage": "scan_spaces"})
+        ifc_records = _resolve_session_ifc_file_paths(session_id, [str(item) for item in requested])
+        source_name, path = ifc_records[0]
+        result = scan_ifc_for_area_spaces(path)
         APP_LOGGER.info("area_spaces_scan %s", area_space_log_payload(result))
         scan_payload = {
             "source_file": result.source_file,
             "total_spaces": result.total_spaces,
             "candidates": [candidate.__dict__ for candidate in result.candidates],
         }
-        scans.append(scan_payload)
-        total_spaces += result.total_spaces
-        total_candidates += len(result.candidates)
+        warning = None
+        size_mb = round(path.stat().st_size / (1024 * 1024), 2)
+        threshold_mb = float(os.getenv("AREA_SPACES_LARGE_IFC_WARNING_MB", "200"))
+        if size_mb >= threshold_mb:
+            warning = f"Large IFC detected ({size_mb} MB). Scan continues in memory-safe mode."
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "progress": "candidates found",
+            "status_messages": ["ifc_open complete", "scan_spaces complete"],
+            "warning": warning,
+            "files_scanned": 1,
+            "total_spaces": result.total_spaces,
+            "total_candidates": len(result.candidates),
+            "results": [scan_payload],
+        }
+    except AreaSpaceError as exc:
+        APP_LOGGER.exception("area_spaces_scan_failed")
+        return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_SCAN_FAILED", "message": str(exc), "stage": "scan_spaces"})
+    except Exception as exc:
+        APP_LOGGER.exception("area_spaces_scan_failed")
+        return JSONResponse(status_code=500, content={"ok": False, "error": "AREA_SPACE_SCAN_FAILED", "message": str(exc), "stage": "scan_spaces"})
 
-    return {
-        "session_id": session_id,
-        "progress": "candidates found",
-        "files_scanned": len(scans),
-        "total_spaces": total_spaces,
-        "total_candidates": total_candidates,
-        "results": scans,
-    }
 
-
-@app.post("/api/ifc/area-spaces/purge")
 def area_spaces_purge(payload: Dict[str, Any] = Body(...)):
     session_id = str(payload.get("session_id") or "").strip()
     selected = payload.get("selected_candidates")
     if not session_id:
-        raise HTTPException(status_code=400, detail="session_id is required")
+        return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_PURGE_FAILED", "message": "session_id is required", "stage": "purge"})
     if not isinstance(selected, list) or not selected:
-        raise HTTPException(status_code=400, detail="selected_candidates must contain at least one GlobalId/STEP id")
+        return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_PURGE_FAILED", "message": "selected_candidates must contain at least one GlobalId/STEP id", "stage": "purge"})
 
     requested_files = payload.get("file_names") or sorted({str(item.get("source_file")) for item in selected if isinstance(item, dict) and item.get("source_file")})
     if not isinstance(requested_files, list) or not requested_files:
-        raise HTTPException(status_code=400, detail="file_names array is required")
+        return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_PURGE_FAILED", "message": "file_names array is required", "stage": "purge"})
+    if len(requested_files) != 1:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_PURGE_FAILED", "message": "Process one IFC at a time for memory safety.", "stage": "purge"})
 
     grouped_selections: Dict[str, List[str]] = {}
     for item in selected:
@@ -6947,15 +6964,16 @@ def area_spaces_purge(payload: Dict[str, Any] = Body(...)):
         try:
             result = purge_area_spaces(source_path, selected_keys, output_path)
         except AreaSpaceError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_PURGE_FAILED", "message": str(exc), "stage": "purge"})
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Purge failed for {source_name}: {exc}") from exc
+            APP_LOGGER.exception("area_spaces_purge_failed")
+            return JSONResponse(status_code=500, content={"ok": False, "error": "AREA_SPACE_PURGE_FAILED", "message": f"Purge failed for {source_name}: {exc}", "stage": "purge"})
         APP_LOGGER.info("area_spaces_purge %s", area_space_log_payload(result))
         purge_results.append(result.__dict__)
         produced_names.extend([result.output_ifc, result.report_csv])
 
     if not purge_results:
-        raise HTTPException(status_code=400, detail="No selected candidates matched the requested files")
+        return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_PURGE_FAILED", "message": "No selected candidates matched the requested files", "stage": "purge"})
 
     output_files = [{"name": name, "download_url": f"/api/session/{session_id}/download?name={name}"} for name in produced_names]
     if len(purge_results) > 1:
@@ -6963,7 +6981,22 @@ def area_spaces_purge(payload: Dict[str, Any] = Body(...)):
         archive = package_area_space_outputs(session_root, produced_names, zip_name)
         output_files.append({"name": archive, "download_url": f"/api/session/{session_id}/download?name={archive}"})
 
-    return {"session_id": session_id, "progress": "complete", "results": purge_results, "output_files": output_files}
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "progress": "complete",
+        "status_messages": ["purge complete", "write complete"],
+        "results": purge_results,
+        "output_files": output_files,
+    }
+
+
+area_spaces_router = build_area_spaces_router(
+    scan_handler=area_spaces_scan,
+    purge_handler=area_spaces_purge,
+    files_handler=area_spaces_session_files,
+)
+app.include_router(area_spaces_router)
 
 
 @app.get("/api/tools/cobieqc/health")

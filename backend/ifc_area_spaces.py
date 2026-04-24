@@ -3,12 +3,20 @@ from __future__ import annotations
 import csv
 import json
 import os
+import time
+import traceback
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import ifcopenshell
+import logging
+
+try:
+    import psutil  # type: ignore
+except Exception:  # pragma: no cover
+    psutil = None  # type: ignore
 
 
 class AreaSpaceError(Exception):
@@ -16,6 +24,9 @@ class AreaSpaceError(Exception):
 
 
 _KEYWORDS = ("information cad layer", "cad layer", "layer", "presentation layer")
+LOGGER = logging.getLogger("ifc_app.area_spaces")
+LARGE_IFC_WARNING_MB = float(os.getenv("AREA_SPACES_LARGE_IFC_WARNING_MB", "200"))
+MEMORY_ABORT_THRESHOLD = float(os.getenv("AREA_SPACES_MEMORY_ABORT_THRESHOLD", "0.80"))
 
 
 @dataclass
@@ -192,17 +203,34 @@ def is_area_space_candidate(space: Any) -> Optional[Candidate]:
 def scan_ifc_for_area_spaces(path: Path) -> ScanResult:
     if not path.exists():
         raise AreaSpaceError(f"IFC file not found: {path.name}")
+    file_size_mb = round(path.stat().st_size / (1024 * 1024), 2)
+    LOGGER.info("area_spaces_scan_start filename=%s size_mb=%s", path.name, file_size_mb)
+    if file_size_mb >= LARGE_IFC_WARNING_MB:
+        LOGGER.warning("area_spaces_large_ifc_warning filename=%s size_mb=%s threshold_mb=%s", path.name, file_size_mb, LARGE_IFC_WARNING_MB)
+    open_started = time.perf_counter()
     try:
+        LOGGER.info("ifc_open_start filename=%s", path.name)
         model = ifcopenshell.open(str(path))
+        LOGGER.info("ifc_open_complete filename=%s duration_ms=%d", path.name, int((time.perf_counter() - open_started) * 1000))
     except Exception as exc:
         raise AreaSpaceError(f"Unable to open IFC file {path.name}: {exc}") from exc
 
-    spaces = list(model.by_type("IfcSpace"))
+    scan_started = time.perf_counter()
+    spaces = model.by_type("IfcSpace")
+    LOGGER.info("ifcspace_count filename=%s count=%s", path.name, len(spaces))
     candidates: List[Candidate] = []
     for space in spaces:
         candidate = is_area_space_candidate(space)
         if candidate is not None:
             candidates.append(candidate)
+    LOGGER.info("candidates_count filename=%s count=%s", path.name, len(candidates))
+    rss_mb = None
+    if psutil is not None:
+        try:
+            rss_mb = round(psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024), 2)
+        except Exception:
+            rss_mb = None
+    LOGGER.info("scan_complete filename=%s duration_ms=%d memory_mb=%s", path.name, int((time.perf_counter() - scan_started) * 1000), rss_mb)
 
     return ScanResult(source_file=path.name, total_spaces=len(spaces), candidates=candidates)
 
@@ -275,40 +303,68 @@ def _write_csv_report(path: Path, rows: List[Dict[str, Any]]) -> None:
             writer.writerow(row)
 
 
-def purge_area_spaces(source_path: Path, selected_global_ids_or_step_ids: Sequence[str], output_path: Path) -> PurgeResult:
-    scan = scan_ifc_for_area_spaces(source_path)
+def _memory_too_high() -> bool:
+    if psutil is None:
+        return False
     try:
+        vm = psutil.virtual_memory()
+        return float(vm.percent) / 100.0 >= MEMORY_ABORT_THRESHOLD
+    except Exception:
+        return False
+
+
+def purge_area_spaces(source_path: Path, selected_global_ids_or_step_ids: Sequence[str], output_path: Path) -> PurgeResult:
+    if not source_path.exists():
+        raise AreaSpaceError(f"IFC file not found: {source_path.name}")
+    selected_tokens = {str(token).strip() for token in selected_global_ids_or_step_ids if str(token).strip()}
+    LOGGER.info("purge_start filename=%s selected_count=%s", source_path.name, len(selected_tokens))
+    if not selected_tokens:
+        raise AreaSpaceError("No selected candidates were provided for purge")
+    open_started = time.perf_counter()
+    try:
+        LOGGER.info("ifc_open_start filename=%s", source_path.name)
         model = ifcopenshell.open(str(source_path))
+        LOGGER.info("ifc_open_complete filename=%s duration_ms=%d", source_path.name, int((time.perf_counter() - open_started) * 1000))
     except Exception as exc:
         raise AreaSpaceError(f"Unable to open IFC file {source_path.name} for purge: {exc}") from exc
 
-    selected_tokens = {str(token).strip() for token in selected_global_ids_or_step_ids if str(token).strip()}
-    candidate_index: Dict[int, Candidate] = {candidate.step_id: candidate for candidate in scan.candidates}
+    spaces = model.by_type("IfcSpace")
+    total_spaces = len(spaces)
+    candidates_found = 0
+    candidate_rows: List[Candidate] = []
     selected_ids: set[int] = set()
-    for candidate in scan.candidates:
-        if candidate.global_id and candidate.global_id in selected_tokens:
-            selected_ids.add(candidate.step_id)
-        if str(candidate.step_id) in selected_tokens:
-            selected_ids.add(candidate.step_id)
+    for space in spaces:
+        candidate = is_area_space_candidate(space)
+        if candidate is not None:
+            candidates_found += 1
+            candidate_rows.append(candidate)
+            if candidate.global_id in selected_tokens or str(candidate.step_id) in selected_tokens:
+                selected_ids.add(candidate.step_id)
 
-    spaces = list(model.by_type("IfcSpace"))
-    to_remove = [space for space in spaces if int(space.id()) in selected_ids and int(space.id()) in candidate_index]
+    to_remove = [space for space in spaces if int(space.id()) in selected_ids]
     remove_ids = {int(space.id()) for space in to_remove}
 
     _cleanup_relationships(model, remove_ids)
+    LOGGER.info("purge_remove_relationships_complete filename=%s count=%s", source_path.name, len(remove_ids))
 
     for space in to_remove:
         model.remove(space)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if _memory_too_high():
+        raise AreaSpaceError("Not enough memory to safely write cleaned IFC on this plan.")
+    write_started = time.perf_counter()
     try:
+        LOGGER.info("purge_write_start filename=%s output=%s", source_path.name, output_path.name)
         model.write(str(output_path))
+        LOGGER.info("purge_write_complete filename=%s duration_ms=%d", source_path.name, int((time.perf_counter() - write_started) * 1000))
     except Exception as exc:
+        LOGGER.error("purge_failed filename=%s exception=%s stack=%s", source_path.name, exc, traceback.format_exc())
         raise AreaSpaceError(f"Failed writing cleaned IFC {output_path.name}: {exc}") from exc
 
     report_path = output_path.with_name(output_path.stem.replace(".area-spaces-purged", "") + ".area-spaces-purge-report.csv")
     rows: List[Dict[str, Any]] = []
-    for candidate in scan.candidates:
+    for candidate in candidate_rows:
         payload = asdict(candidate)
         payload["source_file"] = source_path.name
         payload["global_id"] = payload.pop("global_id")
@@ -318,8 +374,8 @@ def purge_area_spaces(source_path: Path, selected_global_ids_or_step_ids: Sequen
 
     return PurgeResult(
         source_file=source_path.name,
-        total_spaces=scan.total_spaces,
-        candidates_found=len(scan.candidates),
+        total_spaces=total_spaces,
+        candidates_found=candidates_found,
         selected_for_purge=len(selected_tokens),
         purged_count=len(remove_ids),
         output_ifc=output_path.name,

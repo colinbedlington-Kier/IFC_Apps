@@ -1,7 +1,8 @@
 from pathlib import Path
 
 import app
-from backend.ifc_area_spaces import Candidate, LayerSignal, ScanResult, get_ifcspace_layer_signals, is_area_space_candidate
+
+from backend.ifc_area_spaces import Candidate, LayerSignal, ScanResult, get_ifcspace_layer_signals, is_area_space_candidate, purge_area_spaces, scan_ifc_for_area_spaces
 
 
 class _FakeSpace:
@@ -134,3 +135,76 @@ def test_purge_area_spaces_frontend_uses_active_session_and_shared_files_endpoin
     assert "Active session found, but no IFC files are available." in purge_js
     assert "Session has files, but none are .ifc files." in purge_js
     assert "localStorage.getItem(\"ifc_session_id\")" not in purge_js
+    assert "Area Spaces API is not mounted in this deployment. Check backend router registration." in purge_js
+    assert "Processing failed or server restarted. The IFC may be too large for the current memory-safe purge path." in purge_js
+
+
+def test_scan_uses_ifcspace_only(monkeypatch, tmp_path: Path):
+    touched_types = []
+
+    class _FakeModel:
+        def by_type(self, name):
+            touched_types.append(name)
+            return []
+
+    source = tmp_path / "tiny.ifc"
+    source.write_text("ISO-10303-21;\nENDSEC;\n", encoding="utf-8")
+    monkeypatch.setattr("backend.ifc_area_spaces.ifcopenshell.open", lambda _: _FakeModel())
+    result = scan_ifc_for_area_spaces(source)
+    assert result.total_spaces == 0
+    assert touched_types == ["IfcSpace"]
+
+
+def test_scan_error_returns_json_not_crash(monkeypatch):
+    session_id = app.SESSION_STORE.create()
+    root = Path(app.SESSION_STORE.ensure(session_id))
+    (root / "areas.ifc").write_text("ISO-10303-21;\nENDSEC;\n", encoding="utf-8")
+    monkeypatch.setattr(app, "scan_ifc_for_area_spaces", lambda _: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    resp = app.area_spaces_scan({"session_id": session_id, "file_names": ["areas.ifc"]})
+    assert resp.status_code == 500
+    payload = resp.body.decode("utf-8")
+    assert "AREA_SPACE_SCAN_FAILED" in payload
+    assert "\"ok\":false" in payload
+
+
+def test_purge_removes_selected_space_and_preserves_other(monkeypatch, tmp_path: Path):
+    class _RelBoundary:
+        def __init__(self, relating_space):
+            self.RelatingSpace = relating_space
+            self.RelatedBuildingElement = None
+
+    class _FakeModel:
+        def __init__(self, spaces):
+            self._spaces = spaces
+            self._boundaries = [_RelBoundary(spaces[0])]
+            self.removed_ids = []
+
+        def by_type(self, name):
+            if name == "IfcSpace":
+                return list(self._spaces)
+            if name == "IfcRelSpaceBoundary":
+                return list(self._boundaries)
+            return []
+
+        def remove(self, entity):
+            if hasattr(entity, "id"):
+                self.removed_ids.append(entity.id())
+
+        def write(self, _):
+            return None
+
+    area = _space_with_property("Information CAD Layer", "Area")
+    area._sid = 1
+    area.GlobalId = "AREA-1"
+    room = _space_with_property("Category", "Room")
+    room._sid = 2
+    room.GlobalId = "ROOM-2"
+    model = _FakeModel([area, room])
+    monkeypatch.setattr("backend.ifc_area_spaces.ifcopenshell.open", lambda _: model)
+    source = tmp_path / "areas.ifc"
+    source.write_text("ISO-10303-21;\nENDSEC;\n", encoding="utf-8")
+    output = tmp_path / "areas.area-spaces-purged.ifc"
+    purge_area_spaces(source, ["AREA-1"], output)
+    assert 1 in model.removed_ids
+    assert 2 not in model.removed_ids
