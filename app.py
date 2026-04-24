@@ -1257,13 +1257,6 @@ def _extract_uniclass(entity: Any, target_name: str, is_ifc2x3: bool) -> Tuple[s
     return "", ""
 
 
-_EN_ENTITIES_LABEL_ALIASES = {
-    "en entities",
-    "en_entities",
-    "entity classification",
-    "uniclassenreference",
-}
-
 _EN_ENTITIES_NOOP_VALUES = {"", "n/a", "na", "none", "null"}
 
 
@@ -1273,45 +1266,47 @@ def _normalize_en_entities_key(value: Any) -> str:
     return str(value).strip().lower()
 
 
-def _read_projectdata_en_entities_value(project_df: pd.DataFrame) -> Optional[str]:
+def _read_projectdata_en_entities(project_df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
     if project_df is None or project_df.empty:
-        return None
+        return None, None
 
     normalized_columns = {_normalize_en_entities_key(col): col for col in project_df.columns}
-    for alias in _EN_ENTITIES_LABEL_ALIASES:
-        source_col = normalized_columns.get(alias)
-        if source_col is None:
-            continue
-        for _, row in project_df.iterrows():
-            raw_value = clean_value(row.get(source_col))
-            if raw_value is None:
-                continue
-            value = str(raw_value).strip()
-            if value.lower() in _EN_ENTITIES_NOOP_VALUES:
-                continue
-            return value
+    ref_col = normalized_columns.get("uniclassenreference")
+    name_col = normalized_columns.get("uniclassenname")
+    if ref_col is None:
+        return None, None
 
-    if "DataType" in project_df.columns:
+    project_row = None
+    data_type_col = normalized_columns.get("datatype")
+    if data_type_col is not None:
         for _, row in project_df.iterrows():
-            data_type = _normalize_en_entities_key(row.get("DataType"))
-            if data_type not in _EN_ENTITIES_LABEL_ALIASES:
-                continue
-            for candidate_col in ("Name", "Description", "UniclassEnReference"):
-                raw_value = clean_value(row.get(candidate_col))
-                if raw_value is None:
-                    continue
-                value = str(raw_value).strip()
-                if value.lower() in _EN_ENTITIES_NOOP_VALUES:
-                    continue
-                return value
+            if _normalize_en_entities_key(row.get(data_type_col)) == "project":
+                project_row = row
+                break
+    if project_row is None:
+        project_row = project_df.iloc[0]
 
-    return None
+    raw_ref = clean_value(project_row.get(ref_col))
+    if raw_ref is None:
+        return None, None
+    ref_value = str(raw_ref).strip()
+    if ref_value.lower() in _EN_ENTITIES_NOOP_VALUES:
+        return None, None
+
+    raw_name = clean_value(project_row.get(name_col)) if name_col is not None else None
+    if raw_name is None:
+        return ref_value, ref_value
+    name_value = str(raw_name).strip()
+    if name_value.lower() in _EN_ENTITIES_NOOP_VALUES:
+        return ref_value, ref_value
+    return ref_value, name_value
 
 
 def _ensure_en_entities_classification_rel(
     ifc: Any,
     target_entity: Any,
     en_entities_value: str,
+    en_entities_name: Optional[str] = None,
     *,
     source_name: str = "Uniclass En Entities",
 ) -> Tuple[Any, bool]:
@@ -1349,9 +1344,9 @@ def _ensure_en_entities_classification_rel(
 
     if existing_ref is None:
         if is_ifc2x3:
-            existing_ref = ifc.create_entity("IfcClassificationReference", ItemReference=en_entities_value, Name=source_name)
+            existing_ref = ifc.create_entity("IfcClassificationReference", ItemReference=en_entities_value, Name=en_entities_name or en_entities_value)
         else:
-            existing_ref = ifc.create_entity("IfcClassificationReference", Identification=en_entities_value, Name=source_name)
+            existing_ref = ifc.create_entity("IfcClassificationReference", Identification=en_entities_value, Name=en_entities_name or en_entities_value)
         existing_ref.ReferencedSource = cls_src
     else:
         if is_ifc2x3 and hasattr(existing_ref, "ItemReference"):
@@ -1362,6 +1357,8 @@ def _ensure_en_entities_classification_rel(
             existing_ref.ItemReference = en_entities_value
         else:
             existing_ref.Name = en_entities_value
+        if en_entities_name:
+            existing_ref.Name = en_entities_name
         if getattr(existing_ref, "ReferencedSource", None) is None:
             existing_ref.ReferencedSource = cls_src
 
@@ -2438,8 +2435,8 @@ def update_ifc_from_excel(
     building = ifc.by_type("IfcBuilding")[0] if ifc.by_type("IfcBuilding") else None
     detected_schema = (ifc.schema or "").upper()
     APP_LOGGER.info("EN Entities write-back detected schema=%s", detected_schema)
-    en_entities_value = _read_projectdata_en_entities_value(project_df)
-    APP_LOGGER.info("ProjectData EN Entities value read=%r", en_entities_value)
+    en_entities_value, en_entities_name = _read_projectdata_en_entities(project_df)
+    APP_LOGGER.info("ProjectData EN Entities value read=%r name=%r", en_entities_value, en_entities_name)
     en_entities_rel: Optional[Any] = None
 
     def set_entity_uniclass(entity, source_name, ref_value, name_value):
@@ -2538,6 +2535,7 @@ def update_ifc_from_excel(
                         ifc,
                         building,
                         en_entities_value,
+                        en_entities_name,
                         source_name="Uniclass En Entities",
                     )
                     APP_LOGGER.info(

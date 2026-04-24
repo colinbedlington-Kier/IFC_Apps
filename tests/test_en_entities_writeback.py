@@ -47,11 +47,12 @@ def _find_en_entities_relations(model):
         if src_name != "uniclass en entities":
             continue
         value = (getattr(cref, "Identification", "") or getattr(cref, "ItemReference", "") or "").strip()
-        found.append((rel, value))
+        name = (getattr(cref, "Name", "") or "").strip()
+        found.append((rel, value, name))
     return found
 
 
-def test_projectdata_en_entities_alias_is_read_and_written(tmp_path):
+def test_projectdata_en_entities_headers_project_row_are_read_and_written(tmp_path):
     model, _, _ = _build_model("IFC4", tmp_path)
     src = tmp_path / "src.ifc"
     xlsx = tmp_path / "roundtrip.xlsx"
@@ -61,8 +62,8 @@ def test_projectdata_en_entities_alias_is_read_and_written(tmp_path):
     extract_to_excel(str(src), str(xlsx))
     sheets = _read_workbook_sheets(xlsx)
     project_df = sheets["ProjectData"]
-    project_df["Entity Classification"] = ""
-    project_df.loc[project_df["DataType"] == "Building", "Entity Classification"] = "En_42"
+    project_df.loc[project_df["DataType"] == "Project", "UniclassEnReference"] = "En_25_10_30"
+    project_df.loc[project_df["DataType"] == "Project", "UniclassEnName"] = "Primary educational buildings"
     sheets["ProjectData"] = project_df
     _write_workbook_sheets(xlsx, sheets)
 
@@ -70,7 +71,8 @@ def test_projectdata_en_entities_alias_is_read_and_written(tmp_path):
     reopened = ifcopenshell.open(str(updated))
     found = _find_en_entities_relations(reopened)
     assert len(found) == 1
-    assert found[0][1] == "En_42"
+    assert found[0][1] == "En_25_10_30"
+    assert found[0][2] == "Primary educational buildings"
 
 
 def test_blank_en_entities_is_noop(tmp_path):
@@ -83,8 +85,8 @@ def test_blank_en_entities_is_noop(tmp_path):
 
     sheets = _read_workbook_sheets(xlsx)
     project_df = sheets["ProjectData"]
-    project_df["EN Entities"] = ""
-    project_df.loc[project_df["DataType"] == "Building", "EN Entities"] = " n/a "
+    project_df.loc[project_df["DataType"] == "Project", "UniclassEnReference"] = " n/a "
+    project_df.loc[project_df["DataType"] == "Project", "UniclassEnName"] = "Primary educational buildings"
     sheets["ProjectData"] = project_df
     _write_workbook_sheets(xlsx, sheets)
 
@@ -103,7 +105,8 @@ def test_ifc2x3_en_entities_writes_valid_association(tmp_path):
 
     sheets = _read_workbook_sheets(xlsx)
     project_df = sheets["ProjectData"]
-    project_df.loc[project_df["DataType"] == "Building", "UniclassEnReference"] = "EF_25"
+    project_df.loc[project_df["DataType"] == "Project", "UniclassEnReference"] = "EF_25"
+    project_df.loc[project_df["DataType"] == "Project", "UniclassEnName"] = "Primary educational buildings"
     sheets["ProjectData"] = project_df
     _write_workbook_sheets(xlsx, sheets)
 
@@ -111,8 +114,9 @@ def test_ifc2x3_en_entities_writes_valid_association(tmp_path):
     reopened = ifcopenshell.open(str(updated))
     found = _find_en_entities_relations(reopened)
     assert len(found) == 1
-    rel, value = found[0]
+    rel, value, name = found[0]
     assert value == "EF_25"
+    assert name == "Primary educational buildings"
     assert rel.RelatedObjects and reopened.by_id(rel.RelatedObjects[0].id()) is not None
 
 
@@ -126,7 +130,8 @@ def test_ifc4_en_entities_writes_valid_association(tmp_path):
 
     sheets = _read_workbook_sheets(xlsx)
     project_df = sheets["ProjectData"]
-    project_df.loc[project_df["DataType"] == "Building", "EN_Entities"] = "EF_40"
+    project_df.loc[project_df["DataType"] == "Project", "UniclassEnReference"] = "EF_40"
+    project_df.loc[project_df["DataType"] == "Project", "UniclassEnName"] = ""
     sheets["ProjectData"] = project_df
     _write_workbook_sheets(xlsx, sheets)
 
@@ -135,6 +140,7 @@ def test_ifc4_en_entities_writes_valid_association(tmp_path):
     found = _find_en_entities_relations(reopened)
     assert len(found) == 1
     assert found[0][1] == "EF_40"
+    assert found[0][2] == "EF_40"
 
 
 def test_rerun_updates_existing_en_entities_association(tmp_path):
@@ -148,7 +154,8 @@ def test_rerun_updates_existing_en_entities_association(tmp_path):
 
     sheets = _read_workbook_sheets(xlsx)
     project_df = sheets["ProjectData"]
-    project_df.loc[project_df["DataType"] == "Building", "EN Entities"] = "EF_A"
+    project_df.loc[project_df["DataType"] == "Project", "UniclassEnReference"] = "EF_A"
+    project_df.loc[project_df["DataType"] == "Project", "UniclassEnName"] = "Name A"
     sheets["ProjectData"] = project_df
     _write_workbook_sheets(xlsx, sheets)
     update_ifc_from_excel(str(src), str(xlsx), str(updated1), add_new="yes")
@@ -156,7 +163,8 @@ def test_rerun_updates_existing_en_entities_association(tmp_path):
     extract_to_excel(str(updated1), str(xlsx))
     sheets = _read_workbook_sheets(xlsx)
     project_df = sheets["ProjectData"]
-    project_df.loc[project_df["DataType"] == "Building", "EN Entities"] = "EF_B"
+    project_df.loc[project_df["DataType"] == "Project", "UniclassEnReference"] = "EF_B"
+    project_df.loc[project_df["DataType"] == "Project", "UniclassEnName"] = "Name B"
     sheets["ProjectData"] = project_df
     _write_workbook_sheets(xlsx, sheets)
     update_ifc_from_excel(str(updated1), str(xlsx), str(updated2), add_new="yes")
@@ -165,6 +173,7 @@ def test_rerun_updates_existing_en_entities_association(tmp_path):
     found = _find_en_entities_relations(reopened)
     assert len(found) == 1
     assert found[0][1] == "EF_B"
+    assert found[0][2] == "Name B"
 
 
 def test_en_entities_logic_does_not_modify_target_entity(tmp_path):
@@ -177,7 +186,8 @@ def test_en_entities_logic_does_not_modify_target_entity(tmp_path):
 
     sheets = _read_workbook_sheets(xlsx)
     project_df = sheets["ProjectData"]
-    project_df.loc[project_df["DataType"] == "Building", "EN Entities"] = "EF_99"
+    project_df.loc[project_df["DataType"] == "Project", "UniclassEnReference"] = "EF_99"
+    project_df.loc[project_df["DataType"] == "Project", "UniclassEnName"] = "Name 99"
     sheets["ProjectData"] = project_df
 
     elements_df = sheets["Elements"]
