@@ -78,6 +78,13 @@ from backend.ifc_file_size_reducer import (
     analyze_ifc_file,
     run_reduction as run_ifc_size_reduction,
 )
+from backend.ifc_area_spaces import (
+    AreaSpaceError,
+    package_outputs as package_area_space_outputs,
+    purge_area_spaces,
+    result_to_log_payload as area_space_log_payload,
+    scan_ifc_for_area_spaces,
+)
 from backend.ifc_move_rotate import TransformRequest, transform_ifc_file
 from backend.project_tables import get_tables_for_project_slug
 
@@ -6566,6 +6573,11 @@ def reduce_file_size_page(request: Request):
     return templates.TemplateResponse(request=request, name="ifc_file_size_reducer.html", context={"request": request, "active": "reduce-file-size"})
 
 
+@app.get("/tools/purge-area-spaces", response_class=HTMLResponse)
+def purge_area_spaces_page(request: Request):
+    return templates.TemplateResponse(request=request, name="purge_area_spaces.html", context={"request": request, "active": "purge-area-spaces"})
+
+
 @app.post("/api/session")
 def create_session(payload: Dict[str, Any] = Body(default=None)):
     SESSION_STORE.cleanup_stale()
@@ -6796,6 +6808,122 @@ def api_reduce_file_size_run(payload: Dict[str, Any] = Body(...)):
             raise HTTPException(status_code=400, detail=detail) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Reduction failed: {exc}") from exc
+
+
+def _resolve_session_ifc_file_paths(session_id: str, file_names: List[str]) -> List[Tuple[str, Path]]:
+    records = _resolve_session_ifc_records(session_id, file_names)
+    output: List[Tuple[str, Path]] = []
+    for name, resolved in records:
+        if not name.lower().endswith(".ifc"):
+            raise HTTPException(status_code=400, detail=f"Only .ifc files are supported: {name}")
+        output.append((name, Path(resolved)))
+    return output
+
+
+@app.get("/api/ifc/area-spaces/session-files")
+def area_spaces_session_files(session_id: str):
+    normalized = _require_valid_session_id(session_id)
+    root = Path(_ensure_session_dir_for_upload(normalized))
+    files = []
+    for file_path in sorted(root.glob("*.ifc")):
+        stat = file_path.stat()
+        files.append({"name": file_path.name, "size": stat.st_size, "modified": datetime.datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()})
+    return {"session_id": normalized, "files": files, "count": len(files)}
+
+
+@app.post("/api/ifc/area-spaces/scan")
+def area_spaces_scan(payload: Dict[str, Any] = Body(...)):
+    session_id = str(payload.get("session_id") or "").strip()
+    requested = payload.get("file_names") or payload.get("file_ids")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    if not isinstance(requested, list) or not requested:
+        raise HTTPException(status_code=400, detail="file_names (or file_ids) array is required")
+    ifc_records = _resolve_session_ifc_file_paths(session_id, [str(item) for item in requested])
+
+    scans = []
+    total_spaces = 0
+    total_candidates = 0
+    for source_name, path in ifc_records:
+        try:
+            result = scan_ifc_for_area_spaces(path)
+        except AreaSpaceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Scan failed for {source_name}: {exc}") from exc
+        APP_LOGGER.info("area_spaces_scan %s", area_space_log_payload(result))
+        scan_payload = {
+            "source_file": result.source_file,
+            "total_spaces": result.total_spaces,
+            "candidates": [candidate.__dict__ for candidate in result.candidates],
+        }
+        scans.append(scan_payload)
+        total_spaces += result.total_spaces
+        total_candidates += len(result.candidates)
+
+    return {
+        "session_id": session_id,
+        "progress": "candidates found",
+        "files_scanned": len(scans),
+        "total_spaces": total_spaces,
+        "total_candidates": total_candidates,
+        "results": scans,
+    }
+
+
+@app.post("/api/ifc/area-spaces/purge")
+def area_spaces_purge(payload: Dict[str, Any] = Body(...)):
+    session_id = str(payload.get("session_id") or "").strip()
+    selected = payload.get("selected_candidates")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    if not isinstance(selected, list) or not selected:
+        raise HTTPException(status_code=400, detail="selected_candidates must contain at least one GlobalId/STEP id")
+
+    requested_files = payload.get("file_names") or sorted({str(item.get("source_file")) for item in selected if isinstance(item, dict) and item.get("source_file")})
+    if not isinstance(requested_files, list) or not requested_files:
+        raise HTTPException(status_code=400, detail="file_names array is required")
+
+    grouped_selections: Dict[str, List[str]] = {}
+    for item in selected:
+        if isinstance(item, dict):
+            source = str(item.get("source_file") or "")
+            key = str(item.get("global_id") or item.get("step_id") or "").strip()
+            if source and key:
+                grouped_selections.setdefault(source, []).append(key)
+        else:
+            grouped_selections.setdefault(str(requested_files[0]), []).append(str(item))
+
+    session_root = Path(SESSION_STORE.ensure(session_id))
+    ifc_records = _resolve_session_ifc_file_paths(session_id, [str(item) for item in requested_files])
+    purge_results = []
+    produced_names: List[str] = []
+    for source_name, source_path in ifc_records:
+        selected_keys = grouped_selections.get(source_name, [])
+        if not selected_keys:
+            continue
+        output_name = f"{source_path.stem}.area-spaces-purged.ifc"
+        output_path = session_root / output_name
+        try:
+            result = purge_area_spaces(source_path, selected_keys, output_path)
+        except AreaSpaceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Purge failed for {source_name}: {exc}") from exc
+        APP_LOGGER.info("area_spaces_purge %s", area_space_log_payload(result))
+        purge_results.append(result.__dict__)
+        produced_names.extend([result.output_ifc, result.report_csv])
+
+    if not purge_results:
+        raise HTTPException(status_code=400, detail="No selected candidates matched the requested files")
+
+    output_files = [{"name": name, "download_url": f"/api/session/{session_id}/download?name={name}"} for name in produced_names]
+    if len(purge_results) > 1:
+        zip_name = "area-spaces-purged.outputs.zip"
+        archive = package_area_space_outputs(session_root, produced_names, zip_name)
+        output_files.append({"name": archive, "download_url": f"/api/session/{session_id}/download?name={archive}"})
+
+    return {"session_id": session_id, "progress": "complete", "results": purge_results, "output_files": output_files}
 
 
 @app.get("/api/tools/cobieqc/health")
