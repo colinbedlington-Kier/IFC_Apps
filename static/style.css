@@ -679,10 +679,25 @@ button.ghost {
 .progress.hidden { display: none; }
 .progress .bar {
   position: absolute;
-  inset: 0;
-  width: 30%;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0%;
   background: linear-gradient(135deg, var(--accent-2), var(--accent));
+}
+.progress.indeterminate .bar {
+  width: 30%;
   animation: progress-indeterminate 1s linear infinite;
+}
+.upload-file-progress-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+.upload-file-progress-row {
+  font-size: 12px;
+  color: var(--muted);
 }
 @keyframes progress-indeterminate {
   0% { transform: translateX(-100%); }

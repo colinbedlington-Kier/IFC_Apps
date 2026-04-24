@@ -243,32 +243,125 @@ function populateFileSelects() {
 
 function resetUploadProgress() {
   const wrap = document.querySelector("[data-upload-progress-wrap]");
-  const bar = document.querySelector("[data-upload-progress]");
+  const progressEl = document.querySelector("[data-upload-progress]");
+  const bar = progressEl?.querySelector(".bar");
   const pct = document.querySelector("[data-upload-percent]");
   const status = document.querySelector("[data-upload-status]");
+  const bytes = document.querySelector("[data-upload-bytes]");
+  const speed = document.querySelector("[data-upload-speed]");
+  const fileList = el("upload-file-progress-list");
   if (wrap) wrap.classList.remove("visible", "done", "error");
+  if (progressEl) progressEl.classList.add("hidden");
+  if (progressEl) progressEl.classList.remove("indeterminate");
   if (bar) bar.style.width = "0%";
   if (pct) pct.textContent = "";
+  if (bytes) bytes.textContent = "";
+  if (speed) speed.textContent = "";
+  if (fileList) fileList.innerHTML = "";
   if (status) status.textContent = "Waiting to start…";
 }
 
-function updateUploadProgress({ percent, message, done = false, error = false }) {
+function formatBytes(bytes) {
+  const value = Math.max(0, Number(bytes) || 0);
+  if (value < 1024) return `${Math.round(value)} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let scaled = value;
+  let index = -1;
+  while (scaled >= 1024 && index < units.length - 1) {
+    scaled /= 1024;
+    index += 1;
+  }
+  const decimals = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+  return `${scaled.toFixed(decimals)} ${units[index]}`;
+}
+
+function formatTransferSpeed(bytesPerSecond) {
+  const bps = Math.max(0, Number(bytesPerSecond) || 0);
+  return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
+}
+
+function calculateUploadPercent(loaded, total) {
+  const safeTotal = Math.max(0, Number(total) || 0);
+  if (!safeTotal) return 0;
+  const ratio = (Math.max(0, Number(loaded) || 0) / safeTotal) * 100;
+  return Math.max(0, Math.min(100, ratio));
+}
+
+function createRollingSpeedTracker(sampleWindowMs = 5000, maxSamples = 8) {
+  const samples = [];
+  return {
+    push(bytesLoaded, timestamp = Date.now()) {
+      samples.push({ bytesLoaded: Math.max(0, Number(bytesLoaded) || 0), timestamp: Number(timestamp) || Date.now() });
+      while (samples.length > maxSamples) samples.shift();
+      while (samples.length > 1 && (samples[samples.length - 1].timestamp - samples[0].timestamp) > sampleWindowMs) {
+        samples.shift();
+      }
+    },
+    bytesPerSecond(now = Date.now()) {
+      if (samples.length < 2) return 0;
+      const first = samples[0];
+      const last = samples[samples.length - 1];
+      const elapsedMs = Math.max(1, last.timestamp - first.timestamp);
+      const instantaneous = Math.max(0, (last.bytesLoaded - first.bytesLoaded) / (elapsedMs / 1000));
+      const idleMs = Math.max(0, (Number(now) || Date.now()) - last.timestamp);
+      const decay = Math.max(0, 1 - (idleMs / 4000));
+      return instantaneous * decay;
+    },
+  };
+}
+
+function buildPerFileProgress(files, loadedBytes) {
+  let remaining = Math.max(0, Number(loadedBytes) || 0);
+  return files.map((file) => {
+    const size = Math.max(0, Number(file.size) || 0);
+    const uploadedBytes = Math.max(0, Math.min(size, remaining));
+    remaining = Math.max(0, remaining - size);
+    return {
+      name: file.name || "file",
+      uploadedBytes,
+      totalBytes: size,
+      percent: calculateUploadPercent(uploadedBytes, size || 1),
+    };
+  });
+}
+
+function renderPerFileProgress(rows) {
+  const container = el("upload-file-progress-list");
+  if (!container) return;
+  if (!rows?.length) {
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = rows.map((row) => (
+    `<div class="upload-file-progress-row">${row.name} — ${Math.round(row.percent)}% — ${formatBytes(row.uploadedBytes)} / ${formatBytes(row.totalBytes)}</div>`
+  )).join("");
+}
+
+function updateUploadProgress({ percent, message, done = false, error = false, indeterminate = false, bytesText = "", speedText = "", fileRows = [] }) {
   const wrap = document.querySelector("[data-upload-progress-wrap]");
-  const bar = document.querySelector("[data-upload-progress]");
+  const progressEl = document.querySelector("[data-upload-progress]");
+  const bar = progressEl?.querySelector(".bar");
   const pct = document.querySelector("[data-upload-percent]");
   const status = document.querySelector("[data-upload-status]");
-  if (!wrap || !bar || !status || !pct) return;
+  const bytes = document.querySelector("[data-upload-bytes]");
+  const speed = document.querySelector("[data-upload-speed]");
+  if (!wrap || !progressEl || !bar || !status || !pct) return;
   wrap.classList.add("visible");
   wrap.classList.toggle("done", done);
   wrap.classList.toggle("error", error);
+  progressEl.classList.remove("hidden");
+  progressEl.classList.toggle("indeterminate", !!indeterminate);
   if (typeof percent === "number" && Number.isFinite(percent)) {
-    const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+    const clamped = Math.max(0, Math.min(100, percent));
     bar.style.width = `${clamped}%`;
-    pct.textContent = `${clamped}%`;
-    bar.setAttribute("aria-valuenow", String(clamped));
+    pct.textContent = `${Math.round(clamped)}%`;
+    progressEl.setAttribute("aria-valuenow", String(Math.round(clamped)));
   } else if (!percent) {
     pct.textContent = "";
   }
+  if (bytes) bytes.textContent = bytesText;
+  if (speed) speed.textContent = speedText;
+  renderPerFileProgress(fileRows);
   status.textContent = message || "";
 }
 
@@ -391,18 +484,25 @@ async function runStep2ifcAuto() {
   }
 }
 
-function uploadWithProgress(url, form) {
+function uploadWithProgress(url, form, options = {}) {
+  const { onProgress, signal } = options;
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", url);
+    if (signal) {
+      signal.addEventListener("abort", () => xhr.abort(), { once: true });
+    }
     xhr.upload.onprogress = (evt) => {
-      if (evt.lengthComputable) {
-        const pct = (evt.loaded / evt.total) * 100;
-        updateUploadProgress({ percent: pct, message: "Uploading files…" });
-      } else {
-        updateUploadProgress({ message: "Uploading files…" });
+      if (typeof onProgress === "function") {
+        onProgress({
+          loaded: Number(evt.loaded) || 0,
+          total: Number(evt.total) || 0,
+          lengthComputable: !!evt.lengthComputable,
+          timestamp: Date.now(),
+        });
       }
     };
+    xhr.onabort = () => reject(new Error(signal?.aborted ? "Upload cancelled." : "Upload interrupted."));
     xhr.onerror = () => reject(new Error("Network error during upload"));
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
@@ -430,26 +530,72 @@ async function uploadFiles() {
     alert("Session not ready yet. Please wait a moment and retry.");
     return;
   }
-  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Uploading…";
-  if (state.uploadProgressEl) state.uploadProgressEl.classList.remove("hidden");
+  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Preparing upload…";
+  resetUploadProgress();
+  updateUploadProgress({
+    percent: 0,
+    message: "Preparing upload…",
+    indeterminate: true,
+    bytesText: "",
+    speedText: "",
+  });
   const form = new FormData();
+  const files = Array.from(input.files);
+  const totalBytes = files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
   for (const f of input.files) {
     if (Number(f.size) > state.uploadLimits.maxBytes) {
       if (state.uploadStatusEl) state.uploadStatusEl.textContent = `Upload rejected: ${f.name} exceeds the maximum upload size of ${state.uploadLimits.maxDisplay}.`;
-      if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
+      updateUploadProgress({ percent: 0, message: `Failed — ${f.name} exceeds maximum size.`, error: true });
       return;
     }
     form.append("files", f);
   }
+  const speedTracker = createRollingSpeedTracker();
+  const progressTimer = setInterval(() => {
+    const speedNow = speedTracker.bytesPerSecond(Date.now());
+    const label = speedNow > 0 ? formatTransferSpeed(speedNow) : "0.0 MB/s";
+    const current = document.querySelector("[data-upload-speed]");
+    if (current && current.textContent) current.textContent = label;
+  }, 600);
+  const targetNames = files.map((f) => f.name);
   try {
-    await uploadWithProgress(`/api/session/${state.sessionId}/upload`, form);
+    await uploadWithProgress(`/api/session/${state.sessionId}/upload`, form, {
+      onProgress: ({ loaded, total, lengthComputable, timestamp }) => {
+        const progressTotal = lengthComputable && total > 0 ? total : totalBytes;
+        const percent = calculateUploadPercent(loaded, progressTotal);
+        speedTracker.push(loaded, timestamp);
+        const speedLabel = formatTransferSpeed(speedTracker.bytesPerSecond(timestamp));
+        const bytesLabel = `${formatBytes(loaded)} / ${formatBytes(progressTotal)}`;
+        const perFile = buildPerFileProgress(files, loaded);
+        const activeFile = perFile.find((row) => row.percent < 100) || perFile[perFile.length - 1];
+        const stateText = lengthComputable ? "uploading" : "preparing";
+        updateUploadProgress({
+          percent,
+          indeterminate: !lengthComputable,
+          message: activeFile ? `Uploading ${activeFile.name} — ${Math.round(percent)}% — ${bytesLabel} — ${speedLabel}` : "Uploading files…",
+          bytesText: bytesLabel,
+          speedText: speedLabel,
+          fileRows: perFile,
+        });
+        if (state.uploadStatusEl) state.uploadStatusEl.textContent = stateText === "uploading" ? "Uploading…" : "Preparing upload…";
+      },
+    });
   } catch (err) {
+    clearInterval(progressTimer);
     const message = String(err?.message || "");
     if (state.uploadStatusEl) state.uploadStatusEl.textContent = message || "Upload failed.";
-    updateUploadProgress({ percent: 100, message: message || "Upload failed", error: true });
-    if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
+    updateUploadProgress({ percent: 100, message: `Failed — ${message || "Upload failed"}`, error: true, fileRows: buildPerFileProgress(files, 0) });
     return;
   }
+  clearInterval(progressTimer);
+  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Processing on server…";
+  updateUploadProgress({
+    percent: 100,
+    message: "Upload complete — processing on server…",
+    bytesText: `${formatBytes(totalBytes)} / ${formatBytes(totalBytes)}`,
+    speedText: "0.0 MB/s",
+    fileRows: buildPerFileProgress(files, totalBytes),
+  });
   input.value = "";
   if (window.IFCSession?.setCurrentSessionId && state.sessionId) {
     window.IFCSession.setCurrentSessionId(state.sessionId);
