@@ -197,9 +197,17 @@ def test_scan_ifcopenshell_mode_only_when_enabled(monkeypatch, tmp_path: Path):
     source = tmp_path / "tiny.ifc"
     source.write_text("ISO-10303-21;\nENDSEC;\n", encoding="utf-8")
     monkeypatch.setenv("AREA_SPACE_SCAN_MODE", "ifcopenshell")
-    monkeypatch.setattr("backend.ifc_area_spaces.ifcopenshell.open", lambda _: _FakeModel())
+    observed = {}
+
+    def _fake_open(path, **kwargs):
+        observed["path"] = path
+        observed["kwargs"] = kwargs
+        return _FakeModel()
+
+    monkeypatch.setattr("backend.ifc_area_spaces.ifcopenshell.open", _fake_open)
     result = scan_ifc_for_area_spaces(source)
     assert result.total_spaces == 0
+    assert observed["kwargs"].get("lazy") is True
 
 
 def test_scan_error_returns_json_not_crash(monkeypatch):
