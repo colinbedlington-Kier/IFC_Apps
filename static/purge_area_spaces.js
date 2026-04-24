@@ -124,7 +124,7 @@
       status.textContent = "Select at least one session IFC file before scanning.";
       return;
     }
-    status.textContent = "scanning IFC";
+    status.textContent = "Waiting for processing slot...";
     let resp;
     let data = {};
     try {
@@ -135,12 +135,16 @@
       }));
       data = await resp.json();
     } catch (err) {
-      status.textContent = "Processing failed or server restarted. The IFC may be too large for the current memory-safe purge path.";
+      status.textContent = "Processing failed or server restarted. The IFC may be too large or another heavy job may have exhausted memory.";
       return;
     }
     if (!resp.ok) {
       if (resp.status === 404) {
         status.textContent = "Area Spaces API is not mounted in this deployment. Check backend router registration.";
+        return;
+      }
+      if (resp.status === 413) {
+        status.textContent = "Scan failed: IFC is too large for safe processing. Split the IFC or increase AREA_SPACE_MAX_FILE_MB.";
         return;
       }
       status.textContent = `Scan failed: ${data.message || data.detail || "Unknown error"}`;
@@ -178,7 +182,7 @@
       return;
     }
 
-    status.textContent = "purging";
+    status.textContent = "Waiting for processing slot...";
     let resp;
     let data = {};
     try {
@@ -189,12 +193,24 @@
       }));
       data = await resp.json();
     } catch (err) {
-      status.textContent = "Processing failed or server restarted. The IFC may be too large for the current memory-safe purge path.";
+      status.textContent = "Processing failed or server restarted. The IFC may be too large or another heavy job may have exhausted memory.";
       return;
     }
     if (!resp.ok) {
       if (resp.status === 404) {
         status.textContent = "Area Spaces API is not mounted in this deployment. Check backend router registration.";
+        return;
+      }
+      if (resp.status === 413) {
+        status.textContent = "Purge failed: IFC is too large for configured safe processing. Split the IFC.";
+        return;
+      }
+      if (resp.status === 503) {
+        status.textContent = "Purge failed: server memory is busy. Try again when other jobs finish.";
+        return;
+      }
+      if (data.error === "AREA_SPACE_PURGE_SUBPROCESS_FAILED") {
+        status.textContent = "Purge failed in isolated worker. The app stayed online. This IFC is still too large for the configured worker memory; split the IFC or increase AREA_SPACE_PURGE_CHILD_MEMORY_MB.";
         return;
       }
       status.textContent = `Purge failed: ${data.message || data.detail || "Unknown error"}`;
