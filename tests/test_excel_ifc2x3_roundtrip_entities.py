@@ -166,3 +166,45 @@ def test_reject_invalid_entity_predefined_combo(tmp_path):
 
     revised = ifcopenshell.open(str(updated))
     assert revised.by_guid(proxy_type.GlobalId).is_a() == "IfcBuildingElementProxyType"
+
+
+def test_type_invalid_predefined_falls_back_to_userdefined(tmp_path):
+    model, _, _, wall_type = _build_ifc2x3_model(tmp_path)
+    src = tmp_path / "src.ifc"
+    xlsx = tmp_path / "out.xlsx"
+    updated = tmp_path / "updated.ifc"
+    model.write(str(src))
+    extract_to_excel(str(src), str(xlsx))
+
+    xls = pd.ExcelFile(xlsx)
+    elements = pd.read_excel(xls, "Elements")
+    types = pd.read_excel(xls, "Types")
+    project = pd.read_excel(xls, "ProjectData")
+    raw_entities = pd.read_excel(xls, "RawEntities")
+    props = pd.read_excel(xls, "Properties")
+    cobie = pd.read_excel(xls, "COBieMapping")
+    uniclass_pr = pd.read_excel(xls, "Uniclass_Pr")
+    uniclass_ss = pd.read_excel(xls, "Uniclass_Ss")
+    uniclass_ef = pd.read_excel(xls, "Uniclass_EF")
+    xls.close()
+
+    type_row = types[types["GlobalId"] == wall_type.GlobalId].iloc[0]
+    types.loc[types["RowKey"] == type_row["RowKey"], "TargetPredefinedType"] = "CULVERT"
+    types.loc[types["RowKey"] == type_row["RowKey"], "ApplyChange"] = "Yes"
+
+    with pd.ExcelWriter(xlsx, engine="openpyxl") as writer:
+        project.to_excel(writer, sheet_name="ProjectData", index=False)
+        elements.to_excel(writer, sheet_name="Elements", index=False)
+        types.to_excel(writer, sheet_name="Types", index=False)
+        raw_entities.to_excel(writer, sheet_name="RawEntities", index=False)
+        props.to_excel(writer, sheet_name="Properties", index=False)
+        cobie.to_excel(writer, sheet_name="COBieMapping", index=False)
+        uniclass_pr.to_excel(writer, sheet_name="Uniclass_Pr", index=False)
+        uniclass_ss.to_excel(writer, sheet_name="Uniclass_Ss", index=False)
+        uniclass_ef.to_excel(writer, sheet_name="Uniclass_EF", index=False)
+
+    update_ifc_from_excel(str(src), str(xlsx), str(updated), add_new="yes")
+    revised = ifcopenshell.open(str(updated))
+    updated_wall_type = revised.by_guid(wall_type.GlobalId)
+    assert updated_wall_type.PredefinedType == "USERDEFINED"
+    assert updated_wall_type.ElementType == "CULVERT"
