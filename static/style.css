@@ -723,6 +723,30 @@ button.ghost {
 }
 .upload-file-progress-fill {
   background: linear-gradient(135deg, #6ce4ff, #7c61ff);
+  height: 100%;
+  width: 0%;
+  transition: width 120ms linear;
+}
+#upload-progress-panel {
+  width: 100%;
+}
+#upload-progress-text {
+  margin-top: 8px;
+}
+.upload-progress-track {
+  width: 100%;
+  max-width: 620px;
+  height: 12px;
+  background: rgba(255,255,255,0.18);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+.upload-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: #63d2ff;
+  transition: width 120ms linear;
 }
 
 .log {

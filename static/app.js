@@ -260,6 +260,8 @@ function resetUploadProgress() {
   const status = document.querySelector("[data-upload-status]");
   const bytes = document.querySelector("[data-upload-bytes]");
   const speed = document.querySelector("[data-upload-speed]");
+  const panelText = el("upload-progress-text");
+  const sessionDebug = el("upload-session-debug");
   const fileList = el("upload-file-progress-list");
   if (wrap) wrap.classList.remove("visible", "done", "error");
   if (progressEl) progressEl.classList.add("hidden");
@@ -268,9 +270,23 @@ function resetUploadProgress() {
   if (pct) pct.textContent = "";
   if (bytes) bytes.textContent = "";
   if (speed) speed.textContent = "";
+  if (panelText) panelText.textContent = "";
+  if (sessionDebug) sessionDebug.textContent = "";
   if (fileList) fileList.innerHTML = "";
   if (status) status.textContent = "Waiting to start…";
   setUploadState("idle");
+}
+
+function renderUploadPanelFromState(uploadProgress) {
+  const panelText = el("upload-progress-text");
+  const panelFill = document.querySelector("#upload-progress-panel .upload-progress-fill");
+  if (!panelText || !panelFill || !uploadProgress) return;
+  const filename = uploadProgress.filename || "file";
+  const percent = Math.max(0, Math.min(100, Number(uploadProgress.percent) || 0));
+  const bytesText = `${formatBytes(uploadProgress.loaded)} / ${formatBytes(uploadProgress.total)}`;
+  const speedText = uploadProgress.speedBytesPerSecond > 0 ? ` — ${formatTransferSpeed(uploadProgress.speedBytesPerSecond)}` : "";
+  panelText.textContent = `${uploadProgress.statusText || "Preparing upload..."} ${filename} — ${percent}% — ${bytesText}${speedText}`;
+  panelFill.style.width = `${percent}%`;
 }
 
 function formatBytes(bytes) {
@@ -559,8 +575,12 @@ async function uploadFiles() {
     alert("Choose file(s) to upload.");
     return;
   }
-  const sharedSessionId = window.IFCSession?.getCurrentSessionId ? window.IFCSession.getCurrentSessionId() : "";
-  const activeSessionId = String(sharedSessionId || state.sessionId || "").trim();
+  const activeSessionId = String(
+    window.IFCSession?.getActiveSessionId?.()
+    || localStorage.getItem("ifc_toolkit_session_id")
+    || state.sessionId
+    || ""
+  ).trim();
   if (!activeSessionId) {
     alert("Session not ready yet. Please wait a moment and retry.");
     return;
@@ -570,6 +590,8 @@ async function uploadFiles() {
   if (window.IFCSession?.shortSessionId) {
     setSessionBadge(`Session ready • ${window.IFCSession.shortSessionId(activeSessionId)}`, true);
   }
+  const uploadSessionDebug = el("upload-session-debug");
+  if (uploadSessionDebug) uploadSessionDebug.textContent = `Uploading to session: ${activeSessionId.slice(0, 8)}`;
   console.info("[upload] session alignment", {
     activeSessionId,
     badgeSessionText: getBadgeSessionIdText(),
@@ -596,6 +618,16 @@ async function uploadFiles() {
     form.append("files", f);
   }
   const speedTracker = createRollingSpeedTracker();
+  const uploadProgress = {
+    status: "preparing",
+    statusText: "Preparing upload...",
+    filename: files[0]?.name || "file",
+    loaded: 0,
+    total: files[0]?.size || 0,
+    percent: 0,
+    speedBytesPerSecond: 0,
+  };
+  renderUploadPanelFromState(uploadProgress);
   let sawProgressEvent = false;
   const progressTimer = setInterval(() => {
     const speedNow = speedTracker.bytesPerSecond(Date.now());
@@ -614,20 +646,30 @@ async function uploadFiles() {
   }, 600);
   const targetNames = files.map((f) => f.name);
   const uploadUrl = `/api/session/${activeSessionId}/upload`;
-  console.info("[upload] URL", { uploadUrl });
+  console.log("[upload] activeSessionId", activeSessionId);
+  console.log("[upload] uploadUrl", uploadUrl);
   try {
     await uploadWithProgress(uploadUrl, form, {
       onProgress: ({ loaded, total, lengthComputable, timestamp }) => {
         sawProgressEvent = true;
-        const progressTotal = lengthComputable && total > 0 ? total : totalBytes;
-        const percent = calculateUploadPercent(loaded, progressTotal);
+        const progressTotal = lengthComputable && total > 0 ? total : totalBytes || (files[0]?.size || 0);
+        const percent = Math.round((Math.max(0, loaded) / Math.max(1, progressTotal)) * 100);
         speedTracker.push(loaded, timestamp);
-        const speedLabel = formatTransferSpeed(speedTracker.bytesPerSecond(timestamp));
+        const speedValue = speedTracker.bytesPerSecond(timestamp);
+        const speedLabel = formatTransferSpeed(speedValue);
         const bytesLabel = `${formatBytes(loaded)} / ${formatBytes(progressTotal)}`;
         const perFile = buildPerFileProgress(files, loaded).map((row) => ({ ...row, speedBytesPerSecond: 0 }));
         const activeFile = perFile.find((row) => row.percent < 100) || perFile[perFile.length - 1];
         if (activeFile) activeFile.speedBytesPerSecond = speedTracker.bytesPerSecond(timestamp);
         const stateText = lengthComputable ? "uploading" : "preparing";
+        uploadProgress.status = stateText;
+        uploadProgress.statusText = stateText === "uploading" ? "Uploading" : "Preparing upload...";
+        uploadProgress.filename = activeFile?.name || files[0]?.name || "file";
+        uploadProgress.loaded = Math.max(0, loaded);
+        uploadProgress.total = progressTotal || files[0]?.size || 0;
+        uploadProgress.percent = Math.max(0, Math.min(100, percent));
+        uploadProgress.speedBytesPerSecond = speedValue;
+        renderUploadPanelFromState(uploadProgress);
         console.info("[upload] progress event", {
           loaded,
           total,
@@ -642,7 +684,7 @@ async function uploadFiles() {
           speedMBps: Number((speedTracker.bytesPerSecond(timestamp) / (1024 * 1024)).toFixed(2)),
         });
         updateUploadProgress({
-          percent,
+          percent: uploadProgress.percent,
           indeterminate: !lengthComputable,
           message: activeFile ? `Uploading ${activeFile.name} — ${Math.round(percent)}% — ${bytesLabel} — ${speedLabel}` : "Uploading files…",
           bytesText: bytesLabel,
@@ -661,6 +703,13 @@ async function uploadFiles() {
     return;
   }
   clearInterval(progressTimer);
+  uploadProgress.status = "processing";
+  uploadProgress.statusText = "Processing on server...";
+  uploadProgress.loaded = totalBytes;
+  uploadProgress.total = totalBytes;
+  uploadProgress.percent = 100;
+  uploadProgress.speedBytesPerSecond = 0;
+  renderUploadPanelFromState(uploadProgress);
   setUploadState("processing");
   if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload complete — processing on server...";
   updateUploadProgress({

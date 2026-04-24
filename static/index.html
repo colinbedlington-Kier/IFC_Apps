@@ -47,14 +47,21 @@
         </div>
         <div class="upload-actions">
           <button type="submit" class="primary">Upload</button>
+          <div id="upload-session-debug" class="muted"></div>
           <div id="upload-status" class="hint">Waiting to start…</div>
           <div id="upload-progress-wrap" class="upload-progress" data-upload-progress-wrap>
             <div class="upload-progress-top">
               <span data-upload-status>Waiting to start…</span>
               <strong data-upload-percent></strong>
             </div>
+            <div id="upload-progress-panel">
+              <div id="upload-progress-text" class="muted"></div>
+              <div class="upload-progress-track">
+                <div class="upload-progress-fill" style="width:0%"></div>
+              </div>
+            </div>
             <div id="upload-progress" class="progress hidden" data-upload-progress>
-              <div class="bar"></div>
+              <div class="bar upload-progress-fill"></div>
             </div>
             <div class="muted" data-upload-bytes></div>
             <div class="muted" data-upload-speed></div>
