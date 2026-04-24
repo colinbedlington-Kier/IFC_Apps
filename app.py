@@ -1257,6 +1257,154 @@ def _extract_uniclass(entity: Any, target_name: str, is_ifc2x3: bool) -> Tuple[s
     return "", ""
 
 
+_EN_ENTITIES_LABEL_ALIASES = {
+    "en entities",
+    "en_entities",
+    "entity classification",
+    "uniclassenreference",
+}
+
+_EN_ENTITIES_NOOP_VALUES = {"", "n/a", "na", "none", "null"}
+
+
+def _normalize_en_entities_key(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
+def _read_projectdata_en_entities_value(project_df: pd.DataFrame) -> Optional[str]:
+    if project_df is None or project_df.empty:
+        return None
+
+    normalized_columns = {_normalize_en_entities_key(col): col for col in project_df.columns}
+    for alias in _EN_ENTITIES_LABEL_ALIASES:
+        source_col = normalized_columns.get(alias)
+        if source_col is None:
+            continue
+        for _, row in project_df.iterrows():
+            raw_value = clean_value(row.get(source_col))
+            if raw_value is None:
+                continue
+            value = str(raw_value).strip()
+            if value.lower() in _EN_ENTITIES_NOOP_VALUES:
+                continue
+            return value
+
+    if "DataType" in project_df.columns:
+        for _, row in project_df.iterrows():
+            data_type = _normalize_en_entities_key(row.get("DataType"))
+            if data_type not in _EN_ENTITIES_LABEL_ALIASES:
+                continue
+            for candidate_col in ("Name", "Description", "UniclassEnReference"):
+                raw_value = clean_value(row.get(candidate_col))
+                if raw_value is None:
+                    continue
+                value = str(raw_value).strip()
+                if value.lower() in _EN_ENTITIES_NOOP_VALUES:
+                    continue
+                return value
+
+    return None
+
+
+def _ensure_en_entities_classification_rel(
+    ifc: Any,
+    target_entity: Any,
+    en_entities_value: str,
+    *,
+    source_name: str = "Uniclass En Entities",
+) -> Tuple[Any, bool]:
+    schema_upper = (ifc.schema or "").upper()
+    is_ifc2x3 = schema_upper == "IFC2X3"
+    owner_history = next(iter(ifc.by_type("IfcOwnerHistory")), None)
+
+    cls_src = None
+    for c in ifc.by_type("IfcClassification"):
+        if str(getattr(c, "Name", "")).strip().lower() == source_name.strip().lower():
+            cls_src = c
+            break
+    if cls_src is None:
+        cls_src = ifc.create_entity("IfcClassification", Name=source_name)
+
+    existing_rel = None
+    existing_ref = None
+    for rel in getattr(target_entity, "HasAssociations", []) or []:
+        if not rel.is_a("IfcRelAssociatesClassification"):
+            continue
+        cref = rel.RelatingClassification
+        if not cref or not cref.is_a("IfcClassificationReference"):
+            continue
+        src = getattr(cref, "ReferencedSource", None)
+        src_name = str(getattr(src, "Name", "") or getattr(cref, "Name", "")).strip().lower()
+        if src_name == source_name.strip().lower():
+            existing_rel = rel
+            existing_ref = cref
+            break
+    APP_LOGGER.info(
+        "EN Entities existing classification association found=%s target_id=%s",
+        existing_rel is not None,
+        target_entity.id() if target_entity is not None else None,
+    )
+
+    if existing_ref is None:
+        if is_ifc2x3:
+            existing_ref = ifc.create_entity("IfcClassificationReference", ItemReference=en_entities_value, Name=source_name)
+        else:
+            existing_ref = ifc.create_entity("IfcClassificationReference", Identification=en_entities_value, Name=source_name)
+        existing_ref.ReferencedSource = cls_src
+    else:
+        if is_ifc2x3 and hasattr(existing_ref, "ItemReference"):
+            existing_ref.ItemReference = en_entities_value
+        elif not is_ifc2x3 and hasattr(existing_ref, "Identification"):
+            existing_ref.Identification = en_entities_value
+        elif hasattr(existing_ref, "ItemReference"):
+            existing_ref.ItemReference = en_entities_value
+        else:
+            existing_ref.Name = en_entities_value
+        if getattr(existing_ref, "ReferencedSource", None) is None:
+            existing_ref.ReferencedSource = cls_src
+
+    if existing_rel is not None:
+        if target_entity not in (existing_rel.RelatedObjects or []):
+            existing_rel.RelatedObjects = list(existing_rel.RelatedObjects or []) + [target_entity]
+        return existing_rel, False
+
+    rel_kwargs: Dict[str, Any] = {
+        "GlobalId": new_guid(),
+        "RelatedObjects": [target_entity],
+        "RelatingClassification": existing_ref,
+    }
+    if is_ifc2x3 and owner_history is not None:
+        rel_kwargs["OwnerHistory"] = owner_history
+    created_rel = ifc.create_entity("IfcRelAssociatesClassification", **rel_kwargs)
+    return created_rel, True
+
+
+def _validate_en_entities_writeback(ifc_path: str, expected_value: str) -> Tuple[bool, str]:
+    model = ifcopenshell.open(ifc_path)
+    expected_value_lower = expected_value.strip().lower()
+    for rel in model.by_type("IfcRelAssociatesClassification"):
+        cref = getattr(rel, "RelatingClassification", None)
+        if not cref or not cref.is_a("IfcClassificationReference"):
+            continue
+        src = getattr(cref, "ReferencedSource", None)
+        src_name = str(getattr(src, "Name", "") or getattr(cref, "Name", "")).strip().lower()
+        if src_name != "uniclass en entities":
+            continue
+        ident = str(getattr(cref, "Identification", "") or getattr(cref, "ItemReference", "") or "").strip().lower()
+        if ident != expected_value_lower:
+            continue
+        related = list(getattr(rel, "RelatedObjects", []) or [])
+        if not related:
+            continue
+        all_related_valid = all(model.by_id(obj.id()) is not None for obj in related)
+        if not all_related_valid:
+            return False, "EN Entities classification found but includes invalid RelatedObjects."
+        return True, f"Validated relation #{rel.id()} with {len(related)} related object(s)."
+    return False, "No IFCRELASSOCIATESCLASSIFICATION found for the EN Entities value."
+
+
 def _parse_excel_extraction_plan(payload: Optional[Dict[str, Any]]) -> ExtractionPlan:
     if not payload:
         return ExtractionPlan()
@@ -2288,6 +2436,11 @@ def update_ifc_from_excel(
     project = ifc.by_type("IfcProject")[0]
     site = ifc.by_type("IfcSite")[0] if ifc.by_type("IfcSite") else None
     building = ifc.by_type("IfcBuilding")[0] if ifc.by_type("IfcBuilding") else None
+    detected_schema = (ifc.schema or "").upper()
+    APP_LOGGER.info("EN Entities write-back detected schema=%s", detected_schema)
+    en_entities_value = _read_projectdata_en_entities_value(project_df)
+    APP_LOGGER.info("ProjectData EN Entities value read=%r", en_entities_value)
+    en_entities_rel: Optional[Any] = None
 
     def set_entity_uniclass(entity, source_name, ref_value, name_value):
         if entity is None:
@@ -2380,12 +2533,22 @@ def update_ifc_from_excel(
                     reassign_aggregate(site, building, ifc)
                 else:
                     ensure_aggregates(project, building, ifc)
-                set_entity_uniclass(
-                    building,
-                    "Uniclass En Entities",
-                    row.get("UniclassEnReference"),
-                    row.get("UniclassEnName"),
-                )
+                if en_entities_value:
+                    en_entities_rel, was_created = _ensure_en_entities_classification_rel(
+                        ifc,
+                        building,
+                        en_entities_value,
+                        source_name="Uniclass En Entities",
+                    )
+                    APP_LOGGER.info(
+                        "EN Entities classification association %s relation_id=%s related_count=%s related_ids=%s",
+                        "created" if was_created else "updated",
+                        en_entities_rel.id() if en_entities_rel else None,
+                        len(getattr(en_entities_rel, "RelatedObjects", []) or []) if en_entities_rel else 0,
+                        [obj.id() for obj in (getattr(en_entities_rel, "RelatedObjects", []) or [])] if en_entities_rel else [],
+                    )
+                else:
+                    APP_LOGGER.info("EN Entities value is blank/no-op; no classification write-back performed.")
 
     schema_name = (ifc.schema or "IFC4").upper()
     schema_def = _schema_definition(schema_name)
@@ -2730,6 +2893,11 @@ def update_ifc_from_excel(
 
     ifc.write(output_path)
     log_memory_stage(stage="IFC write/export", session_id=session_id, file_name=os.path.basename(output_path), file_size=os.path.getsize(output_path), endpoint=endpoint, started_at=started_at)
+    if en_entities_value:
+        valid_en_entities, validation_message = _validate_en_entities_writeback(output_path, en_entities_value)
+        APP_LOGGER.info("EN Entities write-back validation result=%s detail=%s", valid_en_entities, validation_message)
+        if not valid_en_entities:
+            raise ValueError(validation_message)
 
     xls.close()
     if change_log_rows:
