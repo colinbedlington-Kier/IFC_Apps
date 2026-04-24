@@ -1705,6 +1705,10 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
             "IsTypeObject": bool(is_type_object),
             "Validation": "",
             "ApplyChange": "No",
+            "SuggestedEntity": "",
+            "SuggestedPredefinedType": "",
+            "SuggestionConfidence": 0.0,
+            "SuggestionReason": "",
         }
 
     source_file_name = os.path.basename(ifc_path)
@@ -1730,9 +1734,12 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
             for field_name in CIVIL3D_EXTENDED_FIELDS:
                 row[field_name] = _resolve_field_value(elem, type_obj, field_name, _get_pset_value)
         row.update(_build_roundtrip_row(elem, is_type_object=False))
+        row.update(_build_classification_suggestion(row))
         element_rows.append(row)
     for type_obj in all_types:
-        type_rows.append(_build_roundtrip_row(type_obj, is_type_object=True))
+        type_row = _build_roundtrip_row(type_obj, is_type_object=True)
+        type_row.update(_build_classification_suggestion(type_row))
+        type_rows.append(type_row)
     for obj in all_export_objects:
         raw_entity_rows.append(
             {
@@ -1745,6 +1752,7 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
         )
     elements_df = pd.DataFrame(element_rows)
     types_df = pd.DataFrame(type_rows)
+    elements_df, types_df = _merge_existing_excel_overrides(output_path, elements_df, types_df)
     raw_entities_df = pd.DataFrame(raw_entity_rows)
     changelog_df = pd.DataFrame(columns=["RowKey", "GlobalId", "StepId", "Status", "Message", "FromEntity", "ToEntity", "FromPredefinedType", "ToPredefinedType"])
     timer.stop("elements_table")
@@ -2112,6 +2120,109 @@ def _resolve_class_mapping_candidate(elem: Any, row: pd.Series) -> Tuple[str, st
     return "IfcBuildingElementProxy", "fallback_proxy"
 
 
+def _normalize_override_value(value: Any) -> str:
+    cleaned = clean_value(value)
+    if cleaned is None:
+        return ""
+    return str(cleaned).strip()
+
+
+def _keyword_contains(text: str, keywords: List[str]) -> bool:
+    lowered = (text or "").lower()
+    return any(keyword in lowered for keyword in keywords)
+
+
+def _build_classification_suggestion(row: Dict[str, Any]) -> Dict[str, Any]:
+    text_fields = [
+        row.get("Name", ""),
+        row.get("ObjectType", ""),
+        row.get("TypeDescription", ""),
+        row.get("IFCName", ""),
+        row.get("Type_(UserDefined)", ""),
+        row.get("IFCDescription", ""),
+        row.get("ExtObject", ""),
+        row.get("Layer", ""),
+        row.get("BlockName", ""),
+    ]
+    blob = " | ".join(str(v) for v in text_fields if clean_value(v) is not None)
+    ext_object = _normalize_override_value(row.get("ExtObject"))
+    if ext_object.upper().startswith("IFC"):
+        return {
+            "SuggestedEntity": ext_object,
+            "SuggestedPredefinedType": "",
+            "SuggestionConfidence": 0.95,
+            "SuggestionReason": "ExtObject signal from COBie_Occurrence_(Component)",
+        }
+    if _keyword_contains(blob, ["pipe", "drain", "sewer"]):
+        return {
+            "SuggestedEntity": "IfcPipeSegment",
+            "SuggestedPredefinedType": "",
+            "SuggestionConfidence": 0.78,
+            "SuggestionReason": "Keyword match: pipe/drain/sewer",
+        }
+    if _keyword_contains(blob, ["chamber", "manhole", "gully", "catchpit"]):
+        return {
+            "SuggestedEntity": "IfcFlowStorageDevice",
+            "SuggestedPredefinedType": "",
+            "SuggestionConfidence": 0.74,
+            "SuggestionReason": "Keyword match: chamber/manhole/gully/catchpit",
+        }
+    if _keyword_contains(blob, ["headwall"]):
+        return {
+            "SuggestedEntity": "IfcBuildingElementProxy",
+            "SuggestedPredefinedType": "",
+            "SuggestionConfidence": 0.35,
+            "SuggestionReason": "Keyword match: headwall (low-confidence fallback)",
+        }
+    return {
+        "SuggestedEntity": "",
+        "SuggestedPredefinedType": "",
+        "SuggestionConfidence": 0.0,
+        "SuggestionReason": "",
+    }
+
+
+def _merge_existing_excel_overrides(output_path: str, elements_df: pd.DataFrame, types_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if not os.path.exists(output_path):
+        return elements_df, types_df
+    try:
+        prior = pd.ExcelFile(output_path)
+    except Exception:
+        return elements_df, types_df
+
+    def _merge(sheet_name: str, fresh_df: pd.DataFrame) -> pd.DataFrame:
+        if fresh_df is None or fresh_df.empty:
+            return fresh_df
+        try:
+            prior_df = pd.read_excel(prior, sheet_name=sheet_name, usecols=lambda c: c is not None)
+        except Exception:
+            return fresh_df
+        if prior_df.empty:
+            return fresh_df
+
+        key_cols = [col for col in ("GlobalId", "StepId") if col in prior_df.columns and col in fresh_df.columns]
+        if not key_cols:
+            return fresh_df
+        override_cols = [col for col in ("TargetEntity", "TargetPredefinedType", "ApplyChange") if col in prior_df.columns and col in fresh_df.columns]
+        if not override_cols:
+            return fresh_df
+
+        prior_subset = prior_df[key_cols + override_cols].copy()
+        renamed = {col: f"__prev_{col}" for col in override_cols}
+        prior_subset = prior_subset.rename(columns=renamed)
+        merged = fresh_df.merge(prior_subset, on=key_cols, how="left")
+        for col in override_cols:
+            prev_col = f"__prev_{col}"
+            if prev_col not in merged.columns:
+                continue
+            has_prev = merged[prev_col].apply(lambda value: clean_value(value) is not None)
+            merged.loc[has_prev, col] = merged.loc[has_prev, prev_col]
+            merged = merged.drop(columns=[prev_col])
+        return merged
+
+    return _merge("Elements", elements_df), _merge("Types", types_df)
+
+
 def _check_heavy_timeout(started_at: float, endpoint: str) -> None:
     elapsed = time.monotonic() - started_at
     if elapsed > HEAVY_JOB_TIMEOUT_SECONDS:
@@ -2276,10 +2387,37 @@ def update_ifc_from_excel(
                     row.get("UniclassEnName"),
                 )
 
-    if ifc.schema.upper() == "IFC2X3":
-        mapping = load_ifc2x3_entity_mapping()
-    else:
-        mapping = {"entities": {}}
+    schema_name = (ifc.schema or "IFC4").upper()
+    schema_def = _schema_definition(schema_name)
+    entities_cfg = (load_ifc2x3_entity_mapping().get("entities") or {}) if schema_name == "IFC2X3" else {}
+
+    def _schema_has_entity(entity_name: str) -> bool:
+        if not entity_name:
+            return False
+        if schema_def is None:
+            return True
+        try:
+            return schema_def.declaration_by_name(entity_name) is not None
+        except Exception:
+            return False
+
+    def _validate_instance_shape(entity_instance: Any) -> bool:
+        if entity_instance is None or schema_def is None:
+            return True
+        try:
+            decl = schema_def.declaration_by_name(entity_instance.is_a())
+            expected = len(decl.all_attributes())
+            return len(entity_instance) == expected
+        except Exception:
+            return True
+
+    def _enum_items_for_entity(entity_name: str) -> List[str]:
+        enum_items = _predefined_type_info(schema_name, entity_name).get("enum_items", []) or []
+        if enum_items:
+            return enum_items
+        if schema_name == "IFC2X3":
+            return (entities_cfg.get(entity_name, {}) or {}).get("predefined_types", []) or []
+        return []
 
     def _lookup_by_row(row: pd.Series) -> Any:
         guid = clean_value(row.get("GlobalId"))
@@ -2301,8 +2439,9 @@ def update_ifc_from_excel(
     def _apply_entity_predefined_updates(rows_df: pd.DataFrame, expected_kind: str) -> None:
         if rows_df is None or rows_df.empty:
             return
-        entities_cfg = mapping.get("entities") or {}
-        for _, row in rows_df.iterrows():
+        if "Validation" in rows_df.columns:
+            rows_df["Validation"] = rows_df["Validation"].astype(object)
+        for row_idx, row in rows_df.iterrows():
             target = _lookup_by_row(row)
             if target is None:
                 continue
@@ -2310,24 +2449,29 @@ def update_ifc_from_excel(
             current_entity = str(clean_value(row.get("CurrentEntity")) or target.is_a())
             requested_entity = str(clean_value(row.get("TargetEntity")) or current_entity)
             current_predef = str(clean_value(row.get("CurrentPredefinedType")) or getattr(target, "PredefinedType", "") or "")
-            requested_predef = str(clean_value(row.get("TargetPredefinedType")) or current_predef)
+            requested_predef_raw = clean_value(row.get("TargetPredefinedType"))
+            requested_predef = str(requested_predef_raw if requested_predef_raw is not None else current_predef)
             if not apply_change:
                 continue
 
-            result = {"RowKey": row.get("RowKey", ""), "GlobalId": getattr(target, "GlobalId", ""), "StepId": target.id(), "FromEntity": current_entity, "ToEntity": requested_entity, "FromPredefinedType": current_predef, "ToPredefinedType": requested_predef}
-            cfg = entities_cfg.get(requested_entity)
-            if cfg is None:
-                result.update({"Status": "Rejected", "Message": "unsupported target entity"})
+            result = {
+                "RowKey": row.get("RowKey", ""),
+                "GlobalId": getattr(target, "GlobalId", ""),
+                "StepId": target.id(),
+                "FromEntity": current_entity,
+                "ToEntity": requested_entity,
+                "FromPredefinedType": current_predef,
+                "ToPredefinedType": requested_predef,
+            }
+            if not _schema_has_entity(requested_entity):
+                result.update({"Status": "Rejected", "Message": "Invalid mapping: target entity not in schema"})
+                rows_df.at[row_idx, "Validation"] = "Invalid mapping"
                 change_log_rows.append(result)
                 continue
-            target_kind = (cfg.get("kind") or "").lower()
-            if target_kind != expected_kind:
+            expected_type = requested_entity.upper().endswith("TYPE")
+            if (expected_kind == "type" and not expected_type) or (expected_kind == "occurrence" and expected_type):
                 result.update({"Status": "Rejected", "Message": "attempt to convert type to occurrence or occurrence to type"})
-                change_log_rows.append(result)
-                continue
-            source_cfg = entities_cfg.get(current_entity, {})
-            if requested_entity != current_entity and requested_entity not in (source_cfg.get("allowed_conversion_targets") or []):
-                result.update({"Status": "Rejected", "Message": "failed entity migration: conversion is not allowed"})
+                rows_df.at[row_idx, "Validation"] = "Invalid mapping"
                 change_log_rows.append(result)
                 continue
 
@@ -2337,18 +2481,62 @@ def update_ifc_from_excel(
                     migrated = ifcopenshell.api.run("root.reassign_class", ifc, product=target, ifc_class=requested_entity)
                 except Exception as exc:
                     result.update({"Status": "Rejected", "Message": f"failed entity migration: {exc}"})
+                    rows_df.at[row_idx, "Validation"] = "Invalid mapping"
                     change_log_rows.append(result)
                     continue
 
-            allowed_predef = (entities_cfg.get(requested_entity, {}) or {}).get("predefined_types", []) or []
-            if requested_predef and allowed_predef and requested_predef not in allowed_predef:
-                result.update({"Status": "Rejected", "Message": "invalid predefined type for selected entity"})
+            row_validation = ""
+            fallback_userdefined = False
+            suggestion_used = clean_value(row.get("SuggestedEntity")) is not None
+            if not _validate_instance_shape(migrated):
+                result.update({"Status": "Rejected", "Message": "Invalid mapping: entity argument structure mismatch"})
+                rows_df.at[row_idx, "Validation"] = "Invalid mapping"
                 change_log_rows.append(result)
                 continue
+
             if requested_predef and hasattr(migrated, "PredefinedType"):
-                migrated.PredefinedType = requested_predef
+                enum_items = _enum_items_for_entity(migrated.is_a())
+                normalized_lookup = {normalize_token(item): item for item in enum_items}
+                normalized_requested = normalize_token(requested_predef)
+                if normalized_requested and normalized_requested in normalized_lookup:
+                    migrated.PredefinedType = normalized_lookup[normalized_requested]
+                else:
+                    if "USERDEFINED" in normalized_lookup or hasattr(migrated, "PredefinedType"):
+                        userdefined_literal = normalized_lookup.get("USERDEFINED", "USERDEFINED")
+                        migrated.PredefinedType = userdefined_literal
+                        if hasattr(migrated, "ObjectType"):
+                            migrated.ObjectType = requested_predef
+                        elif hasattr(migrated, "ElementType"):
+                            migrated.ElementType = requested_predef
+                        fallback_userdefined = True
+                    else:
+                        result.update({"Status": "Rejected", "Message": "Invalid mapping: predefined type incompatible with entity"})
+                        rows_df.at[row_idx, "Validation"] = "Invalid mapping"
+                        change_log_rows.append(result)
+                        continue
+            elif requested_predef and not hasattr(migrated, "PredefinedType"):
+                APP_LOGGER.warning(
+                    "Ignoring TargetPredefinedType for entity without PredefinedType GlobalId=%s entity=%s target_predefined=%s schema=%s",
+                    getattr(migrated, "GlobalId", ""),
+                    migrated.is_a(),
+                    requested_predef,
+                    schema_name,
+                )
+                row_validation = clean_value(rows_df.at[row_idx, "Validation"]) or ""
             result.update({"Status": "Applied", "Message": "ok"})
             change_log_rows.append(result)
+            rows_df.at[row_idx, "Validation"] = row_validation
+            APP_LOGGER.info(
+                "excel_row_apply global_id=%s entity=%s->%s predefined=%s->%s suggestion_used=%s userdefined_fallback=%s schema=%s",
+                getattr(migrated, "GlobalId", ""),
+                current_entity,
+                requested_entity,
+                current_predef,
+                requested_predef,
+                bool(suggestion_used),
+                fallback_userdefined,
+                schema_name,
+            )
 
     _apply_entity_predefined_updates(elements_df, "occurrence")
     _apply_entity_predefined_updates(types_df, "type")

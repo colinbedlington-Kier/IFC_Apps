@@ -123,3 +123,46 @@ def test_civil3d_profile_extract_and_update_round_trip(tmp_path):
     assert re_project_df.loc[re_project_df["DataType"] == "Project", "ProjectNumber"].iloc[0] == "PN-UPDATED"
     assert "A-WALL-UPDATED" in re_elements_df.iloc[0]["IFCPresentationLayer"]
     assert re_elements_df.iloc[0]["ExtObject"] == "IfcWall"
+
+
+def test_reextract_preserves_target_override_and_suggestions(tmp_path):
+    model = _build_model()
+    src_ifc = tmp_path / "source.ifc"
+    model.write(str(src_ifc))
+
+    xlsx = tmp_path / "extract.xlsx"
+    extract_to_excel(str(src_ifc), str(xlsx), plan_payload={"profile": "civil3d_extended"})
+    xls = pd.ExcelFile(xlsx)
+    project_df = pd.read_excel(xls, "ProjectData")
+    elements_df = pd.read_excel(xls, "Elements")
+    properties_df = pd.read_excel(xls, "Properties")
+    cobie_df = pd.read_excel(xls, "COBieMapping")
+    uniclass_pr_df = pd.read_excel(xls, "Uniclass_Pr")
+    uniclass_ss_df = pd.read_excel(xls, "Uniclass_Ss")
+    uniclass_ef_df = pd.read_excel(xls, "Uniclass_EF")
+    xls.close()
+
+    guid = elements_df.iloc[0]["GlobalId"]
+    elements_df.loc[elements_df["GlobalId"] == guid, "TargetEntity"] = "IfcPipeSegment"
+    elements_df.loc[elements_df["GlobalId"] == guid, "TargetPredefinedType"] = "USERDEFINED"
+    elements_df.loc[elements_df["GlobalId"] == guid, "ApplyChange"] = "Yes"
+
+    with pd.ExcelWriter(xlsx, engine="openpyxl") as writer:
+        project_df.to_excel(writer, sheet_name="ProjectData", index=False)
+        elements_df.to_excel(writer, sheet_name="Elements", index=False)
+        properties_df.to_excel(writer, sheet_name="Properties", index=False)
+        cobie_df.to_excel(writer, sheet_name="COBieMapping", index=False)
+        uniclass_pr_df.to_excel(writer, sheet_name="Uniclass_Pr", index=False)
+        uniclass_ss_df.to_excel(writer, sheet_name="Uniclass_Ss", index=False)
+        uniclass_ef_df.to_excel(writer, sheet_name="Uniclass_EF", index=False)
+
+    extract_to_excel(str(src_ifc), str(xlsx), plan_payload={"profile": "civil3d_extended"})
+    re_elements_df = pd.read_excel(xlsx, sheet_name="Elements")
+    row = re_elements_df[re_elements_df["GlobalId"] == guid].iloc[0]
+
+    assert row["TargetEntity"] == "IfcPipeSegment"
+    assert row["TargetPredefinedType"] == "USERDEFINED"
+    assert row["ApplyChange"] == "Yes"
+    assert "SuggestedEntity" in re_elements_df.columns
+    assert "SuggestionConfidence" in re_elements_df.columns
+    assert row["SuggestedEntity"] == "IfcWall"
