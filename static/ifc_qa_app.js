@@ -1,5 +1,6 @@
 const qaState = {
   sessionId: "",
+  canonicalSessionId: "",
   sessionReady: false,
   sessionStateText: "Session establishing...",
   activeJobId: "",
@@ -108,14 +109,41 @@ function normalizeConfig(raw) {
   };
 }
 
+function collectLegacySessionStorageState() {
+  const canonicalKey = window.IFCSession?.storageKey || "ifcToolkitSessionId";
+  const sharedLegacyKeys = Array.isArray(window.IFCSession?.legacyStorageKeys) ? window.IFCSession.legacyStorageKeys : [];
+  const fallbackLegacyKeys = ["sessionId", "ifcSessionId", "qaSessionId", "uploadSessionId", "ifc_session_id"];
+  const keys = Array.from(new Set([...sharedLegacyKeys, ...fallbackLegacyKeys])).filter((key) => key && key !== canonicalKey);
+  const values = {};
+  keys.forEach((key) => {
+    try {
+      const localValue = localStorage.getItem(key);
+      const sessionValue = sessionStorage.getItem(key);
+      if (localValue || sessionValue) {
+        values[key] = {
+          localStorage: localValue || "",
+          sessionStorage: sessionValue || "",
+        };
+      }
+    } catch (_) {
+      // no-op when storage is unavailable
+    }
+  });
+  return values;
+}
+
 async function ensureSession() {
   const shared = window.IFCSession;
-  const existing = shared?.getCurrentSessionId?.() || "";
-  let resolved = existing;
-  if (!resolved) {
-    resolved = shared?.ensureSession ? await shared.ensureSession({ createIfMissing: true }) : "";
+  const canonicalExisting = shared?.getCurrentSessionId?.() || "";
+  let resolved = canonicalExisting;
+  if (!resolved && shared?.ensureSession) {
+    resolved = await shared.ensureSession({ createIfMissing: false });
+  }
+  if (!resolved && shared?.ensureSession) {
+    resolved = await shared.ensureSession({ createIfMissing: true });
   }
   qaState.sessionId = String(resolved || "");
+  qaState.canonicalSessionId = qaState.sessionId;
   qaState.sessionReady = !!resolved;
   qaState.sessionStateText = qaState.sessionReady
     ? `Session ready · ${shared?.shortSessionId ? shared.shortSessionId(qaState.sessionId) : qaState.sessionId.slice(0, 8)}`
@@ -511,10 +539,13 @@ function renderDebugState() {
   const el = qs("#qaDebugState");
   if (!el) return;
   const previewNames = (qaState.rawSessionFileNames || []).slice(0, 5).join(", ") || "-";
+  const legacySessionKeys = collectLegacySessionStorageState();
   el.innerHTML = [
     `<strong>Debug state</strong>`,
-    `sessionId: ${qaState.sessionId || "-"}`,
+    `canonicalSessionId: ${qaState.canonicalSessionId || "-"}`,
+    `localStateSessionId: ${qaState.sessionId || "-"}`,
     `sessionReady: ${qaState.sessionReady}`,
+    `legacySessionKeys: ${JSON.stringify(legacySessionKeys)}`,
     `fetchUrl: ${qaState.fetchUrl || "-"}`,
     `fetchStatus: ${qaState.fetchStatus || "-"}`,
     `rawSessionFilesCount: ${qaState.rawSessionFilesCount || 0}`,
@@ -1170,6 +1201,7 @@ async function init() {
     const sharedUnsub = window.IFCSession?.subscribe?.((sessionId) => {
       const normalized = String(sessionId || "").trim();
       qaState.sessionId = normalized;
+      qaState.canonicalSessionId = normalized;
       qaState.sessionReady = !!normalized;
       qaState.sessionStateText = qaState.sessionReady
         ? `Session ready · ${window.IFCSession?.shortSessionId ? window.IFCSession.shortSessionId(normalized) : normalized.slice(0, 8)}`
@@ -1181,8 +1213,27 @@ async function init() {
       }
       renderDebugState();
     });
+    const eventName = window.IFCSession?.sessionChangeEvent || "ifc-toolkit-session-changed";
+    const onToolkitSessionChanged = (event) => {
+      const normalized = String(event?.detail?.sessionId || "").trim();
+      qaState.sessionId = normalized;
+      qaState.canonicalSessionId = normalized;
+      qaState.sessionReady = !!normalized;
+      qaState.sessionStateText = qaState.sessionReady
+        ? `Session ready · ${window.IFCSession?.shortSessionId ? window.IFCSession.shortSessionId(normalized) : normalized.slice(0, 8)}`
+        : "Session establishing...";
+      renderSessionState();
+      updateGlobalSessionBadge();
+      if (qaState.sessionReady) loadSessionFiles();
+      renderDebugState();
+      console.info("IFC QA session changed event handled", { sessionId: normalized, eventName });
+    };
+    window.addEventListener(eventName, onToolkitSessionChanged);
     if (typeof sharedUnsub === "function") {
-      window.addEventListener("beforeunload", () => sharedUnsub(), { once: true });
+      window.addEventListener("beforeunload", () => {
+        sharedUnsub();
+        window.removeEventListener(eventName, onToolkitSessionChanged);
+      }, { once: true });
     }
     ensureSession()
       .then(async () => {
