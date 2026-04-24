@@ -52,6 +52,8 @@ const qaState = {
   extractionSummary: null,
 };
 
+const QA_UPLOAD_MAX_HINT_TEXT = "Maximum file size: 1.2 GB";
+
 const DEFAULT_SHEETS = [
   ["model", "Model Data Table"],
   ["project", "Project Data Table"],

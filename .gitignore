@@ -14,3 +14,6 @@ __pycache__/
 /data/cobieqc/**/*.jar
 /vendor/cobieqc/**/xsl_xml/
 /data/cobieqc/**/xsl_xml/
+
+# Generated static asset fingerprints at runtime.
+/static/_hashed/

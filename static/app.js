@@ -108,9 +108,9 @@ async function ensureSession() {
     if (!state.sessionId) throw new Error("No active session");
     if (shared) {
       shared.setCurrentSessionId(state.sessionId);
-      setSessionBadge(`Session ${shared.shortSessionId(state.sessionId)}`, true);
+      setSessionBadge(`Session ready • ${shared.shortSessionId(state.sessionId)}`, true);
     } else {
-      setSessionBadge(`Session ${state.sessionId.slice(0, 8)}`, true);
+      setSessionBadge(`Session ready • ${state.sessionId.slice(0, 8)}`, true);
     }
     await refreshFiles();
     if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Session ready.";
@@ -441,19 +441,19 @@ async function uploadFiles() {
     }
     form.append("files", f);
   }
-  const resp = await fetch(`/api/session/${state.sessionId}/upload`, { method: "POST", body: form });
-  if (!resp.ok) {
-    let payload = {};
-    try {
-      payload = await resp.json();
-    } catch (_) {}
-    if (state.uploadStatusEl) state.uploadStatusEl.textContent = parseUploadFailure(payload, resp.status);
+  try {
+    await uploadWithProgress(`/api/session/${state.sessionId}/upload`, form);
+  } catch (err) {
+    const message = String(err?.message || "");
+    if (state.uploadStatusEl) state.uploadStatusEl.textContent = message || "Upload failed.";
+    updateUploadProgress({ percent: 100, message: message || "Upload failed", error: true });
     if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
     return;
   }
   input.value = "";
   await refreshFiles();
   if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload complete.";
+  updateUploadProgress({ percent: 100, message: "Upload complete.", done: true });
   if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
 }
 
@@ -549,7 +549,9 @@ async function extractExcel() {
     if (data.excel) {
       const timings = data.timings_ms ? JSON.stringify(data.timings_ms) : "";
       const counts = data.counts ? JSON.stringify(data.counts) : "";
-      el("excelStatus").textContent = `Excel ready: ${data.excel.name}${timings ? ` | timings(ms): ${timings}` : ""}${counts ? ` | counts: ${counts}` : ""}`;
+      const schemaMeta = data.schema_detected ? ` | schema: ${data.schema_detected}` : "";
+      const warning = data.schema_warning ? ` | warning: ${data.schema_warning}` : "";
+      el("excelStatus").textContent = `Excel ready: ${data.excel.name}${schemaMeta}${warning}${timings ? ` | timings(ms): ${timings}` : ""}${counts ? ` | counts: ${counts}` : ""}`;
       await refreshFiles();
     } else {
       el("excelStatus").textContent = JSON.stringify(data);
