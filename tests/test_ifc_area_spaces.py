@@ -1,3 +1,5 @@
+import asyncio
+import json
 from pathlib import Path
 
 import app
@@ -115,7 +117,7 @@ def test_area_spaces_scan_api_shape(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(app, "scan_ifc_for_area_spaces", lambda _: fake_result)
 
-    payload = app.area_spaces_scan({"session_id": session_id, "file_names": [source_name]})
+    payload = asyncio.run(app.area_spaces_scan({"session_id": session_id, "file_names": [source_name]}))
     assert payload["files_scanned"] == 1
     assert payload["results"][0]["source_file"] == source_name
     candidate = payload["results"][0]["candidates"][0]
@@ -136,7 +138,7 @@ def test_purge_area_spaces_frontend_uses_active_session_and_shared_files_endpoin
     assert "Session has files, but none are .ifc files." in purge_js
     assert "localStorage.getItem(\"ifc_session_id\")" not in purge_js
     assert "Area Spaces API is not mounted in this deployment. Check backend router registration." in purge_js
-    assert "Processing failed or server restarted. The IFC may be too large for the current memory-safe purge path." in purge_js
+    assert "Processing failed or server restarted. The IFC may be too large or another heavy job may have exhausted memory." in purge_js
 
 
 def test_scan_uses_ifcspace_only(monkeypatch, tmp_path: Path):
@@ -161,11 +163,67 @@ def test_scan_error_returns_json_not_crash(monkeypatch):
     (root / "areas.ifc").write_text("ISO-10303-21;\nENDSEC;\n", encoding="utf-8")
     monkeypatch.setattr(app, "scan_ifc_for_area_spaces", lambda _: (_ for _ in ()).throw(RuntimeError("boom")))
 
-    resp = app.area_spaces_scan({"session_id": session_id, "file_names": ["areas.ifc"]})
+    resp = asyncio.run(app.area_spaces_scan({"session_id": session_id, "file_names": ["areas.ifc"]}))
     assert resp.status_code == 500
     payload = resp.body.decode("utf-8")
     assert "AREA_SPACE_SCAN_FAILED" in payload
     assert "\"ok\":false" in payload
+
+
+def test_oversize_file_returns_413(monkeypatch):
+    session_id = app.SESSION_STORE.create()
+    root = Path(app.SESSION_STORE.ensure(session_id))
+    source_name = "areas.ifc"
+    (root / source_name).write_text("ISO-10303-21;\nENDSEC;\n", encoding="utf-8")
+    monkeypatch.setattr(app, "AREA_SPACE_MAX_PURGE_FILE_MB", -0.1)
+    resp = asyncio.run(
+        app.area_spaces_purge(
+            {
+                "session_id": session_id,
+                "selected_candidates": [{"source_file": "areas.ifc", "global_id": "A1"}],
+                "file_names": ["areas.ifc"],
+            }
+        )
+    )
+    assert resp.status_code == 413
+
+
+def test_scan_waits_for_job_semaphore(monkeypatch):
+    session_id = app.SESSION_STORE.create()
+    root = Path(app.SESSION_STORE.ensure(session_id))
+    (root / "areas.ifc").write_text("ISO-10303-21;\nENDSEC;\n", encoding="utf-8")
+    fake_result = ScanResult(source_file="areas.ifc", total_spaces=0, candidates=[])
+    monkeypatch.setattr(app, "scan_ifc_for_area_spaces", lambda _: fake_result)
+
+    async def _run():
+        await app.AREA_SPACE_JOB_SEMAPHORE.acquire()
+        task = asyncio.create_task(app.area_spaces_scan({"session_id": session_id, "file_names": ["areas.ifc"]}))
+        await asyncio.sleep(0.02)
+        assert not task.done()
+        app.AREA_SPACE_JOB_SEMAPHORE.release()
+        result = await task
+        assert result["ok"] is True
+
+    asyncio.run(_run())
+
+
+def test_purge_memory_high_returns_503(monkeypatch):
+    session_id = app.SESSION_STORE.create()
+    root = Path(app.SESSION_STORE.ensure(session_id))
+    (root / "areas.ifc").write_text("ISO-10303-21;\nENDSEC;\n", encoding="utf-8")
+    monkeypatch.setattr(app, "is_memory_high", lambda: True)
+    resp = asyncio.run(
+        app.area_spaces_purge(
+            {
+                "session_id": session_id,
+                "selected_candidates": [{"source_file": "areas.ifc", "global_id": "A1"}],
+                "file_names": ["areas.ifc"],
+            }
+        )
+    )
+    assert resp.status_code == 503
+    payload = json.loads(resp.body.decode("utf-8"))
+    assert payload["error"] == "INSUFFICIENT_MEMORY_FOR_SAFE_PURGE"
 
 
 def test_purge_removes_selected_space_and_preserves_other(monkeypatch, tmp_path: Path):

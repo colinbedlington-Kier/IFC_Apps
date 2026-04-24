@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import asyncio
 import time
 import traceback
 import zipfile
@@ -26,7 +27,10 @@ class AreaSpaceError(Exception):
 _KEYWORDS = ("information cad layer", "cad layer", "layer", "presentation layer")
 LOGGER = logging.getLogger("ifc_app.area_spaces")
 LARGE_IFC_WARNING_MB = float(os.getenv("AREA_SPACES_LARGE_IFC_WARNING_MB", "200"))
-MEMORY_ABORT_THRESHOLD = float(os.getenv("AREA_SPACES_MEMORY_ABORT_THRESHOLD", "0.80"))
+AREA_SPACE_JOB_SEMAPHORE = asyncio.Semaphore(int(os.getenv("AREA_SPACE_MAX_CONCURRENT_JOBS", "1")))
+AREA_SPACE_MAX_FILE_MB = float(os.getenv("AREA_SPACE_MAX_FILE_MB", "750"))
+AREA_SPACE_MAX_PURGE_FILE_MB = float(os.getenv("AREA_SPACE_MAX_PURGE_FILE_MB", "750"))
+AREA_SPACE_MEMORY_ABORT_PERCENT = float(os.getenv("AREA_SPACE_MEMORY_ABORT_PERCENT", "80"))
 
 
 @dataclass
@@ -84,6 +88,27 @@ def _normalize_lower(value: Any) -> str:
 
 def _contains_area(text: Any) -> bool:
     return "area" in _normalize_lower(text)
+
+
+def get_memory_status() -> Dict[str, Any] | None:
+    try:
+        import psutil  # type: ignore
+
+        vm = psutil.virtual_memory()
+        return {
+            "total_mb": round(vm.total / 1024 / 1024, 1),
+            "available_mb": round(vm.available / 1024 / 1024, 1),
+            "used_percent": vm.percent,
+        }
+    except Exception:
+        return None
+
+
+def is_memory_high() -> bool:
+    memory = get_memory_status()
+    if not memory:
+        return False
+    return float(memory.get("used_percent", 0.0)) >= AREA_SPACE_MEMORY_ABORT_PERCENT
 
 
 def _iter_layer_assignments(item: Any) -> Iterable[Any]:
@@ -204,7 +229,19 @@ def scan_ifc_for_area_spaces(path: Path) -> ScanResult:
     if not path.exists():
         raise AreaSpaceError(f"IFC file not found: {path.name}")
     file_size_mb = round(path.stat().st_size / (1024 * 1024), 2)
-    LOGGER.info("area_spaces_scan_start filename=%s size_mb=%s", path.name, file_size_mb)
+    LOGGER.info("area_space_scan_start filename=%s size_mb=%s memory=%s", path.name, file_size_mb, get_memory_status())
+    if file_size_mb > AREA_SPACE_MAX_FILE_MB:
+        raise AreaSpaceError(
+            json.dumps(
+                {
+                    "http_status": 413,
+                    "ok": False,
+                    "error": "IFC_TOO_LARGE_FOR_SAFE_PROCESSING",
+                    "message": "This IFC is above the configured safe processing size. Split the IFC or increase AREA_SPACE_MAX_FILE_MB.",
+                    "file_size_mb": file_size_mb,
+                }
+            )
+        )
     if file_size_mb >= LARGE_IFC_WARNING_MB:
         LOGGER.warning("area_spaces_large_ifc_warning filename=%s size_mb=%s threshold_mb=%s", path.name, file_size_mb, LARGE_IFC_WARNING_MB)
     open_started = time.perf_counter()
@@ -230,7 +267,14 @@ def scan_ifc_for_area_spaces(path: Path) -> ScanResult:
             rss_mb = round(psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024), 2)
         except Exception:
             rss_mb = None
-    LOGGER.info("scan_complete filename=%s duration_ms=%d memory_mb=%s", path.name, int((time.perf_counter() - scan_started) * 1000), rss_mb)
+    LOGGER.info(
+        "area_space_scan_complete filename=%s duration_ms=%d candidates_count=%s memory=%s memory_mb=%s",
+        path.name,
+        int((time.perf_counter() - scan_started) * 1000),
+        len(candidates),
+        get_memory_status(),
+        rss_mb,
+    )
 
     return ScanResult(source_file=path.name, total_spaces=len(spaces), candidates=candidates)
 
@@ -256,11 +300,13 @@ def _update_related_collection(rel: Any, attr: str, remove_ids: set[int]) -> boo
     return True
 
 
-def _cleanup_relationships(model: ifcopenshell.file, remove_ids: set[int]) -> None:
+def cleanup_space_relationships(model: ifcopenshell.file, remove_ids: set[int]) -> int:
+    removed_count = 0
     relation_specs: Sequence[Tuple[str, str]] = [
         ("IfcRelContainedInSpatialStructure", "RelatedElements"),
         ("IfcRelAggregates", "RelatedObjects"),
-        ("IfcRelAssociates", "RelatedObjects"),
+        ("IfcRelAssociatesClassification", "RelatedObjects"),
+        ("IfcRelAssociatesMaterial", "RelatedObjects"),
         ("IfcRelDefinesByProperties", "RelatedObjects"),
         ("IfcRelAssigns", "RelatedObjects"),
     ]
@@ -270,14 +316,18 @@ def _cleanup_relationships(model: ifcopenshell.file, remove_ids: set[int]) -> No
             changed = _update_related_collection(rel, attr, remove_ids)
             if changed and not _as_list(getattr(rel, attr, None)):
                 model.remove(rel)
+                removed_count += 1
 
-    for rel in list(model.by_type("IfcRelSpaceBoundary")):
-        relating_space = getattr(rel, "RelatingSpace", None)
-        related_elem = getattr(rel, "RelatedBuildingElement", None)
-        if (relating_space is not None and int(relating_space.id()) in remove_ids) or (
-            related_elem is not None and int(related_elem.id()) in remove_ids
-        ):
-            model.remove(rel)
+    for rel_type in ("IfcRelSpaceBoundary", "IfcRelSpaceBoundary1stLevel", "IfcRelSpaceBoundary2ndLevel"):
+        for rel in list(model.by_type(rel_type)):
+            relating_space = getattr(rel, "RelatingSpace", None)
+            related_elem = getattr(rel, "RelatedBuildingElement", None)
+            if (relating_space is not None and int(relating_space.id()) in remove_ids) or (
+                related_elem is not None and int(related_elem.id()) in remove_ids
+            ):
+                model.remove(rel)
+                removed_count += 1
+    return removed_count
 
 
 def _write_csv_report(path: Path, rows: List[Dict[str, Any]]) -> None:
@@ -301,16 +351,6 @@ def _write_csv_report(path: Path, rows: List[Dict[str, Any]]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
-
-
-def _memory_too_high() -> bool:
-    if psutil is None:
-        return False
-    try:
-        vm = psutil.virtual_memory()
-        return float(vm.percent) / 100.0 >= MEMORY_ABORT_THRESHOLD
-    except Exception:
-        return False
 
 
 def purge_area_spaces(source_path: Path, selected_global_ids_or_step_ids: Sequence[str], output_path: Path) -> PurgeResult:
@@ -344,14 +384,20 @@ def purge_area_spaces(source_path: Path, selected_global_ids_or_step_ids: Sequen
     to_remove = [space for space in spaces if int(space.id()) in selected_ids]
     remove_ids = {int(space.id()) for space in to_remove}
 
-    _cleanup_relationships(model, remove_ids)
-    LOGGER.info("purge_remove_relationships_complete filename=%s count=%s", source_path.name, len(remove_ids))
+    rel_cleanup_started = time.perf_counter()
+    removed_relationships = cleanup_space_relationships(model, remove_ids)
+    LOGGER.info(
+        "area_space_purge_relationship_cleanup count=%s duration_ms=%s memory=%s",
+        removed_relationships,
+        int((time.perf_counter() - rel_cleanup_started) * 1000),
+        get_memory_status(),
+    )
 
     for space in to_remove:
         model.remove(space)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if _memory_too_high():
+    if is_memory_high():
         raise AreaSpaceError("Not enough memory to safely write cleaned IFC on this plan.")
     write_started = time.perf_counter()
     try:
