@@ -6,6 +6,7 @@ const state = {
   selectedFiles: new Set(),
   uploadStatusEl: null,
   uploadProgressEl: null,
+  uploadState: "idle",
   step2ifcJobId: null,
   pendingActions: [],
   presentationLayer: {
@@ -259,6 +260,7 @@ function resetUploadProgress() {
   if (speed) speed.textContent = "";
   if (fileList) fileList.innerHTML = "";
   if (status) status.textContent = "Waiting to start…";
+  state.uploadState = "idle";
 }
 
 function formatBytes(bytes) {
@@ -325,6 +327,15 @@ function buildPerFileProgress(files, loadedBytes) {
   });
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function renderPerFileProgress(rows) {
   const container = el("upload-file-progress-list");
   if (!container) return;
@@ -332,9 +343,20 @@ function renderPerFileProgress(rows) {
     container.innerHTML = "";
     return;
   }
-  container.innerHTML = rows.map((row) => (
-    `<div class="upload-file-progress-row">${row.name} — ${Math.round(row.percent)}% — ${formatBytes(row.uploadedBytes)} / ${formatBytes(row.totalBytes)}</div>`
-  )).join("");
+  container.innerHTML = rows.map((row) => {
+    const pct = Math.round(Math.max(0, Math.min(100, Number(row.percent) || 0)));
+    const rowSpeed = Number(row.speedBytesPerSecond) > 0 ? ` — ${formatTransferSpeed(row.speedBytesPerSecond)}` : "";
+    return `
+      <div class="upload-file-progress-row">
+        <div class="upload-file-progress-meta">
+          ${escapeHtml(row.name)} — ${pct}% — ${formatBytes(row.uploadedBytes)} / ${formatBytes(row.totalBytes)}${rowSpeed}
+        </div>
+        <div class="progress upload-file-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}">
+          <div class="bar upload-file-progress-fill" style="width:${pct}%"></div>
+        </div>
+      </div>
+    `;
+  }).join("");
 }
 
 function updateUploadProgress({ percent, message, done = false, error = false, indeterminate = false, bytesText = "", speedText = "", fileRows = [] }) {
@@ -363,6 +385,7 @@ function updateUploadProgress({ percent, message, done = false, error = false, i
   if (speed) speed.textContent = speedText;
   renderPerFileProgress(fileRows);
   status.textContent = message || "";
+  state.uploadState = error ? "failed" : done ? "complete" : indeterminate ? "preparing" : (Number(percent) >= 100 ? "processing" : "uploading");
 }
 
 function updateStep2ifcProgress({ percent, message, done = false, error = false }) {
@@ -532,6 +555,7 @@ async function uploadFiles() {
   }
   if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Preparing upload…";
   resetUploadProgress();
+  state.uploadState = "preparing";
   updateUploadProgress({
     percent: 0,
     message: "Preparing upload…",
@@ -566,9 +590,18 @@ async function uploadFiles() {
         speedTracker.push(loaded, timestamp);
         const speedLabel = formatTransferSpeed(speedTracker.bytesPerSecond(timestamp));
         const bytesLabel = `${formatBytes(loaded)} / ${formatBytes(progressTotal)}`;
-        const perFile = buildPerFileProgress(files, loaded);
+        const perFile = buildPerFileProgress(files, loaded).map((row) => ({ ...row, speedBytesPerSecond: 0 }));
         const activeFile = perFile.find((row) => row.percent < 100) || perFile[perFile.length - 1];
+        if (activeFile) activeFile.speedBytesPerSecond = speedTracker.bytesPerSecond(timestamp);
         const stateText = lengthComputable ? "uploading" : "preparing";
+        state.uploadState = stateText;
+        console.debug("Upload progress", {
+          filename: activeFile?.name || files[0]?.name || "unknown",
+          loadedBytes: loaded,
+          totalBytes: progressTotal,
+          percent: Math.round(percent),
+          speedMBps: Number((speedTracker.bytesPerSecond(timestamp) / (1024 * 1024)).toFixed(2)),
+        });
         updateUploadProgress({
           percent,
           indeterminate: !lengthComputable,
@@ -583,22 +616,55 @@ async function uploadFiles() {
   } catch (err) {
     clearInterval(progressTimer);
     const message = String(err?.message || "");
+    state.uploadState = "failed";
     if (state.uploadStatusEl) state.uploadStatusEl.textContent = message || "Upload failed.";
-    updateUploadProgress({ percent: 100, message: `Failed — ${message || "Upload failed"}`, error: true, fileRows: buildPerFileProgress(files, 0) });
+    updateUploadProgress({ percent: 100, message: `Failed — ${message || "Upload failed"}. Retry upload.`, error: true, fileRows: buildPerFileProgress(files, 0) });
     return;
   }
   clearInterval(progressTimer);
-  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Processing on server…";
+  state.uploadState = "processing";
+  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Processing on server...";
   updateUploadProgress({
     percent: 100,
-    message: "Upload complete — processing on server…",
+    message: "Processing on server...",
     bytesText: `${formatBytes(totalBytes)} / ${formatBytes(totalBytes)}`,
     speedText: "0.0 MB/s",
     fileRows: buildPerFileProgress(files, totalBytes),
   });
   input.value = "";
-  if (window.IFCSession?.setCurrentSessionId && state.sessionId) {
-    window.IFCSession.setCurrentSessionId(state.sessionId);
+  const waitUntil = Date.now() + 10000;
+  let confirmed = false;
+  while (Date.now() < waitUntil) {
+    await refreshFiles();
+    const names = new Set((state.files || []).map((item) => item.name));
+    if (targetNames.every((name) => names.has(name))) {
+      confirmed = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  }
+  if (confirmed) {
+    state.uploadState = "complete";
+    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Complete — added to session.";
+    updateUploadProgress({
+      percent: 100,
+      message: "Complete — added to session",
+      done: true,
+      bytesText: `${formatBytes(totalBytes)} / ${formatBytes(totalBytes)}`,
+      speedText: "0.0 MB/s",
+      fileRows: buildPerFileProgress(files, totalBytes),
+    });
+  } else {
+    state.uploadState = "failed";
+    if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload finished but session confirmation failed.";
+    updateUploadProgress({
+      percent: 100,
+      message: "Upload finished — processing on server is taking longer than expected.",
+      error: true,
+      bytesText: `${formatBytes(totalBytes)} / ${formatBytes(totalBytes)}`,
+      speedText: "0.0 MB/s",
+      fileRows: buildPerFileProgress(files, totalBytes),
+    });
   }
   await refreshFiles();
   if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload complete.";
