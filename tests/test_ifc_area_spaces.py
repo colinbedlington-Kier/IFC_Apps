@@ -115,7 +115,7 @@ def test_area_spaces_scan_api_shape(tmp_path: Path, monkeypatch):
         ],
     )
 
-    monkeypatch.setattr(app, "scan_ifc_for_area_spaces", lambda _: fake_result)
+    monkeypatch.setattr(app, "scan_ifc_for_area_spaces", lambda _, **__: fake_result)
 
     payload = asyncio.run(app.area_spaces_scan({"session_id": session_id, "file_names": [source_name]}))
     assert payload["files_scanned"] == 1
@@ -142,19 +142,38 @@ def test_purge_area_spaces_frontend_uses_active_session_and_shared_files_endpoin
 
 
 def test_scan_uses_ifcspace_only(monkeypatch, tmp_path: Path):
-    touched_types = []
+    source = tmp_path / "tiny.ifc"
+    source.write_text(
+        "ISO-10303-21;\n"
+        "DATA;\n"
+        "#10=IFCSPACE('GID10',#1,'Area 101',$,$,$,#50,'',$,.INTERNAL.,$);\n"
+        "#50=IFCPRODUCTDEFINITIONSHAPE($,$,(#60));\n"
+        "#60=IFCSHAPEREPRESENTATION(#2,'Body','SweptSolid',(#70));\n"
+        "#80=IFCPRESENTATIONLAYERASSIGNMENT('A-AREA',$,(#70),$);\n"
+        "ENDSEC;\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("backend.ifc_area_spaces.ifcopenshell.open", lambda _: (_ for _ in ()).throw(RuntimeError("should not call open")))
+    result = scan_ifc_for_area_spaces(source)
+    assert result.total_spaces == 1
+    assert len(result.candidates) == 1
+    assert result.candidates[0].reason == "streaming_text_match"
+    assert result.candidates[0].confidence == "probable"
 
+
+def test_scan_ifcopenshell_mode_only_when_enabled(monkeypatch, tmp_path: Path):
     class _FakeModel:
         def by_type(self, name):
-            touched_types.append(name)
+            if name == "IfcSpace":
+                return []
             return []
 
     source = tmp_path / "tiny.ifc"
     source.write_text("ISO-10303-21;\nENDSEC;\n", encoding="utf-8")
+    monkeypatch.setenv("AREA_SPACE_SCAN_MODE", "ifcopenshell")
     monkeypatch.setattr("backend.ifc_area_spaces.ifcopenshell.open", lambda _: _FakeModel())
     result = scan_ifc_for_area_spaces(source)
     assert result.total_spaces == 0
-    assert touched_types == ["IfcSpace"]
 
 
 def test_scan_error_returns_json_not_crash(monkeypatch):

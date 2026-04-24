@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
-import asyncio
+import re
 import time
 import traceback
 import zipfile
@@ -54,6 +54,7 @@ class Candidate:
     reason: str
     has_representation: bool
     spatial_parent: str
+    confidence: str = "confirmed"
 
 
 @dataclass
@@ -219,31 +220,254 @@ def is_area_space_candidate(space: Any) -> Optional[Candidate]:
                 matched_name=signal.name,
                 matched_value=signal.value,
                 reason=signal.reason,
+                confidence="confirmed",
                 has_representation=getattr(space, "Representation", None) is not None,
                 spatial_parent=_spatial_parent_label(space),
             )
     return None
 
 
-def scan_ifc_for_area_spaces(path: Path) -> ScanResult:
-    if not path.exists():
-        raise AreaSpaceError(f"IFC file not found: {path.name}")
-    file_size_mb = round(path.stat().st_size / (1024 * 1024), 2)
-    LOGGER.info("area_space_scan_start filename=%s size_mb=%s memory=%s", path.name, file_size_mb, get_memory_status())
-    if file_size_mb > AREA_SPACE_MAX_FILE_MB:
-        raise AreaSpaceError(
-            json.dumps(
-                {
-                    "http_status": 413,
-                    "ok": False,
-                    "error": "IFC_TOO_LARGE_FOR_SAFE_PROCESSING",
-                    "message": "This IFC is above the configured safe processing size. Split the IFC or increase AREA_SPACE_MAX_FILE_MB.",
-                    "file_size_mb": file_size_mb,
+_STEP_ENTITY_START_RE = re.compile(r"^\s*#(\d+)\s*=\s*([A-Z0-9_]+)\s*\(", re.IGNORECASE)
+_STEP_REF_RE = re.compile(r"#(\d+)")
+_STEP_STRING_RE = re.compile(r"'((?:[^']|'')*)'")
+_STREAMING_INTEREST_TYPES = {
+    "IFCSPACE",
+    "IFCPRESENTATIONLAYERASSIGNMENT",
+    "IFCPROPERTYSINGLEVALUE",
+    "IFCRELDEFINESBYPROPERTIES",
+    "IFCPRODUCTDEFINITIONSHAPE",
+    "IFCSHAPEREPRESENTATION",
+}
+
+
+def _extract_step_string(value: str) -> str:
+    match = _STEP_STRING_RE.search(value or "")
+    if not match:
+        return ""
+    return match.group(1).replace("''", "'")
+
+
+def _split_step_args(args_payload: str) -> List[str]:
+    parts: List[str] = []
+    current: List[str] = []
+    depth = 0
+    in_string = False
+    i = 0
+    while i < len(args_payload):
+        ch = args_payload[i]
+        current.append(ch)
+        if ch == "'":
+            if i + 1 < len(args_payload) and args_payload[i + 1] == "'":
+                current.append(args_payload[i + 1])
+                i += 1
+            else:
+                in_string = not in_string
+        elif not in_string:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth = max(0, depth - 1)
+            elif ch == "," and depth == 0:
+                current.pop()
+                parts.append("".join(current).strip())
+                current = []
+        i += 1
+    tail = "".join(current).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _parse_step_entity(entity_text: str) -> Optional[Tuple[int, str, str]]:
+    start = _STEP_ENTITY_START_RE.match(entity_text)
+    if not start:
+        return None
+    step_id = int(start.group(1))
+    entity_type = start.group(2).upper()
+    eq_idx = entity_text.find("=")
+    if eq_idx < 0:
+        return None
+    payload = entity_text[eq_idx + 1 :].strip()
+    lpar = payload.find("(")
+    rpar = payload.rfind(")")
+    if lpar < 0 or rpar <= lpar:
+        return None
+    args_payload = payload[lpar + 1 : rpar]
+    return step_id, entity_type, args_payload
+
+
+def _scan_ifc_for_area_spaces_streaming(path: Path) -> Tuple[ScanResult, Dict[str, Any]]:
+    lines_read = 0
+    ifcspace_lines_found = 0
+    entity_buffer: List[str] = []
+    buffering = False
+    buffering_type = ""
+    spaces: Dict[int, Dict[str, Any]] = {}
+    space_refs: Dict[int, set[int]] = {}
+    entity_refs: Dict[int, set[int]] = {}
+    area_layer_targets: set[int] = set()
+    area_property_steps: set[int] = set()
+    area_rel_spaces: set[int] = set()
+
+    with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for raw_line in handle:
+            lines_read += 1
+            line = raw_line.strip()
+            if not buffering:
+                start = _STEP_ENTITY_START_RE.match(line)
+                if start:
+                    candidate_type = start.group(2).upper()
+                    if candidate_type in _STREAMING_INTEREST_TYPES:
+                        buffering = True
+                        buffering_type = candidate_type
+                        entity_buffer = [line]
+                        if ";" in line:
+                            buffering = False
+                            entity_text = " ".join(entity_buffer)
+                            parsed = _parse_step_entity(entity_text)
+                            if not parsed:
+                                continue
+                            step_id, entity_type, args_payload = parsed
+                            refs = {int(v) for v in _STEP_REF_RE.findall(entity_text)}
+                            if entity_type == "IFCSPACE":
+                                ifcspace_lines_found += 1
+                                args = _split_step_args(args_payload)
+                                spaces[step_id] = {
+                                    "step_id": step_id,
+                                    "global_id": _extract_step_string(args[0]) if len(args) > 0 else "",
+                                    "name": _extract_step_string(args[2]) if len(args) > 2 else "",
+                                    "long_name": _extract_step_string(args[7]) if len(args) > 7 else "",
+                                    "object_type": _extract_step_string(args[4]) if len(args) > 4 else "",
+                                    "raw": entity_text,
+                                }
+                                space_refs[step_id] = refs
+                                entity_refs[step_id] = refs
+                            elif entity_type == "IFCPRESENTATIONLAYERASSIGNMENT":
+                                if _contains_area(entity_text):
+                                    area_layer_targets.update(refs)
+                            elif entity_type == "IFCPROPERTYSINGLEVALUE":
+                                args = _split_step_args(args_payload)
+                                prop_name = _extract_step_string(args[0]) if len(args) > 0 else ""
+                                prop_value = args[2] if len(args) > 2 else ""
+                                prop_value_text = _extract_step_string(prop_value) or _str(prop_value)
+                                if any(keyword in _normalize_lower(prop_name) for keyword in _KEYWORDS) and _contains_area(prop_value_text):
+                                    area_property_steps.add(step_id)
+                            elif entity_type == "IFCRELDEFINESBYPROPERTIES":
+                                args = _split_step_args(args_payload)
+                                related = {int(v) for v in _STEP_REF_RE.findall(args[4])} if len(args) > 4 else set()
+                                relating = next(iter({int(v) for v in _STEP_REF_RE.findall(args[5])}), None) if len(args) > 5 else None
+                                if relating is not None and relating in area_property_steps:
+                                    for rel_id in related:
+                                        if rel_id in spaces:
+                                            area_rel_spaces.add(rel_id)
+                            else:
+                                entity_refs[step_id] = refs
+                continue
+
+            entity_buffer.append(line)
+            if ";" not in line:
+                continue
+            buffering = False
+            entity_text = " ".join(entity_buffer)
+            parsed = _parse_step_entity(entity_text)
+            if not parsed:
+                continue
+            step_id, entity_type, args_payload = parsed
+            refs = {int(v) for v in _STEP_REF_RE.findall(entity_text)}
+            if entity_type == "IFCSPACE":
+                ifcspace_lines_found += 1
+                args = _split_step_args(args_payload)
+                spaces[step_id] = {
+                    "step_id": step_id,
+                    "global_id": _extract_step_string(args[0]) if len(args) > 0 else "",
+                    "name": _extract_step_string(args[2]) if len(args) > 2 else "",
+                    "long_name": _extract_step_string(args[7]) if len(args) > 7 else "",
+                    "object_type": _extract_step_string(args[4]) if len(args) > 4 else "",
+                    "raw": entity_text,
                 }
+                space_refs[step_id] = refs
+                entity_refs[step_id] = refs
+            elif entity_type == "IFCPRESENTATIONLAYERASSIGNMENT":
+                if _contains_area(entity_text):
+                    area_layer_targets.update(refs)
+            elif entity_type == "IFCPROPERTYSINGLEVALUE":
+                args = _split_step_args(args_payload)
+                prop_name = _extract_step_string(args[0]) if len(args) > 0 else ""
+                prop_value = args[2] if len(args) > 2 else ""
+                prop_value_text = _extract_step_string(prop_value) or _str(prop_value)
+                if any(keyword in _normalize_lower(prop_name) for keyword in _KEYWORDS) and _contains_area(prop_value_text):
+                    area_property_steps.add(step_id)
+            elif entity_type == "IFCRELDEFINESBYPROPERTIES":
+                args = _split_step_args(args_payload)
+                related = {int(v) for v in _STEP_REF_RE.findall(args[4])} if len(args) > 4 else set()
+                relating = next(iter({int(v) for v in _STEP_REF_RE.findall(args[5])}), None) if len(args) > 5 else None
+                if relating is not None and relating in area_property_steps:
+                    for rel_id in related:
+                        if rel_id in spaces:
+                            area_rel_spaces.add(rel_id)
+            else:
+                entity_refs[step_id] = refs
+
+    candidates: List[Candidate] = []
+    for sid, space in spaces.items():
+        refs = space_refs.get(sid, set())
+        direct_layer = bool(refs.intersection(area_layer_targets))
+        second_hop = False
+        for ref in refs:
+            if entity_refs.get(ref, set()).intersection(area_layer_targets):
+                second_hop = True
+                break
+        direct_property = sid in area_rel_spaces
+        probable_text = _contains_area(space.get("name", "")) or _contains_area(space.get("long_name", "")) or _contains_area(space.get("object_type", ""))
+
+        if not (direct_layer or second_hop or direct_property or probable_text):
+            continue
+
+        if direct_property:
+            matched_source = "property_set"
+            reason = "property-layer-signal"
+            confidence = "confirmed"
+        elif direct_layer:
+            matched_source = "space.layer_assignment"
+            reason = "direct-space-layer-assignment"
+            confidence = "confirmed"
+        elif second_hop:
+            matched_source = "representation.layer_assignment"
+            reason = "streaming_text_match"
+            confidence = "probable"
+        else:
+            matched_source = "streaming.text"
+            reason = "streaming_text_match"
+            confidence = "probable"
+
+        candidates.append(
+            Candidate(
+                step_id=sid,
+                global_id=_str(space.get("global_id", "")),
+                name=_str(space.get("name", "")),
+                long_name=_str(space.get("long_name", "")),
+                object_type=_str(space.get("object_type", "")),
+                matched_source=matched_source,
+                matched_name="Area",
+                matched_value="Area",
+                reason=reason,
+                confidence=confidence,
+                has_representation=bool(refs),
+                spatial_parent="",
             )
         )
-    if file_size_mb >= LARGE_IFC_WARNING_MB:
-        LOGGER.warning("area_spaces_large_ifc_warning filename=%s size_mb=%s threshold_mb=%s", path.name, file_size_mb, LARGE_IFC_WARNING_MB)
+
+    stats = {
+        "lines_read": lines_read,
+        "ifcspace_lines_found": ifcspace_lines_found,
+        "candidate_count": len(candidates),
+    }
+    return ScanResult(source_file=path.name, total_spaces=len(spaces), candidates=candidates), stats
+
+
+def _scan_ifc_for_area_spaces_ifcopenshell(path: Path) -> ScanResult:
+    if not path.exists():
+        raise AreaSpaceError(f"IFC file not found: {path.name}")
     open_started = time.perf_counter()
     try:
         LOGGER.info("ifc_open_start filename=%s", path.name)
@@ -277,6 +501,50 @@ def scan_ifc_for_area_spaces(path: Path) -> ScanResult:
     )
 
     return ScanResult(source_file=path.name, total_spaces=len(spaces), candidates=candidates)
+
+
+def scan_ifc_for_area_spaces(path: Path, *, debug_mode: bool = False) -> ScanResult:
+    if not path.exists():
+        raise AreaSpaceError(f"IFC file not found: {path.name}")
+    file_size_mb = round(path.stat().st_size / (1024 * 1024), 2)
+    scan_mode = os.getenv("AREA_SPACE_SCAN_MODE", "streaming").strip().lower()
+    if debug_mode:
+        scan_mode = "ifcopenshell"
+    if scan_mode not in {"streaming", "ifcopenshell"}:
+        scan_mode = "streaming"
+    LOGGER.info("area_spaces_scan_start filename=%s scan_mode=%s file_size_mb=%s", path.name, scan_mode, file_size_mb)
+    if file_size_mb >= LARGE_IFC_WARNING_MB:
+        LOGGER.warning("area_spaces_large_ifc_warning filename=%s size_mb=%s threshold_mb=%s", path.name, file_size_mb, LARGE_IFC_WARNING_MB)
+
+    started = time.perf_counter()
+    if scan_mode == "ifcopenshell":
+        result = _scan_ifc_for_area_spaces_ifcopenshell(path)
+        lines_read = 0
+        ifcspace_lines_found = result.total_spaces
+    else:
+        result, stats = _scan_ifc_for_area_spaces_streaming(path)
+        lines_read = stats["lines_read"]
+        ifcspace_lines_found = stats["ifcspace_lines_found"]
+    candidate_count = len(result.candidates)
+
+    rss_mb = None
+    if psutil is not None:
+        try:
+            rss_mb = round(psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024), 2)
+        except Exception:
+            rss_mb = None
+    LOGGER.info(
+        "area_spaces_scan_complete filename=%s scan_mode=%s file_size_mb=%s lines_read=%s ifcspace_lines_found=%s candidate_count=%s duration_ms=%s memory_mb=%s",
+        path.name,
+        scan_mode,
+        file_size_mb,
+        lines_read,
+        ifcspace_lines_found,
+        candidate_count,
+        int((time.perf_counter() - started) * 1000),
+        rss_mb,
+    )
+    return result
 
 
 def _as_list(value: Any) -> List[Any]:
@@ -342,6 +610,7 @@ def _write_csv_report(path: Path, rows: List[Dict[str, Any]]) -> None:
         "matched_name",
         "matched_value",
         "reason",
+        "confidence",
         "has_representation",
         "spatial_parent",
         "status",
