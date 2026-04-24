@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="section-title"><h2>Purge Area Spaces</h2><span class="badge">Session IFC workflow</span></div>
+  <p class="helper">Scans selected session IFC files for <code>IfcSpace</code> entities mapped to Area-like layers/properties and purges only selected candidates.</p>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Session status</h3></div>
+  <div id="pasSessionStatus" class="status muted">resolving session files</div>
+  <div class="grid-2">
+    <div class="field">
+      <label for="pasFiles">Session IFC files</label>
+      <select id="pasFiles" multiple size="8"></select>
+      <div class="hint">Use Upload &amp; Session for file uploads. This tool only reads current session IFC files.</div>
+    </div>
+    <div class="field">
+      <label>Safety</label>
+      <div class="helper"><strong>Warning:</strong> only IfcSpace entities matched to Area layer/property signals will be removed.</div>
+      <button class="btn secondary" id="pasRefreshFiles">Refresh files</button>
+      <button class="btn" id="pasScanBtn">Scan selected IFC files</button>
+      <button class="btn" id="pasPurgeBtn" disabled>Purge selected candidates</button>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Summary</h3></div>
+  <div id="pasSummaryCards" class="grid-4"></div>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Scan results</h3></div>
+  <div class="helper">Run Scan first. Then optionally deselect candidates before purge.</div>
+  <div style="overflow-x:auto;">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Select</th><th>File</th><th>STEP ID</th><th>GlobalId</th><th>Name</th><th>LongName</th><th>ObjectType</th><th>Matched Source</th><th>Matched Value</th><th>Reason</th>
+        </tr>
+      </thead>
+      <tbody id="pasResultsBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-title"><h3>Outputs</h3></div>
+  <div id="pasOutputs" class="file-list"></div>
+  <pre id="pasLog" class="log-box">No results yet.</pre>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/purge_area_spaces.js"></script>
+{% endblock %}
