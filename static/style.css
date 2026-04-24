@@ -680,13 +680,13 @@ button.ghost {
 
 .progress {
   width: 100%;
-  min-height: 8px;
+  min-height: 10px;
   height: 10px;
   border-radius: 999px;
-  background: rgba(255,255,255,0.10);
+  background: rgba(14, 18, 26, 0.92);
   overflow: hidden;
   position: relative;
-  border: 1px solid rgba(255,255,255,0.25);
+  border: 1px solid rgba(143, 171, 255, 0.45);
 }
 .progress.hidden { display: none; }
 .progress .bar {

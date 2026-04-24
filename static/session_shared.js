@@ -1,13 +1,6 @@
 (function initIfcSessionShared(global) {
   const STORAGE_KEY = "ifc_toolkit_session_id";
-  const LEGACY_STORAGE_KEYS = [
-    "ifcToolkitSessionId",
-    "ifc_session_id",
-    "sessionId",
-    "ifcSessionId",
-    "qaSessionId",
-    "uploadSessionId",
-  ];
+  const LEGACY_STORAGE_KEYS = [];
   const SESSION_CHANGE_EVENT = "ifc-toolkit-session-changed";
   let currentSessionId = "";
   let sessionPromise = null;
@@ -15,18 +8,9 @@
 
   function readStoredSessionId() {
     try {
-      const canonicalId = localStorage.getItem(STORAGE_KEY) || sessionStorage.getItem(STORAGE_KEY) || "";
+      const canonicalId = localStorage.getItem(STORAGE_KEY) || "";
       const normalizedCanonical = String(canonicalId || "").trim();
       if (normalizedCanonical) return normalizedCanonical;
-
-      for (const key of LEGACY_STORAGE_KEYS) {
-        const legacyId = localStorage.getItem(key) || sessionStorage.getItem(key) || "";
-        const normalizedLegacy = String(legacyId || "").trim();
-        if (normalizedLegacy) {
-          writeStoredSessionId(normalizedLegacy);
-          return normalizedLegacy;
-        }
-      }
       return "";
     } catch (_) {
       return "";
@@ -38,15 +22,9 @@
     try {
       if (value) {
         localStorage.setItem(STORAGE_KEY, value);
-        sessionStorage.setItem(STORAGE_KEY, value);
       } else {
         localStorage.removeItem(STORAGE_KEY);
-        sessionStorage.removeItem(STORAGE_KEY);
       }
-      LEGACY_STORAGE_KEYS.forEach((key) => {
-        localStorage.removeItem(key);
-        sessionStorage.removeItem(key);
-      });
     } catch (_) {
       // no-op for private mode/storage-disabled environments
     }

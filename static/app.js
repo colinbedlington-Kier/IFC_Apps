@@ -59,6 +59,16 @@ function setSessionBadge(text, ok = true) {
   });
 }
 
+function setUploadState(nextState) {
+  state.uploadState = nextState;
+  console.info("[upload] state transition", { nextState });
+}
+
+function getBadgeSessionIdText() {
+  const badge = document.querySelector("[data-session-badge]") || el("sessionStatus") || el("session-pill");
+  return badge?.textContent || "";
+}
+
 function updateProcessingBar(active, message, percent = null) {
   const wrap = document.querySelector("[data-processing-bar]");
   const label = document.querySelector("[data-processing-label]");
@@ -260,7 +270,7 @@ function resetUploadProgress() {
   if (speed) speed.textContent = "";
   if (fileList) fileList.innerHTML = "";
   if (status) status.textContent = "Waiting to start…";
-  state.uploadState = "idle";
+  setUploadState("idle");
 }
 
 function formatBytes(bytes) {
@@ -385,7 +395,7 @@ function updateUploadProgress({ percent, message, done = false, error = false, i
   if (speed) speed.textContent = speedText;
   renderPerFileProgress(fileRows);
   status.textContent = message || "";
-  state.uploadState = error ? "failed" : done ? "complete" : indeterminate ? "preparing" : (Number(percent) >= 100 ? "processing" : "uploading");
+  setUploadState(error ? "failed" : done ? "complete" : indeterminate ? "preparing" : (Number(percent) >= 100 ? "processing" : "uploading"));
 }
 
 function updateStep2ifcProgress({ percent, message, done = false, error = false }) {
@@ -549,17 +559,28 @@ async function uploadFiles() {
     alert("Choose file(s) to upload.");
     return;
   }
-  if (!state.sessionId) {
+  const sharedSessionId = window.IFCSession?.getCurrentSessionId ? window.IFCSession.getCurrentSessionId() : "";
+  const activeSessionId = String(sharedSessionId || state.sessionId || "").trim();
+  if (!activeSessionId) {
     alert("Session not ready yet. Please wait a moment and retry.");
     return;
   }
+  state.sessionId = activeSessionId;
+  if (window.IFCSession?.setCurrentSessionId) window.IFCSession.setCurrentSessionId(activeSessionId);
+  if (window.IFCSession?.shortSessionId) {
+    setSessionBadge(`Session ready • ${window.IFCSession.shortSessionId(activeSessionId)}`, true);
+  }
+  console.info("[upload] session alignment", {
+    activeSessionId,
+    badgeSessionText: getBadgeSessionIdText(),
+  });
   if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Preparing upload…";
   resetUploadProgress();
-  state.uploadState = "preparing";
+  setUploadState("preparing");
   updateUploadProgress({
     percent: 0,
-    message: "Preparing upload…",
-    indeterminate: true,
+    message: "Upload started, waiting for browser progress events...",
+    indeterminate: false,
     bytesText: "",
     speedText: "",
   });
@@ -575,16 +596,29 @@ async function uploadFiles() {
     form.append("files", f);
   }
   const speedTracker = createRollingSpeedTracker();
+  let sawProgressEvent = false;
   const progressTimer = setInterval(() => {
     const speedNow = speedTracker.bytesPerSecond(Date.now());
     const label = speedNow > 0 ? formatTransferSpeed(speedNow) : "0.0 MB/s";
     const current = document.querySelector("[data-upload-speed]");
     if (current && current.textContent) current.textContent = label;
+    if (!sawProgressEvent) {
+      updateUploadProgress({
+        percent: 0,
+        message: "Upload started, waiting for browser progress events...",
+        bytesText: "",
+        speedText: label,
+        fileRows: buildPerFileProgress(files, 0),
+      });
+    }
   }, 600);
   const targetNames = files.map((f) => f.name);
+  const uploadUrl = `/api/session/${activeSessionId}/upload`;
+  console.info("[upload] URL", { uploadUrl });
   try {
-    await uploadWithProgress(`/api/session/${state.sessionId}/upload`, form, {
+    await uploadWithProgress(uploadUrl, form, {
       onProgress: ({ loaded, total, lengthComputable, timestamp }) => {
+        sawProgressEvent = true;
         const progressTotal = lengthComputable && total > 0 ? total : totalBytes;
         const percent = calculateUploadPercent(loaded, progressTotal);
         speedTracker.push(loaded, timestamp);
@@ -594,7 +628,12 @@ async function uploadFiles() {
         const activeFile = perFile.find((row) => row.percent < 100) || perFile[perFile.length - 1];
         if (activeFile) activeFile.speedBytesPerSecond = speedTracker.bytesPerSecond(timestamp);
         const stateText = lengthComputable ? "uploading" : "preparing";
-        state.uploadState = stateText;
+        console.info("[upload] progress event", {
+          loaded,
+          total,
+          percent: Math.round(percent),
+          lengthComputable,
+        });
         console.debug("Upload progress", {
           filename: activeFile?.name || files[0]?.name || "unknown",
           loadedBytes: loaded,
@@ -616,17 +655,17 @@ async function uploadFiles() {
   } catch (err) {
     clearInterval(progressTimer);
     const message = String(err?.message || "");
-    state.uploadState = "failed";
+    setUploadState("failed");
     if (state.uploadStatusEl) state.uploadStatusEl.textContent = message || "Upload failed.";
     updateUploadProgress({ percent: 100, message: `Failed — ${message || "Upload failed"}. Retry upload.`, error: true, fileRows: buildPerFileProgress(files, 0) });
     return;
   }
   clearInterval(progressTimer);
-  state.uploadState = "processing";
-  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Processing on server...";
+  setUploadState("processing");
+  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload complete — processing on server...";
   updateUploadProgress({
     percent: 100,
-    message: "Processing on server...",
+    message: "Upload complete — processing on server...",
     bytesText: `${formatBytes(totalBytes)} / ${formatBytes(totalBytes)}`,
     speedText: "0.0 MB/s",
     fileRows: buildPerFileProgress(files, totalBytes),
@@ -644,7 +683,7 @@ async function uploadFiles() {
     await new Promise((resolve) => setTimeout(resolve, 700));
   }
   if (confirmed) {
-    state.uploadState = "complete";
+    setUploadState("complete");
     if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Complete — added to session.";
     updateUploadProgress({
       percent: 100,
@@ -655,7 +694,7 @@ async function uploadFiles() {
       fileRows: buildPerFileProgress(files, totalBytes),
     });
   } else {
-    state.uploadState = "failed";
+    setUploadState("failed");
     if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload finished but session confirmation failed.";
     updateUploadProgress({
       percent: 100,
@@ -667,16 +706,14 @@ async function uploadFiles() {
     });
   }
   await refreshFiles();
-  if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Upload complete.";
-  updateUploadProgress({ percent: 100, message: "Upload complete.", done: true });
-  if (state.uploadProgressEl) state.uploadProgressEl.classList.add("hidden");
+  console.info("[upload] completed refresh", { activeSessionId, badgeSessionText: getBadgeSessionIdText() });
 }
 
 async function endSession() {
   if (!state.sessionId) return;
   await fetch(`/api/session/${state.sessionId}`, { method: "DELETE" });
   if (window.IFCSession?.setCurrentSessionId) window.IFCSession.setCurrentSessionId("");
-  else localStorage.removeItem("ifcToolkitSessionId");
+  else localStorage.removeItem("ifc_toolkit_session_id");
   state.sessionId = null;
   state.files = [];
   state.selectedFiles = new Set();
