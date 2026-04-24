@@ -1,3 +1,4 @@
+import importlib
 from pathlib import Path
 import zipfile
 
@@ -34,6 +35,11 @@ def test_resolve_server_host_port_uses_env_port(monkeypatch):
     host, port = app.resolve_server_host_port()
     assert host == '0.0.0.0'
     assert port == 43123
+
+
+def test_area_spaces_module_import_safe_for_startup():
+    module = importlib.import_module("backend.ifc_area_spaces")
+    assert module is not None
 
 
 def test_area_spaces_routes_registered_on_startup():
