@@ -48,7 +48,18 @@
         <div style="display:flex; flex-direction:column; gap:10px; align-items:flex-start;">
           <button type="submit" class="primary">Upload</button>
           <div id="upload-status" class="hint">Waiting to start…</div>
-          <div id="upload-progress" class="progress hidden"><div class="bar"></div></div>
+          <div id="upload-progress-wrap" class="upload-progress" data-upload-progress-wrap>
+            <div class="upload-progress-top">
+              <span data-upload-status>Waiting to start…</span>
+              <strong data-upload-percent></strong>
+            </div>
+            <div id="upload-progress" class="progress hidden" data-upload-progress>
+              <div class="bar"></div>
+            </div>
+            <div class="muted" data-upload-bytes></div>
+            <div class="muted" data-upload-speed></div>
+            <div id="upload-file-progress-list" class="upload-file-progress-list"></div>
+          </div>
         </div>
       </form>
       <div class="card" id="file-inventory">
