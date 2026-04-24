@@ -19,7 +19,7 @@ def test_upload_processing_and_complete_state_text_present():
     app_js = _read("static/app.js")
     assert "Preparing upload…" in app_js
     assert "Uploading…" in app_js
-    assert "Upload complete — processing on server…" in app_js
+    assert "Processing on server..." in app_js
     assert "Complete — added to session" in app_js
     assert "Failed —" in app_js
 
@@ -27,7 +27,7 @@ def test_upload_processing_and_complete_state_text_present():
 def test_upload_tracks_overall_progress_across_selected_files():
     app_js = _read("static/app.js")
     assert "const totalBytes = files.reduce" in app_js
-    assert "const perFile = buildPerFileProgress(files, loaded);" in app_js
+    assert "const perFile = buildPerFileProgress(files, loaded).map" in app_js
     assert "const bytesLabel = `${formatBytes(loaded)} / ${formatBytes(progressTotal)}`;" in app_js
 
 
