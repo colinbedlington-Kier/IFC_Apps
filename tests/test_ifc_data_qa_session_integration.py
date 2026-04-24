@@ -46,10 +46,19 @@ def test_ifc_data_qa_frontend_uses_shared_session_module_and_ifc_filtering():
     root = Path(__file__).resolve().parent.parent
     qa_js = (root / "static" / "ifc_qa_app.js").read_text(encoding="utf-8")
     upload_js = (root / "static" / "app.js").read_text(encoding="utf-8")
+    shared_js = (root / "static" / "session_shared.js").read_text(encoding="utf-8")
 
     assert "getCurrentSessionId" in qa_js
+    assert "ensureSession({ createIfMissing: false })" in qa_js
     assert "ensureSession({ createIfMissing: true })" in qa_js
+    assert "ifc-toolkit-session-changed" in qa_js
+    assert "canonicalSessionId" in qa_js
+    assert "localStateSessionId" in qa_js
+    assert "legacySessionKeys" in qa_js
     assert "localStorage.getItem(\"ifc_session_id\")" not in qa_js
     assert ".ifcxml" in qa_js
     assert "ensureSession({ createIfMissing: true })" in upload_js
-
+    assert "ifcToolkitSessionId" in upload_js
+    assert "ifcToolkitSessionId" in shared_js
+    assert "ifc-toolkit-session-changed" in shared_js
+    assert "legacyStorageKeys" in shared_js

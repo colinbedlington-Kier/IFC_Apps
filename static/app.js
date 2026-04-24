@@ -461,7 +461,7 @@ async function endSession() {
   if (!state.sessionId) return;
   await fetch(`/api/session/${state.sessionId}`, { method: "DELETE" });
   if (window.IFCSession?.setCurrentSessionId) window.IFCSession.setCurrentSessionId("");
-  else localStorage.removeItem("ifc_session_id");
+  else localStorage.removeItem("ifcToolkitSessionId");
   state.sessionId = null;
   state.files = [];
   state.selectedFiles = new Set();

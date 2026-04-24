@@ -1,13 +1,32 @@
 (function initIfcSessionShared(global) {
-  const STORAGE_KEY = "ifc_session_id";
+  const STORAGE_KEY = "ifcToolkitSessionId";
+  const LEGACY_STORAGE_KEYS = [
+    "ifc_session_id",
+    "sessionId",
+    "ifcSessionId",
+    "qaSessionId",
+    "uploadSessionId",
+  ];
+  const SESSION_CHANGE_EVENT = "ifc-toolkit-session-changed";
   let currentSessionId = "";
   let sessionPromise = null;
   const listeners = new Set();
 
   function readStoredSessionId() {
     try {
-      const id = localStorage.getItem(STORAGE_KEY) || sessionStorage.getItem(STORAGE_KEY) || "";
-      return String(id || "").trim();
+      const canonicalId = localStorage.getItem(STORAGE_KEY) || sessionStorage.getItem(STORAGE_KEY) || "";
+      const normalizedCanonical = String(canonicalId || "").trim();
+      if (normalizedCanonical) return normalizedCanonical;
+
+      for (const key of LEGACY_STORAGE_KEYS) {
+        const legacyId = localStorage.getItem(key) || sessionStorage.getItem(key) || "";
+        const normalizedLegacy = String(legacyId || "").trim();
+        if (normalizedLegacy) {
+          writeStoredSessionId(normalizedLegacy);
+          return normalizedLegacy;
+        }
+      }
+      return "";
     } catch (_) {
       return "";
     }
@@ -23,12 +42,21 @@
         localStorage.removeItem(STORAGE_KEY);
         sessionStorage.removeItem(STORAGE_KEY);
       }
+      LEGACY_STORAGE_KEYS.forEach((key) => {
+        localStorage.removeItem(key);
+        sessionStorage.removeItem(key);
+      });
     } catch (_) {
       // no-op for private mode/storage-disabled environments
     }
   }
 
   function notifySessionChange(sessionId) {
+    try {
+      global.dispatchEvent(new CustomEvent(SESSION_CHANGE_EVENT, { detail: { sessionId } }));
+    } catch (_) {
+      // no-op if CustomEvent is unavailable
+    }
     listeners.forEach((listener) => {
       try {
         listener(sessionId);
@@ -143,6 +171,8 @@
 
   global.IFCSession = {
     storageKey: STORAGE_KEY,
+    legacyStorageKeys: LEGACY_STORAGE_KEYS.slice(),
+    sessionChangeEvent: SESSION_CHANGE_EVENT,
     getCurrentSessionId,
     setCurrentSessionId,
     ensureSession,
