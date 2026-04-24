@@ -122,6 +122,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 HASHED_STATIC_DIR = STATIC_DIR / "_hashed"
 HASHED_NAME_RE = re.compile(r"\.[0-9a-f]{8,}\.")
 ASSET_VERSIONED_FILES = ("app.js", "ifc_qa_app.js", "session_shared.js", "style.css")
+SESSION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 IFC_QA_JOB_STARTER = start_ifc_qa_session_job
@@ -337,6 +338,21 @@ def has_active_ifc_qa_job() -> bool:
         if job.get("status") in {"queued", "running"}:
             return True
     return False
+
+
+def _require_valid_session_id(session_id: str) -> str:
+    normalized = str(session_id or "").strip().lower()
+    if not SESSION_ID_RE.fullmatch(normalized):
+        raise HTTPException(status_code=400, detail="Invalid session id format")
+    return normalized
+
+
+def _ensure_session_dir_for_upload(session_id: str) -> str:
+    normalized = _require_valid_session_id(session_id)
+    root = SESSION_STORE.session_path(normalized)
+    os.makedirs(root, exist_ok=True)
+    SESSION_STORE.sessions[normalized] = utc_now()
+    return root
 
 
 class SessionStore:
@@ -5953,9 +5969,30 @@ def shutdown_cleanup() -> None:
         SESSION_STORE.drop(sid)
 
 
+def _collect_session_route_lines() -> List[str]:
+    lines: List[str] = []
+    for route in app.routes:
+        path = getattr(route, "path", "")
+        if not path.startswith("/api/session"):
+            continue
+        methods = sorted((getattr(route, "methods", set()) or set()) - {"HEAD", "OPTIONS"})
+        for method in methods:
+            lines.append(f"- {method} {path}")
+    return sorted(set(lines))
+
+
+def _log_session_route_registration() -> None:
+    lines = _collect_session_route_lines()
+    if lines:
+        APP_LOGGER.info("SESSION_UPLOAD_ROUTES_REGISTERED:\n%s", "\n".join(lines))
+    else:
+        APP_LOGGER.warning("SESSION_UPLOAD_ROUTES_REGISTERED:\n- <none>")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     startup_cleanup()
+    _log_session_route_registration()
     try:
         yield
     finally:
@@ -6192,7 +6229,8 @@ def create_session(payload: Dict[str, Any] = Body(default=None)):
 
 @app.get("/api/session/{session_id}")
 def get_session(session_id: str):
-    root = SESSION_STORE.ensure(session_id)
+    normalized = _require_valid_session_id(session_id)
+    root = _ensure_session_dir_for_upload(normalized)
     APP_LOGGER.info("session_lookup session_id=%s", session_id)
     files = [name for name in os.listdir(root) if os.path.isfile(os.path.join(root, name))]
     expiry = utc_now() + datetime.timedelta(hours=SESSION_STORE.ttl_hours)
@@ -6206,13 +6244,15 @@ def get_session(session_id: str):
 
 @app.delete("/api/session/{session_id}")
 def end_session(session_id: str):
-    SESSION_STORE.drop(session_id)
+    normalized = _require_valid_session_id(session_id)
+    SESSION_STORE.drop(normalized)
     return {"status": "deleted"}
 
 
 @app.get("/api/session/{session_id}/files")
 def list_files(session_id: str):
-    root = SESSION_STORE.ensure(session_id)
+    normalized = _require_valid_session_id(session_id)
+    root = _ensure_session_dir_for_upload(normalized)
     APP_LOGGER.info("session_file_list session_id=%s root=%s", session_id, root)
     files = []
     for fname in sorted(os.listdir(root)):
@@ -6236,9 +6276,15 @@ def list_files(session_id: str):
     return {"files": files}
 
 
+@app.get("/api/sessions/{session_id}/files")
+def list_files_alias_plural(session_id: str):
+    return list_files(session_id)
+
+
 @app.delete("/api/session/{session_id}/files/{file_id}")
 def delete_session_file(session_id: str, file_id: str):
-    root = Path(SESSION_STORE.ensure(session_id))
+    normalized = _require_valid_session_id(session_id)
+    root = Path(_ensure_session_dir_for_upload(normalized))
     safe_name = sanitize_filename(os.path.basename(file_id))
     target = root / safe_name
     if not target.exists() or not target.is_file():
@@ -6250,7 +6296,8 @@ def delete_session_file(session_id: str, file_id: str):
 
 @app.get("/api/session/{session_id}/debug")
 def session_debug(session_id: str):
-    root = Path(SESSION_STORE.ensure(session_id))
+    normalized = _require_valid_session_id(session_id)
+    root = Path(_ensure_session_dir_for_upload(normalized))
     file_count = sum(1 for item in root.iterdir() if item.is_file())
     return {
         "active_session_id": session_id,
@@ -6258,6 +6305,25 @@ def session_debug(session_id: str):
         "max_upload_bytes": MAX_UPLOAD_BYTES,
         "session_directory_exists": root.exists() and root.is_dir(),
         "session_file_count": file_count,
+    }
+
+
+@app.get("/api/session/debug/routes")
+def session_debug_routes():
+    session_routes = []
+    for route in app.routes:
+        path = getattr(route, "path", "")
+        if "session" not in path or not path.startswith("/api/"):
+            continue
+        methods = sorted((getattr(route, "methods", set()) or set()) - {"HEAD", "OPTIONS"})
+        for method in methods:
+            session_routes.append(f"{method} {path}")
+    upload_root = Path(SESSION_STORE.base_dir)
+    return {
+        "session_routes": sorted(set(session_routes)),
+        "upload_root": str(upload_root),
+        "upload_root_exists": upload_root.exists() and upload_root.is_dir(),
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
     }
 
 
@@ -6613,7 +6679,8 @@ def get_step2ifc_status(session_id: str, job_id: str):
 
 @app.post("/api/session/{session_id}/upload")
 async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
-    root = SESSION_STORE.ensure(session_id)
+    normalized = _require_valid_session_id(session_id)
+    root = _ensure_session_dir_for_upload(normalized)
     APP_LOGGER.info("session_upload_start session_id=%s file_count=%s root=%s", session_id, len(files or []), root)
     saved = []
     for f in files:
@@ -6656,6 +6723,11 @@ async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
         })
     APP_LOGGER.info("session_upload_complete session_id=%s saved=%s", session_id, len(saved))
     return {"files": saved}
+
+
+@app.post("/api/upload/session/{session_id}/upload")
+async def upload_files_alias(session_id: str, files: List[UploadFile] = File(...)):
+    return await upload_files(session_id, files)
 
 
 def _public_ifc_qa_config(config: Dict[str, Any]) -> Dict[str, Any]:
