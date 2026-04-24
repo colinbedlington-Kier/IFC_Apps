@@ -80,8 +80,13 @@ from backend.ifc_file_size_reducer import (
 )
 from backend.ifc_area_spaces import (
     AreaSpaceError,
+    AREA_SPACE_JOB_SEMAPHORE,
+    AREA_SPACE_MAX_FILE_MB,
+    AREA_SPACE_MAX_PURGE_FILE_MB,
+    AREA_SPACE_MEMORY_ABORT_PERCENT,
+    get_memory_status,
+    is_memory_high,
     package_outputs as package_area_space_outputs,
-    purge_area_spaces,
     result_to_log_payload as area_space_log_payload,
     scan_ifc_for_area_spaces,
 )
@@ -6884,7 +6889,7 @@ def area_spaces_session_files(session_id: str):
     return {"session_id": normalized, "files": files, "count": len(files)}
 
 
-def area_spaces_scan(payload: Dict[str, Any] = Body(...)):
+async def area_spaces_scan(payload: Dict[str, Any] = Body(...)):
     session_id = str(payload.get("session_id") or "").strip()
     requested = payload.get("file_names") or payload.get("file_ids")
     debug_mode = bool(payload.get("debug_mode") or payload.get("debug"))
@@ -6913,7 +6918,7 @@ def area_spaces_scan(payload: Dict[str, Any] = Body(...)):
             "ok": True,
             "session_id": session_id,
             "progress": "candidates found",
-            "status_messages": ["ifc_open complete", "scan_spaces complete"],
+            "status_messages": (["Another IFC job is running. Waiting for available processing slot..."] if semaphore_locked else []) + ["ifc_open complete", "scan_spaces complete"],
             "warning": warning,
             "files_scanned": 1,
             "total_spaces": result.total_spaces,
@@ -6922,13 +6927,17 @@ def area_spaces_scan(payload: Dict[str, Any] = Body(...)):
         }
     except AreaSpaceError as exc:
         APP_LOGGER.exception("area_spaces_scan_failed")
-        return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_SCAN_FAILED", "message": str(exc), "stage": "scan_spaces"})
+        try:
+            parsed = json.loads(str(exc))
+            return JSONResponse(status_code=int(parsed.get("http_status", 400)), content=parsed)
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_SCAN_FAILED", "message": str(exc), "stage": "scan_spaces"})
     except Exception as exc:
         APP_LOGGER.exception("area_spaces_scan_failed")
         return JSONResponse(status_code=500, content={"ok": False, "error": "AREA_SPACE_SCAN_FAILED", "message": str(exc), "stage": "scan_spaces"})
 
 
-def area_spaces_purge(payload: Dict[str, Any] = Body(...)):
+async def area_spaces_purge(payload: Dict[str, Any] = Body(...)):
     session_id = str(payload.get("session_id") or "").strip()
     selected = payload.get("selected_candidates")
     if not session_id:
@@ -6957,21 +6966,94 @@ def area_spaces_purge(payload: Dict[str, Any] = Body(...)):
     purge_results = []
     produced_names: List[str] = []
     for source_name, source_path in ifc_records:
+        APP_LOGGER.info("purge_request_received filename=%s selected=%s", source_name, len(selected))
         selected_keys = grouped_selections.get(source_name, [])
         if not selected_keys:
             continue
+        size_mb = round(source_path.stat().st_size / (1024 * 1024), 2)
+        allow_oversize = str(os.getenv("AREA_SPACE_ALLOW_OVERSIZE", "false")).lower() == "true"
+        if size_mb > AREA_SPACE_MAX_PURGE_FILE_MB and not allow_oversize:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "ok": False,
+                    "error": "IFC_TOO_LARGE_FOR_SAFE_PROCESSING",
+                    "message": "This IFC is above the configured safe processing size. Split the IFC or increase AREA_SPACE_MAX_FILE_MB.",
+                    "file_size_mb": size_mb,
+                },
+            )
+        if is_memory_high():
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "ok": False,
+                    "error": "INSUFFICIENT_MEMORY_FOR_SAFE_PURGE",
+                    "message": "Server memory is too high to safely write the cleaned IFC. Try again when other jobs finish.",
+                    "memory": get_memory_status(),
+                },
+            )
         output_name = f"{source_path.stem}.area-spaces-purged.ifc"
         output_path = session_root / output_name
+        audit_path = output_path.with_name(output_path.stem.replace(".area-spaces-purged", "") + ".area-spaces-purge-report.csv")
+        selected_json_path = session_root / f"{source_path.stem}.area-spaces-selection.json"
+        selected_json_path.write_text(json.dumps(selected_keys), encoding="utf-8")
+        wait_start = time.perf_counter()
+        semaphore_locked = AREA_SPACE_JOB_SEMAPHORE.locked()
+        if semaphore_locked:
+            APP_LOGGER.info("area_space_job_wait_start stage=purge filename=%s", source_name)
         try:
-            result = purge_area_spaces(source_path, selected_keys, output_path)
-        except AreaSpaceError as exc:
-            return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_PURGE_FAILED", "message": str(exc), "stage": "purge"})
+            async with AREA_SPACE_JOB_SEMAPHORE:
+                wait_ms = int((time.perf_counter() - wait_start) * 1000)
+                APP_LOGGER.info("area_space_job_acquired stage=purge wait_ms=%s", wait_ms)
+                timeout_seconds = int(os.getenv("AREA_SPACE_PURGE_TIMEOUT_SECONDS", "900"))
+                APP_LOGGER.info("purge_child_start filename=%s timeout_seconds=%s", source_name, timeout_seconds)
+                worker_cmd = [
+                    sys.executable,
+                    "-m",
+                    "ifc_app.workers.area_space_purge_worker",
+                    "--source-ifc",
+                    str(source_path),
+                    "--output-ifc",
+                    str(output_path),
+                    "--selected-json",
+                    str(selected_json_path),
+                    "--audit-csv",
+                    str(audit_path),
+                ]
+                try:
+                    proc = subprocess.run(worker_cmd, capture_output=True, text=True, check=False, timeout=timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    APP_LOGGER.error("purge_child_timeout filename=%s", source_name)
+                    return JSONResponse(
+                        status_code=504,
+                        content={
+                            "ok": False,
+                            "error": "AREA_SPACE_PURGE_TIMEOUT",
+                            "message": "Purge exceeded timeout. Split the IFC or increase timeout/memory.",
+                        },
+                    )
+                APP_LOGGER.info("purge_child_returncode filename=%s returncode=%s", source_name, proc.returncode)
+                if proc.returncode != 0:
+                    APP_LOGGER.error("purge_child_failed filename=%s", source_name)
+                    return JSONResponse(
+                        status_code=500,
+                        content={
+                            "ok": False,
+                            "error": "AREA_SPACE_PURGE_SUBPROCESS_FAILED",
+                            "returncode": proc.returncode,
+                            "message": "Purge failed in isolated worker. Main app remained online.",
+                            "stderr_tail": (proc.stderr or "")[-4000:],
+                        },
+                    )
+                result = json.loads((proc.stdout or "").strip().splitlines()[-1])
+                APP_LOGGER.info("purge_child_success filename=%s", source_name)
+                APP_LOGGER.info("area_space_job_released stage=purge")
         except Exception as exc:
             APP_LOGGER.exception("area_spaces_purge_failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": "AREA_SPACE_PURGE_FAILED", "message": f"Purge failed for {source_name}: {exc}", "stage": "purge"})
-        APP_LOGGER.info("area_spaces_purge %s", area_space_log_payload(result))
-        purge_results.append(result.__dict__)
-        produced_names.extend([result.output_ifc, result.report_csv])
+        APP_LOGGER.info("area_spaces_purge %s", json.dumps(result, sort_keys=True))
+        purge_results.append(result)
+        produced_names.extend([result["output_ifc"], result["report_csv"]])
 
     if not purge_results:
         return JSONResponse(status_code=400, content={"ok": False, "error": "AREA_SPACE_PURGE_FAILED", "message": "No selected candidates matched the requested files", "stage": "purge"})
@@ -6986,9 +7068,23 @@ def area_spaces_purge(payload: Dict[str, Any] = Body(...)):
         "ok": True,
         "session_id": session_id,
         "progress": "complete",
-        "status_messages": ["purge complete", "write complete"],
+        "status_messages": (["Another IFC job is running. Waiting for available processing slot..."] if 'semaphore_locked' in locals() and semaphore_locked else []) + ["purge complete", "write complete"],
         "results": purge_results,
         "output_files": output_files,
+    }
+
+
+@app.get("/api/ifc/area-spaces/health")
+def area_spaces_health():
+    return {
+        "ok": True,
+        "routes_mounted": True,
+        "max_concurrent_jobs": int(os.getenv("AREA_SPACE_MAX_CONCURRENT_JOBS", "1")),
+        "child_memory_mb": int(os.getenv("AREA_SPACE_PURGE_CHILD_MEMORY_MB", "8192")),
+        "timeout_seconds": int(os.getenv("AREA_SPACE_PURGE_TIMEOUT_SECONDS", "900")),
+        "max_file_mb": AREA_SPACE_MAX_FILE_MB,
+        "max_purge_file_mb": AREA_SPACE_MAX_PURGE_FILE_MB,
+        "memory_abort_percent": AREA_SPACE_MEMORY_ABORT_PERCENT,
     }
 
 
