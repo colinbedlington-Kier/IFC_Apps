@@ -46,9 +46,9 @@ def test_export_includes_types_raw_entities_and_dropdowns(tmp_path):
         assert required_col in elements.columns
 
     wb = load_workbook(str(xlsx))
-    assert wb["IfcEntities"].sheet_state == "hidden"
-    assert wb["PredefinedTypes"].sheet_state == "hidden"
-    assert wb["EntityPredefinedTypeMap"].sheet_state == "hidden"
+    assert wb["_Lookups_IFC2X3_Entities"].sheet_state == "hidden"
+    assert wb["_Lookups_IFC2X3_Predefs"].sheet_state == "hidden"
+    assert wb["_Lookups_IFC2X3_Map"].sheet_state == "hidden"
 
 
 def test_workbook_lookup_validations_roundtrip_safe(tmp_path):
@@ -61,7 +61,7 @@ def test_workbook_lookup_validations_roundtrip_safe(tmp_path):
     extract_to_excel(str(src), str(xlsx))
 
     wb = load_workbook(str(xlsx))
-    assert {"Elements", "Properties", "IfcEntities", "PredefinedTypes", "EntityPredefinedTypeMap"}.issubset(set(wb.sheetnames))
+    assert {"Elements", "Properties", "_Lookups_IFC2X3_Entities", "_Lookups_IFC2X3_Predefs", "_Lookups_IFC2X3_Map"}.issubset(set(wb.sheetnames))
     assert wb.defined_names.get("IfcEntityList") is not None
     assert wb.defined_names.get("PredefinedTypeList") is not None
 

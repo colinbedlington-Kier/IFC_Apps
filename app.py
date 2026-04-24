@@ -6,6 +6,7 @@ import difflib
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import shutil
@@ -28,6 +29,8 @@ import ifcopenshell.util.element
 import ifcopenshell.util.placement
 import pandas as pd
 from openpyxl.workbook.defined_name import DefinedName
+from openpyxl import load_workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -118,7 +121,7 @@ HEAVY_JOB_TIMEOUT_SECONDS = int(os.getenv("HEAVY_JOB_TIMEOUT_SECONDS", "900"))
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 HASHED_STATIC_DIR = STATIC_DIR / "_hashed"
 HASHED_NAME_RE = re.compile(r"\.[0-9a-f]{8,}\.")
-ASSET_VERSIONED_FILES = ("app.js", "ifc_qa_app.js", "style.css")
+ASSET_VERSIONED_FILES = ("app.js", "ifc_qa_app.js", "session_shared.js", "style.css")
 
 
 IFC_QA_JOB_STARTER = start_ifc_qa_session_job
@@ -359,7 +362,14 @@ class SessionStore:
         self.sessions[session_id] = utc_now()
 
     def exists(self, session_id: str) -> bool:
-        return session_id in self.sessions and os.path.isdir(self.session_path(session_id))
+        if session_id in self.sessions and os.path.isdir(self.session_path(session_id)):
+            return True
+        # Recover sessions persisted on disk even when in-memory bookkeeping was lost.
+        path = self.session_path(session_id)
+        if os.path.isdir(path):
+            self.sessions[session_id] = utc_now()
+            return True
+        return False
 
     def cleanup_stale(self) -> None:
         cutoff = utc_now() - datetime.timedelta(hours=self.ttl_hours)
@@ -1306,6 +1316,64 @@ def _upsert_workbook_defined_name(workbook: Any, name: str, attr_text: str) -> N
     workbook.defined_names.add(DefinedName(name=name, attr_text=attr_text))
 
 
+def detect_ifc_schema_from_header(ifc_path: str) -> Tuple[str, str]:
+    try:
+        with open(ifc_path, "r", encoding="utf-8", errors="ignore") as handle:
+            for _ in range(80):
+                line = handle.readline()
+                if not line:
+                    break
+                upper = line.upper()
+                if "FILE_SCHEMA" not in upper:
+                    continue
+                if "IFC2X3" in upper:
+                    return "IFC2X3", ""
+                if "IFC4X3" in upper:
+                    return "IFC4X3", ""
+                if "IFC4" in upper:
+                    return "IFC4", ""
+    except Exception:
+        pass
+    return "IFC4", "Unable to parse FILE_SCHEMA from IFC header; using IFC4 fallback lists."
+
+
+def _sanitize_excel_text(value: Any) -> Any:
+    if isinstance(value, str):
+        return ILLEGAL_CHARACTERS_RE.sub("", value)
+    return value
+
+
+def _sanitize_dataframe_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    return df.map(_sanitize_excel_text)
+
+
+def validate_workbook_after_export(path: str) -> Optional[str]:
+    try:
+        wb = load_workbook(path, data_only=False)
+        if not wb.sheetnames:
+            return "Workbook has no sheets"
+        seen = set()
+        for ws in wb.worksheets:
+            if ws.title in seen:
+                return f"Duplicate worksheet title detected: {ws.title}"
+            seen.add(ws.title)
+            _ = ws.max_row
+            _ = ws.max_column
+            if ws.data_validations is not None:
+                for dv in ws.data_validations.dataValidation:
+                    if not dv.sqref:
+                        return f"Invalid data validation range on sheet {ws.title}"
+        for dn in wb.defined_names.values():
+            if not dn.name:
+                return "Workbook contains an unnamed defined name"
+        wb.close()
+        return None
+    except Exception as exc:
+        return f"Workbook validation failed: {exc}"
+
+
 def _normalize_field_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (value or "").strip().lower())
 
@@ -1573,7 +1641,9 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
     site = sites[0] if sites else None
     buildings = ifc.by_type("IfcBuilding")
     building = buildings[0] if buildings else None
-    is_ifc2x3 = ifc.schema == "IFC2X3"
+    detected_schema, schema_warning = detect_ifc_schema_from_header(ifc_path)
+    schema_for_lookup = (detected_schema or ifc.schema or "IFC4").upper()
+    is_ifc2x3 = schema_for_lookup == "IFC2X3"
     b_en_ref, b_en_name = ("", "")
     if building is not None:
         b_en_ref, b_en_name = _extract_uniclass(building, "Uniclass En Entities", is_ifc2x3)
@@ -1592,6 +1662,9 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
     project_data.append({"DataType": "Project", "Name": getattr(project, "Name", "") if project else "", "Description": getattr(project, "Description", "") if project else "", "Phase": getattr(project, "Phase", "") if project else "", "ProjectNumber": project_number, "UniclassEnReference": "", "UniclassEnName": ""})
     project_data.append({"DataType": "Site", "Name": getattr(site, "Name", "") if site else "", "Description": getattr(site, "Description", "") if site else "", "Phase": "", "ProjectNumber": "", "UniclassEnReference": "", "UniclassEnName": ""})
     project_data.append({"DataType": "Building", "Name": getattr(building, "Name", "") if building else "", "Description": getattr(building, "Description", "") if building else "", "Phase": "", "ProjectNumber": "", "UniclassEnReference": b_en_ref, "UniclassEnName": b_en_name})
+    project_data.append({"DataType": "DetectedSchema", "Name": schema_for_lookup, "Description": "Parsed from FILE_SCHEMA in IFC header", "Phase": "", "ProjectNumber": "", "UniclassEnReference": "", "UniclassEnName": ""})
+    if schema_warning:
+        project_data.append({"DataType": "SchemaWarning", "Name": schema_warning, "Description": "Fallback applied", "Phase": "", "ProjectNumber": "", "UniclassEnReference": "", "UniclassEnName": ""})
     project_df = pd.DataFrame(project_data)
     timer.stop("project_data")
 
@@ -1779,62 +1852,80 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
     timer.start("excel_write")
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         if "ProjectData" in plan.include_sheets:
-            project_df.to_excel(writer, sheet_name="ProjectData", index=False)
+            _sanitize_dataframe_for_excel(project_df).to_excel(writer, sheet_name="ProjectData", index=False)
         if "Elements" in plan.include_sheets:
-            elements_df.to_excel(writer, sheet_name="Elements", index=False)
+            _sanitize_dataframe_for_excel(elements_df).to_excel(writer, sheet_name="Elements", index=False)
         if "Types" in plan.include_sheets:
-            types_df.to_excel(writer, sheet_name="Types", index=False)
+            _sanitize_dataframe_for_excel(types_df).to_excel(writer, sheet_name="Types", index=False)
         if "RawEntities" in plan.include_sheets:
-            raw_entities_df.to_excel(writer, sheet_name="RawEntities", index=False)
+            _sanitize_dataframe_for_excel(raw_entities_df).to_excel(writer, sheet_name="RawEntities", index=False)
         if "Properties" in plan.include_sheets:
-            props_df.to_excel(writer, sheet_name="Properties", index=False)
+            _sanitize_dataframe_for_excel(props_df).to_excel(writer, sheet_name="Properties", index=False)
         if "COBieMapping" in plan.include_sheets:
-            cobie_df.to_excel(writer, sheet_name="COBieMapping", index=False)
+            _sanitize_dataframe_for_excel(cobie_df).to_excel(writer, sheet_name="COBieMapping", index=False)
         if "Uniclass_Pr" in plan.include_sheets:
-            uniclass_pr_df.to_excel(writer, sheet_name="Uniclass_Pr", index=False)
+            _sanitize_dataframe_for_excel(uniclass_pr_df).to_excel(writer, sheet_name="Uniclass_Pr", index=False)
         if "Uniclass_Ss" in plan.include_sheets:
-            uniclass_ss_df.to_excel(writer, sheet_name="Uniclass_Ss", index=False)
+            _sanitize_dataframe_for_excel(uniclass_ss_df).to_excel(writer, sheet_name="Uniclass_Ss", index=False)
         if "Uniclass_EF" in plan.include_sheets:
-            uniclass_ef_df.to_excel(writer, sheet_name="Uniclass_EF", index=False)
+            _sanitize_dataframe_for_excel(uniclass_ef_df).to_excel(writer, sheet_name="Uniclass_EF", index=False)
         if "ChangeLog" in plan.include_sheets:
-            changelog_df.to_excel(writer, sheet_name="ChangeLog", index=False)
+            _sanitize_dataframe_for_excel(changelog_df).to_excel(writer, sheet_name="ChangeLog", index=False)
 
-        mapping = load_ifc2x3_entity_mapping()
-        entities = sorted((mapping.get("entities") or {}).keys())
-        predefined_values = sorted(
-            {
-                (predefined or "").strip()
-                for entity in entities
-                for predefined in ((mapping.get("entities", {}).get(entity, {}) or {}).get("predefined_types", []) or [])
-                if (predefined or "").strip()
-            }
-        )
+        if schema_for_lookup == "IFC2X3":
+            mapping = load_ifc2x3_entity_mapping()
+            entities = sorted((mapping.get("entities") or {}).keys())
+            predefined_values = sorted(
+                {
+                    (predefined or "").strip()
+                    for entity in entities
+                    for predefined in ((mapping.get("entities", {}).get(entity, {}) or {}).get("predefined_types", []) or [])
+                    if (predefined or "").strip()
+                }
+            )
+        else:
+            entities = sorted(_entity_names(_schema_definition(schema_for_lookup)))
+            predefined_values = sorted(
+                {
+                    lit
+                    for entity in entities
+                    for lit in (_predefined_type_info(schema_for_lookup, entity).get("enum_items", []) or [])
+                    if lit
+                }
+            )
         entity_lookup_df = pd.DataFrame({"IfcEntity": entities})
         predefined_lookup_df = pd.DataFrame({"PredefinedType": predefined_values})
         entity_predefined_map_rows: List[Dict[str, str]] = []
         for entity in entities:
-            enum_items = (mapping.get("entities", {}).get(entity, {}) or {}).get("predefined_types", []) or []
+            if schema_for_lookup == "IFC2X3":
+                enum_items = (mapping.get("entities", {}).get(entity, {}) or {}).get("predefined_types", []) or []
+            else:
+                enum_items = _predefined_type_info(schema_for_lookup, entity).get("enum_items", []) or []
             for val in enum_items:
                 cleaned = (val or "").strip()
                 if cleaned:
                     entity_predefined_map_rows.append({"IfcEntity": entity, "PredefinedType": cleaned})
         entity_predefined_map_df = pd.DataFrame(entity_predefined_map_rows, columns=["IfcEntity", "PredefinedType"])
-        entity_lookup_df.to_excel(writer, sheet_name="IfcEntities", index=False)
-        predefined_lookup_df.to_excel(writer, sheet_name="PredefinedTypes", index=False)
-        entity_predefined_map_df.to_excel(writer, sheet_name="EntityPredefinedTypeMap", index=False)
+        lookup_suffix = "IFC2X3" if schema_for_lookup == "IFC2X3" else "IFC4"
+        entities_sheet = f"_Lookups_{lookup_suffix}_Entities"
+        predefs_sheet = f"_Lookups_{lookup_suffix}_Predefs"
+        mapping_sheet = f"_Lookups_{lookup_suffix}_Map"
+        entity_lookup_df.to_excel(writer, sheet_name=entities_sheet, index=False)
+        predefined_lookup_df.to_excel(writer, sheet_name=predefs_sheet, index=False)
+        entity_predefined_map_df.to_excel(writer, sheet_name=mapping_sheet, index=False)
 
         workbook = writer.book
         if len(entities) > 0:
             _upsert_workbook_defined_name(
                 workbook,
                 "IfcEntityList",
-                _excel_range("IfcEntities", "A", 2, len(entities) + 1),
+                _excel_range(entities_sheet, "A", 2, len(entities) + 1),
             )
         if len(predefined_values) > 0:
             _upsert_workbook_defined_name(
                 workbook,
                 "PredefinedTypeList",
-                _excel_range("PredefinedTypes", "A", 2, len(predefined_values) + 1),
+                _excel_range(predefs_sheet, "A", 2, len(predefined_values) + 1),
             )
 
         if "Elements" in workbook.sheetnames:
@@ -1851,10 +1942,19 @@ def extract_to_excel_with_plan(ifc_path: str, output_path: str, plan: Optional[E
                 ws.add_data_validation(predef_dv)
                 predef_dv.add(f"{predef_col}2:{predef_col}{ws.max_row}")
 
-        for lookup_sheet in ("IfcEntities", "PredefinedTypes", "EntityPredefinedTypeMap"):
+        for lookup_sheet in (entities_sheet, predefs_sheet, mapping_sheet):
             workbook[lookup_sheet].sheet_state = "hidden"
+    validation_error = validate_workbook_after_export(output_path)
+    if validation_error:
+        raise HTTPException(status_code=500, detail={"message": "Excel export validation failed", "error": validation_error})
     timer.stop("excel_write")
-    return {"path": output_path, "timings_ms": timer.as_payload(), "counts": {"elements": len(elements), "types": len(all_types), "properties": len(prop_rows), "cobie_rows": len(cobie_rows)}}
+    return {
+        "path": output_path,
+        "timings_ms": timer.as_payload(),
+        "counts": {"elements": len(elements), "types": len(all_types), "properties": len(prop_rows), "cobie_rows": len(cobie_rows)},
+        "schema_detected": schema_for_lookup,
+        "schema_warning": schema_warning,
+    }
 
 
 def extract_to_excel(ifc_path: str, output_path: str, plan_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -6082,10 +6182,26 @@ def create_session(payload: Dict[str, Any] = Body(default=None)):
     if incoming and SESSION_STORE.exists(incoming):
         SESSION_STORE.touch(incoming)
         session_id = incoming
+        APP_LOGGER.info("session_reused session_id=%s", session_id)
     else:
         session_id = SESSION_STORE.create()
+        APP_LOGGER.info("session_created session_id=%s root=%s", session_id, SESSION_STORE.session_path(session_id))
     expiry = utc_now() + datetime.timedelta(hours=SESSION_STORE.ttl_hours)
     return {"session_id": session_id, "expires_at": expiry.isoformat() + "Z"}
+
+
+@app.get("/api/session/{session_id}")
+def get_session(session_id: str):
+    root = SESSION_STORE.ensure(session_id)
+    APP_LOGGER.info("session_lookup session_id=%s", session_id)
+    files = [name for name in os.listdir(root) if os.path.isfile(os.path.join(root, name))]
+    expiry = utc_now() + datetime.timedelta(hours=SESSION_STORE.ttl_hours)
+    return {
+        "session_id": session_id,
+        "expires_at": expiry.isoformat() + "Z",
+        "upload_root": root,
+        "file_count": len(files),
+    }
 
 
 @app.delete("/api/session/{session_id}")
@@ -6097,17 +6213,52 @@ def end_session(session_id: str):
 @app.get("/api/session/{session_id}/files")
 def list_files(session_id: str):
     root = SESSION_STORE.ensure(session_id)
+    APP_LOGGER.info("session_file_list session_id=%s root=%s", session_id, root)
     files = []
     for fname in sorted(os.listdir(root)):
         fpath = os.path.join(root, fname)
         if os.path.isfile(fpath):
             stat = os.stat(fpath)
+            created_at = datetime.datetime.fromtimestamp(stat.st_ctime, tz=UTC).isoformat()
+            extension = Path(fname).suffix.lower()
+            mime_type = mimetypes.guess_type(fname)[0] or "application/octet-stream"
             files.append({
+                "id": fname,
+                "filename": fname,
                 "name": fname,
                 "size": stat.st_size,
                 "modified": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                "mime_type": mime_type,
+                "extension": extension,
+                "created_at": created_at,
+                "path": fpath,
             })
     return {"files": files}
+
+
+@app.delete("/api/session/{session_id}/files/{file_id}")
+def delete_session_file(session_id: str, file_id: str):
+    root = Path(SESSION_STORE.ensure(session_id))
+    safe_name = sanitize_filename(os.path.basename(file_id))
+    target = root / safe_name
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found in session")
+    target.unlink(missing_ok=True)
+    APP_LOGGER.info("session_file_deleted session_id=%s file=%s", session_id, safe_name)
+    return {"deleted": True, "id": safe_name}
+
+
+@app.get("/api/session/{session_id}/debug")
+def session_debug(session_id: str):
+    root = Path(SESSION_STORE.ensure(session_id))
+    file_count = sum(1 for item in root.iterdir() if item.is_file())
+    return {
+        "active_session_id": session_id,
+        "upload_root": str(root),
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
+        "session_directory_exists": root.exists() and root.is_dir(),
+        "session_file_count": file_count,
+    }
 
 
 def _is_ifc_compatible(name: str) -> bool:
@@ -6463,6 +6614,7 @@ def get_step2ifc_status(session_id: str, job_id: str):
 @app.post("/api/session/{session_id}/upload")
 async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
     root = SESSION_STORE.ensure(session_id)
+    APP_LOGGER.info("session_upload_start session_id=%s file_count=%s root=%s", session_id, len(files or []), root)
     saved = []
     for f in files:
         safe = sanitize_filename(os.path.basename(f.filename))
@@ -6477,6 +6629,12 @@ async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
                 if written > MAX_UPLOAD_BYTES:
                     dst.close()
                     os.remove(dest)
+                    APP_LOGGER.warning(
+                        "session_upload_rejected session_id=%s file=%s bytes=%s reason=max_upload_exceeded",
+                        session_id,
+                        safe,
+                        written,
+                    )
                     raise_upload_too_large(
                         endpoint=f"/api/session/{session_id}/upload",
                         filename=safe,
@@ -6485,7 +6643,18 @@ async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
                     )
                 dst.write(chunk)
         enforce_upload_limits(dest, endpoint="/api/session/{session_id}/upload")
-        saved.append({"name": safe, "size": os.path.getsize(dest)})
+        stat = os.stat(dest)
+        saved.append({
+            "id": safe,
+            "filename": safe,
+            "name": safe,
+            "size": stat.st_size,
+            "mime_type": mimetypes.guess_type(safe)[0] or "application/octet-stream",
+            "extension": Path(safe).suffix.lower(),
+            "created_at": datetime.datetime.fromtimestamp(stat.st_ctime, tz=UTC).isoformat(),
+            "path": dest,
+        })
+    APP_LOGGER.info("session_upload_complete session_id=%s saved=%s", session_id, len(saved))
     return {"files": saved}
 
 
@@ -7151,6 +7320,8 @@ def excel_extract(session_id: str, payload: Dict[str, Any] = Body(...)):
         "excel": {"name": out_name, "url": f"/api/session/{session_id}/download?name={out_name}"},
         "timings_ms": result.get("timings_ms", {}),
         "counts": result.get("counts", {}),
+        "schema_detected": result.get("schema_detected"),
+        "schema_warning": result.get("schema_warning", ""),
     }
 
 
