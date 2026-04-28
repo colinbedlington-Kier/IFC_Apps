@@ -1,6 +1,6 @@
 (function initIfcSessionShared(global) {
   const STORAGE_KEY = "ifc_toolkit_session_id";
-  const LEGACY_STORAGE_KEYS = [];
+  const LEGACY_STORAGE_KEYS = ["ifcToolkitSessionId"];
   const SESSION_CHANGE_EVENT = "ifc-toolkit-session-changed";
   let currentSessionId = "";
   let sessionPromise = null;
@@ -109,10 +109,21 @@
     };
   }
 
-  async function getSessionFiles(sessionId) {
+  function inferSessionResponseShape(data) {
+    if (Array.isArray(data)) return "array";
+    if (data && typeof data === "object") {
+      if (Array.isArray(data.files)) return "object.files";
+      if (Array.isArray(data.items)) return "object.items";
+      return "object.unknown";
+    }
+    return typeof data;
+  }
+
+  async function getSessionFiles(sessionId, options = {}) {
     const sid = String(sessionId || "").trim();
     if (!sid) return [];
-    const resp = await fetch(`/api/session/${sid}/files`);
+    const url = `/api/session/${sid}/files`;
+    const resp = await fetch(url);
     let data = null;
     let bodyText = "";
     try {
@@ -122,6 +133,19 @@
         bodyText = await resp.text();
       } catch (_) {
         bodyText = "";
+      }
+    }
+    if (typeof options?.onResponse === "function") {
+      try {
+        options.onResponse({
+          status: resp.status,
+          ok: resp.ok,
+          url,
+          shape: inferSessionResponseShape(data),
+          payload: data ?? bodyText,
+        });
+      } catch (_) {
+        // no-op: diagnostic hooks should never break fetch flow
       }
     }
     if (!resp.ok) {
