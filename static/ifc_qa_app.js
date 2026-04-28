@@ -60,6 +60,7 @@ const qaState = {
   isFetchingSessionFiles: false,
   lastSessionFilesFetchSessionId: "",
 };
+let lastFetchedSessionId = null;
 
 function isDebugPanelEnabled() {
   return !!qs("#qaDebugState");
@@ -803,18 +804,18 @@ function extractRawSessionFiles(payload) {
   return [];
 }
 
-async function fetchSessionFiles() {
-  const canonicalSessionId = String(qaState.canonicalSessionId || qaState.sessionId || "").trim();
-  if (!qaState.sessionReady || !canonicalSessionId) return [];
+async function fetchSessionFiles(sessionId) {
+  const canonicalSessionId = String(sessionId || qaState.canonicalSessionId || qaState.sessionId || "").trim();
+  if (!canonicalSessionId) return [];
   qaState.lastSessionFilesFetchSessionId = canonicalSessionId;
-  qaState.fetchUrl = `/api/session/${canonicalSessionId}/files`;
+  qaState.fetchUrl = `/api/session/${encodeURIComponent(canonicalSessionId)}/files`;
   qaState.fetchStatus = "loading";
   qaState.lastFetchError = "-";
   qaState.isFetchingSessionFiles = true;
   renderSessionFiles();
   renderDebugState();
   try {
-    const resp = await fetch(qaState.fetchUrl);
+    const resp = await fetch(qaState.fetchUrl, { credentials: "same-origin" });
     const responseText = await resp.text();
     let payload = null;
     if (responseText) {
@@ -865,10 +866,11 @@ function maybeFetchSessionFiles({ force = false, reason = "unspecified" } = {}) 
   if (!ready) return Promise.resolve([]);
   if (!force) {
     if (qaState.isFetchingSessionFiles) return Promise.resolve([]);
-    if (qaState.lastSessionFilesFetchSessionId === canonicalSessionId && qaState.fetchStatus && qaState.fetchStatus !== "loading") return Promise.resolve([]);
+    if (lastFetchedSessionId === canonicalSessionId) return Promise.resolve([]);
   }
+  lastFetchedSessionId = canonicalSessionId;
   debugLog("IFC QA session file fetch trigger", { canonicalSessionId, force, reason });
-  return fetchSessionFiles();
+  return fetchSessionFiles(canonicalSessionId);
 }
 
 async function uploadSelectedFiles(targetStatuses = ["queued"]) {
@@ -930,7 +932,7 @@ async function uploadSelectedFiles(targetStatuses = ["queued"]) {
     return;
   }
   console.info("IFC QA upload complete", { sessionId: qaState.sessionId });
-  const filesFromSession = await fetchSessionFiles();
+  const filesFromSession = await fetchSessionFiles(qaState.canonicalSessionId);
   setUploadWarning(filesFromSession.length ? "" : "Upload completed but the session file list did not refresh.");
   const progressUnavailable = (Number(qaState.uploadBytesLoaded) || 0) <= 0;
   const loadedBytes = progressUnavailable ? totalBytes : Math.max(qaState.uploadBytesLoaded, totalBytes);
@@ -1201,7 +1203,7 @@ async function pollStatus(jobId) {
     qaState.extractionResults = Array.isArray(data.files) ? data.files : [];
     console.info("IFC QA per-file extraction outcomes", qaState.extractionResults);
     renderResultsPanel();
-    await fetchSessionFiles();
+    await fetchSessionFiles(qaState.canonicalSessionId);
     await refreshSessionSummary();
     return;
   }
