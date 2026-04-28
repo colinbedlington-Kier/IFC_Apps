@@ -26,6 +26,10 @@ const state = {
   processingCount: 0,
   updatedIfcName: null,
   excelPreview: null,
+  dataExtractor: {
+    sessionState: "loading",
+    selectedIfcFiles: new Set(),
+  },
   uploadLimits: {
     maxBytes: 1_200_000_000,
     maxDisplay: "1.2 GB",
@@ -123,10 +127,12 @@ async function ensureSession() {
     } else {
       setSessionBadge(`Session ready • ${state.sessionId.slice(0, 8)}`, true);
     }
+    setDataExtractorState("ready", "Session ready.");
     await refreshFiles();
     if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Session ready.";
   } catch (err) {
     setSessionBadge("Session error", false);
+    setDataExtractorState("failed", "Session loading failed.");
     if (state.uploadStatusEl) state.uploadStatusEl.textContent = "Session error. Reload to retry.";
     console.error(err);
   }
@@ -167,9 +173,71 @@ async function refreshFiles() {
     }
     renderFilesLists();
     populateFileSelects();
+    renderDataExtractorSessionFiles();
   } catch (err) {
     console.error(err);
   }
+}
+
+function setDataExtractorState(nextState, message = "") {
+  state.dataExtractor.sessionState = nextState;
+  const statusEl = el("dataExtractorStatus");
+  if (statusEl) statusEl.textContent = message;
+}
+
+function getSessionIfcFiles() {
+  return state.files.filter((file) => window.IFCSession?.isIfcCandidate
+    ? window.IFCSession.isIfcCandidate(file)
+    : /\.(ifc|ifczip|ifcxml)$/i.test(file?.name || ""));
+}
+
+function renderDataExtractorSessionFiles() {
+  const listEl = el("dataExtractorIfcList");
+  if (!listEl) return;
+  const sessionIdEl = el("dataExtractorSessionId");
+  if (sessionIdEl) sessionIdEl.textContent = state.sessionId || "session establishing…";
+
+  const ifcFiles = getSessionIfcFiles();
+  const selected = new Set();
+  state.dataExtractor.selectedIfcFiles.forEach((name) => {
+    if (ifcFiles.some((file) => file.name === name)) selected.add(name);
+  });
+  state.dataExtractor.selectedIfcFiles = selected;
+
+  listEl.innerHTML = "";
+  if (!state.sessionId) {
+    setDataExtractorState("loading", "Session loading…");
+    listEl.innerHTML = '<div class="muted">Session not ready yet.</div>';
+    return;
+  }
+  if (!ifcFiles.length) {
+    setDataExtractorState("no-ifc-files", "No IFC files in session.");
+    listEl.innerHTML = '<div class="muted">Upload .ifc, .ifczip, or .ifcxml files using the shared uploader.</div>';
+    return;
+  }
+
+  if (state.dataExtractor.sessionState !== "running") {
+    setDataExtractorState("ready", "Session ready.");
+  }
+
+  ifcFiles.forEach((file) => {
+    const row = document.createElement("label");
+    row.className = "file-row";
+    row.innerHTML = `
+      <input type="checkbox" class="data-extractor-file" value="${file.name}" ${state.dataExtractor.selectedIfcFiles.has(file.name) ? "checked" : ""}>
+      <span class="file-name">${file.name}</span>
+      <span class="muted">${(file.size / 1024).toFixed(1)} KB</span>
+    `;
+    listEl.appendChild(row);
+  });
+
+  listEl.querySelectorAll(".data-extractor-file").forEach((cb) => {
+    cb.addEventListener("change", (event) => {
+      const name = event.target.value;
+      if (event.target.checked) state.dataExtractor.selectedIfcFiles.add(name);
+      else state.dataExtractor.selectedIfcFiles.delete(name);
+    });
+  });
 }
 
 function renderFilesLists() {
@@ -1755,10 +1823,21 @@ async function reassignLevelRequest() {
 }
 
 async function startDataExtraction() {
-  const ifcInput = el("dataIfcFiles");
-  if (!ifcInput) return;
-  const ifcFiles = Array.from(ifcInput.files || []);
-  if (!ifcFiles.length) return alert("Select at least one IFC file.");
+  if (!state.sessionId) {
+    setDataExtractorState("loading", "Session loading…");
+    return alert("Session is still loading. Please wait a moment.");
+  }
+  const availableIfcFiles = getSessionIfcFiles().map((file) => file.name);
+  if (!availableIfcFiles.length) {
+    setDataExtractorState("no-ifc-files", "No IFC files in session.");
+    return alert("No IFC files in the active session. Upload files first.");
+  }
+
+  const selectedIfcFiles = state.dataExtractor.selectedIfcFiles.size
+    ? availableIfcFiles.filter((name) => state.dataExtractor.selectedIfcFiles.has(name))
+    : availableIfcFiles;
+  if (!selectedIfcFiles.length) return alert("Select at least one IFC file from the active session.");
+
   const tableValues = Array.from(document.querySelectorAll("#dataTables input:checked")).map((cb) => cb.value);
   if (!tableValues.length) return alert("Select at least one table.");
 
@@ -1766,10 +1845,6 @@ async function startDataExtraction() {
   const psetFile = el("dataPsetTemplate")?.files?.[0] || null;
   const form = new FormData();
   const uploadOrder = [];
-  ifcFiles.forEach((file) => {
-    form.append("files", file, file.name);
-    uploadOrder.push(file);
-  });
   if (excludeFile) {
     form.append("files", excludeFile, excludeFile.name);
     uploadOrder.push(excludeFile);
@@ -1779,24 +1854,30 @@ async function startDataExtraction() {
     uploadOrder.push(psetFile);
   }
 
-  el("dataExtractorStatus").textContent = "Uploading inputs…";
-  const uploadResp = await fetch(`/api/session/${state.sessionId}/upload`, { method: "POST", body: form });
-  if (!uploadResp.ok) {
-    el("dataExtractorStatus").textContent = "Upload failed.";
-    return;
+  let excludeName = null;
+  let psetName = null;
+  if (uploadOrder.length) {
+    setDataExtractorState("running", "Uploading optional CSV inputs…");
+    const uploadResp = await fetch(`/api/session/${state.sessionId}/upload`, { method: "POST", body: form });
+    if (!uploadResp.ok) {
+      setDataExtractorState("failed", "Extraction failed.");
+      el("dataExtractorStatus").textContent = "Upload failed.";
+      return;
+    }
+    const uploadData = await uploadResp.json();
+    const saved = uploadData.files || [];
+    const savedNames = saved.map((f) => f.name);
+    const uploadMap = {};
+    uploadOrder.forEach((file, index) => {
+      uploadMap[file.name] = savedNames[index];
+    });
+    excludeName = excludeFile ? uploadMap[excludeFile.name] : null;
+    psetName = psetFile ? uploadMap[psetFile.name] : null;
+    await refreshFiles();
   }
-  const uploadData = await uploadResp.json();
-  const saved = uploadData.files || [];
-  const savedNames = saved.map((f) => f.name);
-  const uploadMap = {};
-  uploadOrder.forEach((file, index) => {
-    uploadMap[file.name] = savedNames[index];
-  });
-  const excludeName = excludeFile ? uploadMap[excludeFile.name] : null;
-  const psetName = psetFile ? uploadMap[psetFile.name] : null;
 
   const payload = {
-    ifc_files: ifcFiles.map((f) => uploadMap[f.name] || f.name),
+    ifc_files: selectedIfcFiles,
     exclude_filter: excludeName,
     pset_template: psetName,
     pset_template_default: el("dataPsetDefault")?.value || "GPA_Pset_Template.csv",
@@ -1817,13 +1898,14 @@ async function startDataExtraction() {
   const previewTable = el("dataExtractorPreview");
   if (previewTable) previewTable.innerHTML = "";
 
-  el("dataExtractorStatus").textContent = "Starting extraction…";
+  setDataExtractorState("running", "Extraction running…");
   const resp = await fetch(`/api/session/${state.sessionId}/data-extractor/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
   if (!resp.ok) {
+    setDataExtractorState("failed", "Extraction failed.");
     el("dataExtractorStatus").textContent = "Failed to start extraction.";
     return;
   }
@@ -1881,6 +1963,7 @@ function pollDataExtraction(statusUrl, resultUrl = null) {
     const terminal = data.done || ["done", "failed", "canceled"].includes(data.status);
     if (terminal) {
       if (data.error || data.status === "failed") {
+        setDataExtractorState("failed", data.error || data.message || "Extraction failed.");
         statusEl.textContent = data.error || data.message || "Extraction failed.";
         return;
       }
@@ -1893,6 +1976,8 @@ function pollDataExtraction(statusUrl, resultUrl = null) {
           downloadEl.innerHTML = `<a href="${link.url}">Download ZIP (${link.name})</a>`;
         }
         if (result.preview) renderPreviewTable(result.preview);
+        setDataExtractorState("complete", "Extraction complete.");
+        refreshFiles();
       }
       return;
     }
@@ -2087,5 +2172,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadUploadLimits();
   wireEvents();
   renderPendingChanges();
+  renderDataExtractorSessionFiles();
   ensureSession();
 });
