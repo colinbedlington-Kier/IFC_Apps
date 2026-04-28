@@ -504,6 +504,80 @@ def _scan_ifc_for_area_spaces_ifcopenshell(path: Path) -> ScanResult:
     return ScanResult(source_file=path.name, total_spaces=len(spaces), candidates=candidates)
 
 
+def scan_ifc_area_spaces_ifcopenshell(file_path: Path, filename: str) -> ScanResult:
+    result = _scan_ifc_for_area_spaces_ifcopenshell(file_path)
+    result.source_file = filename
+    return result
+
+
+def scan_ifc_area_spaces_chunked(file_path: Path, filename: str) -> ScanResult:
+    lines_read = 0
+    ifcspace_lines_found = 0
+    area_layer_detected = False
+    spaces: List[Dict[str, Any]] = []
+    layer_tokens = (
+        "IFCPRESENTATIONLAYERASSIGNMENT",
+        "INFORMATION CAD LAYER",
+        "CAD LAYER",
+        "PRESENTATION LAYER",
+        "LAYER",
+    )
+
+    with file_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for raw_line in handle:
+            lines_read += 1
+            line = raw_line.strip()
+            upper_line = line.upper()
+            if "IFCSPACE(" in upper_line:
+                ifcspace_lines_found += 1
+                parsed = _parse_step_entity(line)
+                if parsed and parsed[1] == "IFCSPACE":
+                    args = _split_step_args(parsed[2])
+                    spaces.append(
+                        {
+                            "step_id": parsed[0],
+                            "global_id": _extract_step_string(args[0]) if len(args) > 0 else "",
+                            "name": _extract_step_string(args[2]) if len(args) > 2 else "",
+                            "long_name": _extract_step_string(args[7]) if len(args) > 7 else "",
+                            "object_type": _extract_step_string(args[4]) if len(args) > 4 else "",
+                        }
+                    )
+                else:
+                    spaces.append({"step_id": 0, "global_id": "", "name": "", "long_name": "", "object_type": ""})
+            if "AREA" in upper_line and any(token in upper_line for token in layer_tokens):
+                area_layer_detected = True
+
+    candidates: List[Candidate] = []
+    if area_layer_detected:
+        for index, space in enumerate(spaces, start=1):
+            step_id = int(space.get("step_id") or 0)
+            candidates.append(
+                Candidate(
+                    step_id=step_id if step_id > 0 else index,
+                    global_id=_str(space.get("global_id", "")),
+                    name=_str(space.get("name", "")),
+                    long_name=_str(space.get("long_name", "")),
+                    object_type=_str(space.get("object_type", "")),
+                    matched_source="streaming.text",
+                    matched_name="Area",
+                    matched_value="Area",
+                    reason="streaming_text_match",
+                    confidence="probable",
+                    has_representation=False,
+                    spatial_parent="",
+                )
+            )
+
+    LOGGER.info(
+        "area_spaces_chunked_scan_complete filename=%s lines_read=%s ifcspace_lines_found=%s candidate_count=%s",
+        filename,
+        lines_read,
+        ifcspace_lines_found,
+        len(candidates),
+    )
+    return ScanResult(source_file=filename, total_spaces=ifcspace_lines_found, candidates=candidates)
+
+
 def scan_ifc_for_area_spaces(path: Path, *, debug_mode: bool = False) -> ScanResult:
     if not path.exists():
         raise AreaSpaceError(f"IFC file not found: {path.name}")
