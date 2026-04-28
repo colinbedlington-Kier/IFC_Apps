@@ -58,6 +58,7 @@ const qaState = {
   fetchStatus: "",
   lastFetchError: "",
   isFetchingSessionFiles: false,
+  lastSessionFilesFetchSessionId: "",
 };
 
 function isDebugPanelEnabled() {
@@ -805,6 +806,7 @@ function extractRawSessionFiles(payload) {
 async function fetchSessionFiles() {
   const canonicalSessionId = String(qaState.canonicalSessionId || qaState.sessionId || "").trim();
   if (!qaState.sessionReady || !canonicalSessionId) return [];
+  qaState.lastSessionFilesFetchSessionId = canonicalSessionId;
   qaState.fetchUrl = `/api/session/${canonicalSessionId}/files`;
   qaState.fetchStatus = "loading";
   qaState.lastFetchError = "-";
@@ -855,6 +857,18 @@ async function fetchSessionFiles() {
     renderSessionFiles();
     renderDebugState();
   }
+}
+
+function maybeFetchSessionFiles({ force = false, reason = "unspecified" } = {}) {
+  const canonicalSessionId = String(qaState.canonicalSessionId || qaState.sessionId || "").trim();
+  const ready = !!qaState.sessionReady && !!canonicalSessionId;
+  if (!ready) return Promise.resolve([]);
+  if (!force) {
+    if (qaState.isFetchingSessionFiles) return Promise.resolve([]);
+    if (qaState.lastSessionFilesFetchSessionId === canonicalSessionId && qaState.fetchStatus && qaState.fetchStatus !== "loading") return Promise.resolve([]);
+  }
+  debugLog("IFC QA session file fetch trigger", { canonicalSessionId, force, reason });
+  return fetchSessionFiles();
 }
 
 async function uploadSelectedFiles(targetStatuses = ["queued"]) {
@@ -1258,7 +1272,7 @@ function bindExtractor() {
     renderActionButtons();
   });
   qs("#qaRefreshSessionFilesBtn")?.addEventListener("click", async () => {
-    await fetchSessionFiles();
+    await maybeFetchSessionFiles({ force: true, reason: "manual_refresh" });
   });
   qs("#qaStartBtn")?.addEventListener("click", startRun);
   qs("#qaDownloadBtn")?.addEventListener("click", () => {
@@ -1317,9 +1331,7 @@ async function init() {
         : "Session establishing...";
       renderSessionState();
       updateGlobalSessionBadge();
-      if (qaState.sessionReady) {
-        fetchSessionFiles();
-      }
+      if (qaState.sessionReady) maybeFetchSessionFiles({ reason: "session_subscribe" });
       renderDebugState();
     });
     const eventName = window.IFCSession?.sessionChangeEvent || "ifc-toolkit-session-changed";
@@ -1333,7 +1345,7 @@ async function init() {
         : "Session establishing...";
       renderSessionState();
       updateGlobalSessionBadge();
-      if (qaState.sessionReady) fetchSessionFiles();
+      if (qaState.sessionReady) maybeFetchSessionFiles({ reason: "toolkit_event" });
       renderDebugState();
       console.info("IFC QA session changed event handled", { sessionId: normalized, eventName });
     };
@@ -1347,7 +1359,7 @@ async function init() {
     ensureSession()
       .then(async () => {
         await refreshSessionSummary();
-        await fetchSessionFiles();
+        await maybeFetchSessionFiles({ reason: "ensure_session" });
       })
       .catch((err) => {
         console.error("IFC QA session bootstrap failed", err);
