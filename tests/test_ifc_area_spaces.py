@@ -115,7 +115,7 @@ def test_area_spaces_scan_api_shape(tmp_path: Path, monkeypatch):
         ],
     )
 
-    monkeypatch.setattr(app, "scan_ifc_for_area_spaces", lambda _, **__: fake_result)
+    monkeypatch.setattr(app, "scan_ifc_area_spaces_ifcopenshell", lambda *_: fake_result)
 
     payload = asyncio.run(app.area_spaces_scan({"session_id": session_id, "file_names": [source_name]}))
     assert payload["files_scanned"] == 1
@@ -128,28 +128,33 @@ def test_area_spaces_scan_api_shape(tmp_path: Path, monkeypatch):
 
 
 
-def test_area_spaces_scan_rejects_large_inline_files(monkeypatch):
+def test_area_spaces_scan_uses_chunked_mode_for_large_files(monkeypatch):
     session_id = app.SESSION_STORE.create()
     root = Path(app.SESSION_STORE.ensure(session_id))
     source_name = "areas.ifc"
     (root / source_name).write_text("ISO-10303-21;\nENDSEC;\n", encoding="utf-8")
 
-    called = {"scan": False}
+    called = {"chunked": False, "ifcopenshell": False}
 
-    def _should_not_run(*_, **__):
-        called["scan"] = True
-        raise RuntimeError("scan should not run for oversize files")
+    def _chunked_scan(*_, **__):
+        called["chunked"] = True
+        return ScanResult(source_file=source_name, total_spaces=1, candidates=[])
 
     monkeypatch.setenv("AREA_SPACE_MAX_INLINE_MB", "-1")
-    monkeypatch.setattr(app, "scan_ifc_for_area_spaces", _should_not_run)
+    monkeypatch.setattr(app, "scan_ifc_area_spaces_chunked", _chunked_scan)
+    def _ifcopenshell_scan(*_, **__):
+        called["ifcopenshell"] = True
+        raise RuntimeError("ifcopenshell scan should not run for oversized files")
+
+    monkeypatch.setattr(app, "scan_ifc_area_spaces_ifcopenshell", _ifcopenshell_scan)
 
     resp = asyncio.run(app.area_spaces_scan({"session_id": session_id, "file_names": [source_name]}))
-    assert resp.status_code == 400
-    payload = json.loads(resp.body.decode("utf-8"))
-    assert payload["status"] == "error"
-    assert payload["file"] == source_name
-    assert "File too large for inline processing" in payload["message"]
-    assert called["scan"] is False
+    assert resp["ok"] is True
+    assert resp["scan_mode"] == "chunked"
+    assert "Large IFC detected — using chunked scan." in resp["status_messages"]
+    assert "chunked scan complete" in resp["status_messages"]
+    assert called["chunked"] is True
+    assert called["ifcopenshell"] is False
 
 
 def test_purge_area_spaces_frontend_uses_active_session_and_shared_files_endpoint():
@@ -214,7 +219,7 @@ def test_scan_error_returns_json_not_crash(monkeypatch):
     session_id = app.SESSION_STORE.create()
     root = Path(app.SESSION_STORE.ensure(session_id))
     (root / "areas.ifc").write_text("ISO-10303-21;\nENDSEC;\n", encoding="utf-8")
-    monkeypatch.setattr(app, "scan_ifc_for_area_spaces", lambda _: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(app, "scan_ifc_area_spaces_ifcopenshell", lambda *_: (_ for _ in ()).throw(RuntimeError("boom")))
 
     resp = asyncio.run(app.area_spaces_scan({"session_id": session_id, "file_names": ["areas.ifc"]}))
     assert resp.status_code == 500
@@ -246,7 +251,7 @@ def test_scan_waits_for_job_semaphore(monkeypatch):
     root = Path(app.SESSION_STORE.ensure(session_id))
     (root / "areas.ifc").write_text("ISO-10303-21;\nENDSEC;\n", encoding="utf-8")
     fake_result = ScanResult(source_file="areas.ifc", total_spaces=0, candidates=[])
-    monkeypatch.setattr(app, "scan_ifc_for_area_spaces", lambda _, **__: fake_result)
+    monkeypatch.setattr(app, "scan_ifc_area_spaces_ifcopenshell", lambda *_: fake_result)
 
     async def _run():
         await app.AREA_SPACE_JOB_SEMAPHORE.acquire()

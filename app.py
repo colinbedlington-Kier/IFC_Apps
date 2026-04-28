@@ -88,6 +88,8 @@ from backend.ifc_area_spaces import (
     is_memory_high,
     package_outputs as package_area_space_outputs,
     result_to_log_payload as area_space_log_payload,
+    scan_ifc_area_spaces_chunked,
+    scan_ifc_area_spaces_ifcopenshell,
     scan_ifc_for_area_spaces,
 )
 from backend.ifc_area_spaces_router import build_area_spaces_router
@@ -6909,18 +6911,25 @@ async def area_spaces_scan(payload: Dict[str, Any] = Body(...)):
             ifc_records = _resolve_session_ifc_file_paths(session_id, [str(item) for item in requested])
             source_name, path = ifc_records[0]
             file_size_mb = round(path.stat().st_size / (1024 * 1024), 2)
-            if file_size_mb > float(os.getenv("AREA_SPACE_MAX_INLINE_MB", "300")):
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "status": "error",
-                        "message": f"File too large for inline processing ({file_size_mb:.1f}MB). Use chunked processing.",
-                        "file": source_name,
-                    },
-                )
+            inline_threshold_mb = float(os.getenv("AREA_SPACE_MAX_INLINE_MB", "300"))
+            if file_size_mb > inline_threshold_mb:
+                scan_mode = "chunked"
+                result = scan_ifc_area_spaces_chunked(path, source_name)
+            else:
+                scan_mode = "ifcopenshell"
+                result = scan_ifc_area_spaces_ifcopenshell(path, source_name)
 
-            result = scan_ifc_for_area_spaces(path, debug_mode=debug_mode)
+            APP_LOGGER.info(
+                "area_spaces_scan_mode filename=%s size_mb=%s mode=%s threshold_mb=%s",
+                source_name,
+                file_size_mb,
+                scan_mode,
+                inline_threshold_mb,
+            )
             APP_LOGGER.info("area_spaces_scan %s", area_space_log_payload(result))
+            status_messages = ["ifc_open complete", "scan_spaces complete"]
+            if scan_mode == "chunked":
+                status_messages = ["Large IFC detected — using chunked scan.", "chunked scan complete"]
             scan_payload = {
                 "source_file": result.source_file,
                 "total_spaces": result.total_spaces,
@@ -6928,9 +6937,10 @@ async def area_spaces_scan(payload: Dict[str, Any] = Body(...)):
             }
             return {
                 "ok": True,
+                "scan_mode": scan_mode,
                 "session_id": session_id,
                 "progress": "candidates found",
-                "status_messages": (["Another IFC job is running. Waiting for available processing slot..."] if semaphore_locked else []) + ["ifc_open complete", "scan_spaces complete"],
+                "status_messages": (["Another IFC job is running. Waiting for available processing slot..."] if semaphore_locked else []) + status_messages,
                 "files_scanned": 1,
                 "total_spaces": result.total_spaces,
                 "total_candidates": len(result.candidates),
