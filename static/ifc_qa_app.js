@@ -260,7 +260,7 @@ function extractorTemplate() {
 
     <div id="qaSessionSummary" class="muted"></div>
     <div id="qaBuildInfo" class="muted">Build: loading…</div>
-    <div id="qaLoaderExecuted" class="muted">IFC QA session loader executed: no</div>
+    <div id="qaLoaderExecuted" class="muted">IFC QA session loader executed: ${qaState.sessionLoaderExecuted ? "yes" : "no"}</div>
     <div id="qaDebugState" class="muted" style="font-family:monospace;border:1px dashed #cbd5e1;padding:8px;border-radius:6px"></div>
 
     <div class="progress-track"><div id="qaProgressFill" class="progress-fill" style="width:0%"></div></div>
@@ -1342,6 +1342,7 @@ function bindExtractor() {
     a.click();
   });
   renderActionButtons();
+  void loadSessionFilesNow();
 }
 
 function configTemplate() {
