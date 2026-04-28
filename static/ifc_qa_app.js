@@ -823,12 +823,18 @@ async function fetchSessionFiles(sessionId) {
 }
 
 function maybeFetchSessionFiles({ force = false, reason = "unspecified" } = {}) {
-  const canonicalSessionId = String(qaState.canonicalSessionId || qaState.sessionId || "").trim();
+  const sid = String(qaState.canonicalSessionId || qaState.sessionId || "").trim();
+
+  if (!sid) {
+    debugLog("Skipping fetch: no session id yet", { reason });
+    return Promise.resolve([]);
+  }
+
   if (!force && qaState.isFetchingSessionFiles) return Promise.resolve([]);
-  if (!force && lastFetchedSessionId === canonicalSessionId && canonicalSessionId) return Promise.resolve([]);
-  lastFetchedSessionId = canonicalSessionId || null;
-  debugLog("IFC QA session file fetch trigger", { canonicalSessionId, force, reason });
-  return loadSessionFilesNow(canonicalSessionId);
+
+  debugLog("IFC QA session file fetch trigger", { sid, force, reason });
+
+  return loadSessionFilesNow(sid);
 }
 
 function startMountSessionFetchRetry() {
@@ -842,7 +848,7 @@ function startMountSessionFetchRetry() {
 
     if (sid) {
       window.clearInterval(timer);
-      loadSessionFilesNow();
+      maybeFetchSessionFiles({ force: true, reason: "retry_loop" });
       return;
     }
   }, 250);
@@ -850,6 +856,9 @@ function startMountSessionFetchRetry() {
 }
 
 async function loadSessionFilesNow(sessionIdFromCaller = "") {
+  qaState.sessionLoaderExecuted = true;
+  renderSessionLoaderExecutedState();
+
   const localStateSessionId = qaState.sessionId;
   const canonicalSessionId = String(qaState.canonicalSessionId || "").trim();
   const sid =
@@ -860,8 +869,11 @@ async function loadSessionFilesNow(sessionIdFromCaller = "") {
     localStorage.getItem("ifcToolkitSessionId") ||
     localStorage.getItem("sessionId");
 
-  qaState.sessionLoaderExecuted = true;
-  renderSessionLoaderExecutedState();
+  console.info("[ifc-qa] loadSessionFilesNow called", {
+    sid,
+    canonicalSessionId: qaState.canonicalSessionId,
+    localSessionId: qaState.sessionId,
+  });
 
   if (!sid) {
     qaState.fetchStatus = "no-session-id";
@@ -915,6 +927,7 @@ async function loadSessionFilesNow(sessionIdFromCaller = "") {
       throw new Error(`Failed to refresh session files (HTTP ${res.status})`);
     }
 
+    lastFetchedSessionId = sid;
     reconcileSessionFiles(normalizedFiles);
     qaState.lastFetchError = "-";
     return normalizedFiles;
@@ -1332,7 +1345,7 @@ function bindExtractor() {
     renderActionButtons();
   });
   qs("#qaRefreshSessionFilesBtn")?.addEventListener("click", async () => {
-    await loadSessionFilesNow();
+    await maybeFetchSessionFiles({ force: true, reason: "manual_refresh" });
   });
   qs("#qaStartBtn")?.addEventListener("click", startRun);
   qs("#qaDownloadBtn")?.addEventListener("click", () => {
@@ -1342,7 +1355,6 @@ function bindExtractor() {
     a.click();
   });
   renderActionButtons();
-  void loadSessionFilesNow();
 }
 
 function configTemplate() {
