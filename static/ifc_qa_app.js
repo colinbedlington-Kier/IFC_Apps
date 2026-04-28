@@ -786,54 +786,61 @@ function reconcileSessionFiles(files) {
   renderDebugState();
 }
 
-async function loadSessionFiles() {
+function detectSessionFilesResponseShape(payload) {
+  if (Array.isArray(payload)) return "array";
+  if (payload && Array.isArray(payload.files)) return "files";
+  if (payload && Array.isArray(payload.items)) return "items";
+  if (payload && Array.isArray(payload.session_files)) return "session_files";
+  return typeof payload;
+}
+
+function extractRawSessionFiles(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.files)) return payload.files;
+  if (payload && Array.isArray(payload.items)) return payload.items;
+  if (payload && Array.isArray(payload.session_files)) return payload.session_files;
+  return [];
+}
+
+async function fetchSessionFiles() {
   const canonicalSessionId = String(qaState.canonicalSessionId || qaState.sessionId || "").trim();
   if (!qaState.sessionReady || !canonicalSessionId) return [];
   qaState.fetchUrl = `/api/session/${canonicalSessionId}/files`;
-  qaState.fetchStatus = "pending";
-  qaState.lastFetchError = "";
+  qaState.fetchStatus = "loading";
+  qaState.lastFetchError = "-";
   qaState.isFetchingSessionFiles = true;
   renderSessionFiles();
   renderDebugState();
   try {
-    const onResponse = (meta) => {
-      qaState.fetchStatus = String(meta?.status || "");
-      qaState.rawResponseShape = String(meta?.shape || "");
-      debugLog("IFC QA session file fetch response", {
-        canonicalSessionId,
-        fetchUrl: qaState.fetchUrl,
-        httpStatus: meta?.status,
-        rawResponseShape: meta?.shape,
-      });
-    };
-    let allFiles = [];
-    if (window.IFCSession?.getSessionFiles) {
-      allFiles = await window.IFCSession.getSessionFiles(canonicalSessionId, { onResponse });
-    } else {
-      const resp = await fetch(qaState.fetchUrl);
-      const payload = await resp.json();
-      qaState.fetchStatus = String(resp.status);
-      qaState.rawResponseShape = Array.isArray(payload) ? "array" : (payload && Array.isArray(payload.files) ? "object.files" : (payload && Array.isArray(payload.items) ? "object.items" : typeof payload));
-      if (!resp.ok) {
-        throw Object.assign(new Error(`Failed to refresh session files (HTTP ${resp.status})`), { status: resp.status, body: payload });
+    const resp = await fetch(qaState.fetchUrl);
+    const responseText = await resp.text();
+    let payload = null;
+    if (responseText) {
+      try {
+        payload = JSON.parse(responseText);
+      } catch (_) {
+        payload = responseText;
       }
-      const rawRecords = Array.isArray(payload)
-        ? payload
-        : Array.isArray(payload?.files)
-          ? payload.files
-          : Array.isArray(payload?.items)
-            ? payload.items
-            : [];
-      allFiles = rawRecords.map((record) => (window.IFCSession?.normalizeSessionFile ? window.IFCSession.normalizeSessionFile(record) : record));
     }
-    qaState.fetchStatus = "ok";
+    qaState.fetchStatus = `${resp.status} ${resp.statusText}`;
+    qaState.rawResponseShape = detectSessionFilesResponseShape(payload);
+    if (!resp.ok) {
+      const detail = typeof payload === "string"
+        ? payload
+        : payload
+          ? JSON.stringify(payload)
+          : responseText || "No response body";
+      throw Object.assign(new Error(`Failed to refresh session files (HTTP ${resp.status})`), { status: resp.status, detail });
+    }
+    const rawRecords = extractRawSessionFiles(payload);
+    const allFiles = rawRecords.map((record) => (window.IFCSession?.normalizeSessionFile ? window.IFCSession.normalizeSessionFile(record) : record));
     reconcileSessionFiles(allFiles);
     return allFiles;
   } catch (err) {
     const status = err?.status || "error";
-    const detail = typeof err?.body === "string" ? err.body : err?.body ? JSON.stringify(err.body) : "";
+    const detail = String(err?.detail || err?.message || "Unknown error");
     qaState.fetchStatus = `error:${status}`;
-    qaState.lastFetchError = `HTTP ${status}${detail ? ` ${detail}` : ""}`;
+    qaState.lastFetchError = detail;
     debugWarn("IFC QA session file fetch failed", {
       canonicalSessionId,
       fetchUrl: qaState.fetchUrl,
@@ -909,7 +916,7 @@ async function uploadSelectedFiles(targetStatuses = ["queued"]) {
     return;
   }
   console.info("IFC QA upload complete", { sessionId: qaState.sessionId });
-  const filesFromSession = await loadSessionFiles();
+  const filesFromSession = await fetchSessionFiles();
   setUploadWarning(filesFromSession.length ? "" : "Upload completed but the session file list did not refresh.");
   const progressUnavailable = (Number(qaState.uploadBytesLoaded) || 0) <= 0;
   const loadedBytes = progressUnavailable ? totalBytes : Math.max(qaState.uploadBytesLoaded, totalBytes);
@@ -1180,7 +1187,7 @@ async function pollStatus(jobId) {
     qaState.extractionResults = Array.isArray(data.files) ? data.files : [];
     console.info("IFC QA per-file extraction outcomes", qaState.extractionResults);
     renderResultsPanel();
-    await loadSessionFiles();
+    await fetchSessionFiles();
     await refreshSessionSummary();
     return;
   }
@@ -1251,7 +1258,7 @@ function bindExtractor() {
     renderActionButtons();
   });
   qs("#qaRefreshSessionFilesBtn")?.addEventListener("click", async () => {
-    await loadSessionFiles();
+    await fetchSessionFiles();
   });
   qs("#qaStartBtn")?.addEventListener("click", startRun);
   qs("#qaDownloadBtn")?.addEventListener("click", () => {
@@ -1311,7 +1318,7 @@ async function init() {
       renderSessionState();
       updateGlobalSessionBadge();
       if (qaState.sessionReady) {
-        loadSessionFiles();
+        fetchSessionFiles();
       }
       renderDebugState();
     });
@@ -1326,7 +1333,7 @@ async function init() {
         : "Session establishing...";
       renderSessionState();
       updateGlobalSessionBadge();
-      if (qaState.sessionReady) loadSessionFiles();
+      if (qaState.sessionReady) fetchSessionFiles();
       renderDebugState();
       console.info("IFC QA session changed event handled", { sessionId: normalized, eventName });
     };
@@ -1340,7 +1347,7 @@ async function init() {
     ensureSession()
       .then(async () => {
         await refreshSessionSummary();
-        await loadSessionFiles();
+        await fetchSessionFiles();
       })
       .catch((err) => {
         console.error("IFC QA session bootstrap failed", err);
