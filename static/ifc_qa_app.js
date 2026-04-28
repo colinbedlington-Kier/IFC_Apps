@@ -49,6 +49,9 @@ const qaState = {
   rawSessionFilesCount: 0,
   filteredIfcFilesCount: 0,
   filteredOutFilesCount: 0,
+  filterSkipReasons: [],
+  filteredIfcFileNames: [],
+  rawResponseShape: "",
   extractionResults: [],
   extractionSummary: null,
   fetchUrl: "",
@@ -56,6 +59,20 @@ const qaState = {
   lastFetchError: "",
   isFetchingSessionFiles: false,
 };
+
+function isDebugPanelEnabled() {
+  return !!qs("#qaDebugState");
+}
+
+function debugLog(...args) {
+  if (!isDebugPanelEnabled()) return;
+  console.info(...args);
+}
+
+function debugWarn(...args) {
+  if (!isDebugPanelEnabled()) return;
+  console.warn(...args);
+}
 
 const QA_UPLOAD_MAX_HINT_TEXT = "Maximum file size: 1.2 GB";
 
@@ -142,13 +159,14 @@ async function ensureSession() {
   if (!resolved && shared?.ensureSession) {
     resolved = await shared.ensureSession({ createIfMissing: true });
   }
-  qaState.sessionId = String(resolved || "");
-  qaState.canonicalSessionId = qaState.sessionId;
-  qaState.sessionReady = !!resolved;
+  const normalized = String(resolved || "").trim();
+  qaState.sessionId = normalized;
+  qaState.canonicalSessionId = normalized;
+  qaState.sessionReady = !!normalized;
   qaState.sessionStateText = qaState.sessionReady
-    ? `Session ready · ${shared?.shortSessionId ? shared.shortSessionId(qaState.sessionId) : qaState.sessionId.slice(0, 8)}`
+    ? `Session ready · ${shared?.shortSessionId ? shared.shortSessionId(normalized) : normalized.slice(0, 8)}`
     : "Session establishing...";
-  console.info("IFC QA session id availability", { sessionId: qaState.sessionId, sessionReady: qaState.sessionReady });
+  debugLog("IFC QA session id availability", { canonicalSessionId: qaState.canonicalSessionId, sessionReady: qaState.sessionReady });
   if (qaState.sessionId) {
     if (shared?.setCurrentSessionId) shared.setCurrentSessionId(qaState.sessionId);
   }
@@ -497,23 +515,42 @@ function renderSessionFiles() {
   if (summary) {
     if (qaState.isFetchingSessionFiles) {
       summary.textContent = "Loading session files...";
+    } else if (String(qaState.fetchStatus || "").startsWith("error")) {
+      summary.textContent = "Failed to fetch session files.";
     } else if (files.length) {
-      summary.textContent = `IFC files in session (${files.length})`;
+      summary.textContent = `Files found: ${files.length} IFC file${files.length === 1 ? "" : "s"} ready.`;
     } else if (rawFiles.length) {
-      summary.textContent = "No IFC files found in this session. Upload IFC files from Upload & Session, then refresh.";
+      summary.textContent = "Session files found but none are IFC files.";
     } else {
-      summary.textContent = "No IFC files found in this session. Upload IFC files from Upload & Session, then refresh.";
+      summary.textContent = "No session files found.";
     }
   }
   if (!list) return;
   if (!files.length) {
-    list.innerHTML = qaState.isFetchingSessionFiles
-      ? "<li>Loading session files...</li>"
-      : "<li>No IFC files found in this session.</li>";
+    if (qaState.isFetchingSessionFiles) {
+      list.innerHTML = "<li>Loading session files...</li>";
+      return;
+    }
+    if (String(qaState.fetchStatus || "").startsWith("error")) {
+      list.innerHTML = `<li>Failed to fetch session files. ${qaState.lastFetchError || "Unknown error."}</li>`;
+      return;
+    }
+    if (!rawFiles.length) {
+      list.innerHTML = "<li>No session files found.</li>";
+      return;
+    }
+    const skipRows = (qaState.filterSkipReasons || [])
+      .map((item) => `<li><span>${item.name || "(unknown)"}</span><span class="muted">${item.reason}</span></li>`)
+      .join("");
+    list.innerHTML = `
+      <li>Session files found but none are IFC files.</li>
+      <li class="muted">Raw filenames: ${(qaState.rawSessionFileNames || []).join(", ") || "-"}</li>
+      ${skipRows}
+    `;
     return;
   }
   list.innerHTML = files.map((f) => {
-    const name = f.name || f.filename || "unknown";
+    const name = getSessionFileName(f) || "unknown";
     const size = Number(f.size || f.bytes || 0);
     const modified = f.modified || f.uploaded || f.uploaded_at || "-";
     const checked = qaState.selectedSessionFiles.includes(name) ? "checked" : "";
@@ -539,6 +576,8 @@ function renderDebugState() {
   const el = qs("#qaDebugState");
   if (!el) return;
   const previewNames = (qaState.rawSessionFileNames || []).slice(0, 5).join(", ") || "-";
+  const filteredNames = (qaState.filteredIfcFileNames || []).slice(0, 5).join(", ") || "-";
+  const skipPreview = (qaState.filterSkipReasons || []).slice(0, 5).map((row) => `${row.name}: ${row.reason}`).join(" | ") || "-";
   const legacySessionKeys = collectLegacySessionStorageState();
   el.innerHTML = [
     `<strong>Debug state</strong>`,
@@ -548,9 +587,12 @@ function renderDebugState() {
     `legacySessionKeys: ${JSON.stringify(legacySessionKeys)}`,
     `fetchUrl: ${qaState.fetchUrl || "-"}`,
     `fetchStatus: ${qaState.fetchStatus || "-"}`,
+    `rawResponseShape: ${qaState.rawResponseShape || "-"}`,
     `rawSessionFilesCount: ${qaState.rawSessionFilesCount || 0}`,
     `rawSessionFileNames: ${previewNames}`,
     `filteredIfcFilesCount: ${qaState.filteredIfcFilesCount || 0}`,
+    `filteredIfcFileNames: ${filteredNames}`,
+    `filterSkipReasons: ${skipPreview}`,
     `selectedSessionFiles: ${JSON.stringify(qaState.selectedSessionFiles || [])}`,
     `lastFetchError: ${qaState.lastFetchError || "-"}`,
     `uploadQueue: ${(qaState.fileQueue || []).length}`,
@@ -679,26 +721,64 @@ function parseXhrJson(xhr) {
   }
 }
 
+function getSessionFileName(file) {
+  const raw = file && typeof file === "object" ? file : {};
+  const candidates = [
+    raw.name,
+    raw.filename,
+    raw.file_name,
+    raw.original_name,
+    raw.path,
+    raw.relative_path,
+    raw.display_name,
+  ];
+  for (const value of candidates) {
+    const normalized = String(value || "").trim();
+    if (normalized) return normalized.split(/[\\/]/).pop() || normalized;
+  }
+  return "";
+}
+
 function reconcileSessionFiles(files) {
   const rawFiles = Array.isArray(files) ? files : [];
+  const skipReasons = [];
   const uploadedIfc = rawFiles.filter((file) => {
-    if (window.IFCSession?.isIfcCandidate) return window.IFCSession.isIfcCandidate(file);
-    const name = String(file?.name || "").toLowerCase();
-    return name.endsWith(".ifc") || name.endsWith(".ifczip") || name.endsWith(".ifcxml");
+    const fileName = getSessionFileName(file);
+    if (!fileName) {
+      skipReasons.push({ name: "(missing name)", reason: "Missing filename fields (name/filename/file_name/original_name/path/relative_path)." });
+      return false;
+    }
+    const normalized = fileName.toLowerCase();
+    const accepted = normalized.endsWith(".ifc") || normalized.endsWith(".ifczip") || normalized.endsWith(".ifcxml");
+    if (!accepted) {
+      skipReasons.push({ name: fileName, reason: "Extension is not .ifc, .ifczip, or .ifcxml." });
+      return false;
+    }
+    return true;
   });
   qaState.rawSessionFiles = rawFiles;
   qaState.sessionFiles = rawFiles;
   qaState.rawSessionFilesCount = rawFiles.length;
-  qaState.rawSessionFileNames = rawFiles.map((f) => f.name || f.filename || "unknown");
+  qaState.rawSessionFileNames = rawFiles.map((f) => getSessionFileName(f) || "unknown");
   qaState.filteredIfcFilesCount = uploadedIfc.length;
   qaState.filteredOutFilesCount = Math.max(0, rawFiles.length - uploadedIfc.length);
+  qaState.filteredIfcFileNames = uploadedIfc.map((file) => getSessionFileName(file)).filter(Boolean);
+  qaState.filterSkipReasons = skipReasons;
   qaState.sessionIfcFiles = uploadedIfc;
   qaState.sessionReadyCount = uploadedIfc.length;
   qaState.uploadedFiles = uploadedIfc;
   qaState.canRunQa = uploadedIfc.length > 0;
-  const validNames = new Set(uploadedIfc.map((f) => f.name || f.filename));
+  const validNames = new Set(uploadedIfc.map((f) => getSessionFileName(f)).filter(Boolean));
   qaState.selectedSessionFiles = qaState.selectedSessionFiles.filter((name) => validNames.has(name));
-  console.info("IFC QA session list reconciled", { sessionId: qaState.sessionId, returned: uploadedIfc.length, selected: qaState.selectedSessionFiles.length });
+  debugLog("IFC QA session list reconciled", {
+    canonicalSessionId: qaState.canonicalSessionId,
+    returnedRaw: rawFiles.length,
+    returnedIfc: uploadedIfc.length,
+    rawFilenames: qaState.rawSessionFileNames,
+    filteredFilenames: qaState.filteredIfcFileNames,
+    filterSkipReasons: qaState.filterSkipReasons,
+    selected: qaState.selectedSessionFiles.length,
+  });
   renderSessionFiles();
   renderSelectedFilesState();
   renderSessionSummary();
@@ -707,30 +787,44 @@ function reconcileSessionFiles(files) {
 }
 
 async function loadSessionFiles() {
-  if (!qaState.sessionReady || !qaState.sessionId) return [];
-  qaState.fetchUrl = `/api/session/${qaState.sessionId}/files`;
+  const canonicalSessionId = String(qaState.canonicalSessionId || qaState.sessionId || "").trim();
+  if (!qaState.sessionReady || !canonicalSessionId) return [];
+  qaState.fetchUrl = `/api/session/${canonicalSessionId}/files`;
   qaState.fetchStatus = "pending";
   qaState.lastFetchError = "";
   qaState.isFetchingSessionFiles = true;
   renderSessionFiles();
   renderDebugState();
   try {
+    const onResponse = (meta) => {
+      qaState.fetchStatus = String(meta?.status || "");
+      qaState.rawResponseShape = String(meta?.shape || "");
+      debugLog("IFC QA session file fetch response", {
+        canonicalSessionId,
+        fetchUrl: qaState.fetchUrl,
+        httpStatus: meta?.status,
+        rawResponseShape: meta?.shape,
+      });
+    };
     let allFiles = [];
     if (window.IFCSession?.getSessionFiles) {
-      allFiles = await window.IFCSession.getSessionFiles(qaState.sessionId);
+      allFiles = await window.IFCSession.getSessionFiles(canonicalSessionId, { onResponse });
     } else {
       const resp = await fetch(qaState.fetchUrl);
       const payload = await resp.json();
+      qaState.fetchStatus = String(resp.status);
+      qaState.rawResponseShape = Array.isArray(payload) ? "array" : (payload && Array.isArray(payload.files) ? "object.files" : (payload && Array.isArray(payload.items) ? "object.items" : typeof payload));
       if (!resp.ok) {
         throw Object.assign(new Error(`Failed to refresh session files (HTTP ${resp.status})`), { status: resp.status, body: payload });
       }
-      allFiles = Array.isArray(payload)
+      const rawRecords = Array.isArray(payload)
         ? payload
         : Array.isArray(payload?.files)
           ? payload.files
           : Array.isArray(payload?.items)
             ? payload.items
             : [];
+      allFiles = rawRecords.map((record) => (window.IFCSession?.normalizeSessionFile ? window.IFCSession.normalizeSessionFile(record) : record));
     }
     qaState.fetchStatus = "ok";
     reconcileSessionFiles(allFiles);
@@ -740,6 +834,12 @@ async function loadSessionFiles() {
     const detail = typeof err?.body === "string" ? err.body : err?.body ? JSON.stringify(err.body) : "";
     qaState.fetchStatus = `error:${status}`;
     qaState.lastFetchError = `HTTP ${status}${detail ? ` ${detail}` : ""}`;
+    debugWarn("IFC QA session file fetch failed", {
+      canonicalSessionId,
+      fetchUrl: qaState.fetchUrl,
+      fetchStatus: qaState.fetchStatus,
+      error: qaState.lastFetchError,
+    });
     setSessionWarning(`Failed to load session files. ${qaState.lastFetchError}`);
     reconcileSessionFiles([]);
     return [];
@@ -946,7 +1046,7 @@ async function startRun() {
     setRunError("start", "Configuration is not loaded yet.");
     return;
   }
-  if (!qaState.sessionId) {
+  if (!qaState.canonicalSessionId && !qaState.sessionId) {
     setRunError("start", "Session is not ready.");
     return;
   }
@@ -963,6 +1063,7 @@ async function startRun() {
 
   const downloadBtn = qs("#qaDownloadBtn");
   if (downloadBtn) downloadBtn.disabled = true;
+  const canonicalSessionId = String(qaState.canonicalSessionId || qaState.sessionId || "").trim();
   qaState.isStartingRun = true;
   qaState.activeJobId = "";
   qaState.runStartState = "idle";
@@ -972,17 +1073,18 @@ async function startRun() {
   setUploadState("running", { uploadPercent: 0, uploadBytesLoaded: 0, uploadBytesTotal: 0 });
   const payload = {
     file_ids: Array.from(qaState.selectedSessionFiles),
+    file_names: Array.from(qaState.selectedSessionFiles),
     options: { selected_sheets: selected },
     config_override: qaState.qaConfig || {},
   };
-  console.info("IFC QA run request", {
-    sessionId: qaState.sessionId,
+  debugLog("IFC QA run request", {
+    canonicalSessionId,
     selectedCount: qaState.selectedSessionFiles.length,
     payload,
   });
 
   try {
-    const resp = await fetch(`/api/session/${qaState.sessionId}/ifc-qa/extract`, {
+    const resp = await fetch(`/api/session/${canonicalSessionId}/ifc-qa/extract`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1137,7 +1239,7 @@ function bindExtractor() {
   qs("#qaConfigClose")?.addEventListener("click", closeConfig);
   qs("#qaConfigApply")?.addEventListener("click", applyConfig);
   qs("#qaSelectAllBtn")?.addEventListener("click", () => {
-    qaState.selectedSessionFiles = qaState.sessionIfcFiles.map((file) => file.name || file.filename).filter(Boolean);
+    qaState.selectedSessionFiles = qaState.sessionIfcFiles.map((file) => getSessionFileName(file)).filter(Boolean);
     renderSessionFiles();
     renderSelectedFilesState();
     renderActionButtons();
