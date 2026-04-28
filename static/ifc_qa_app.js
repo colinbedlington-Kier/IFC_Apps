@@ -516,29 +516,29 @@ function renderSessionFiles() {
   const list = qs("#qaSessionFileList");
   if (summary) {
     if (qaState.isFetchingSessionFiles) {
-      summary.textContent = "Loading session files...";
+      summary.textContent = "Loading session files…";
     } else if (String(qaState.fetchStatus || "").startsWith("error")) {
-      summary.textContent = "Failed to fetch session files.";
+      summary.textContent = `Failed to fetch session files: ${qaState.lastFetchError || "Unknown error."}`;
     } else if (files.length) {
       summary.textContent = `Files found: ${files.length} IFC file${files.length === 1 ? "" : "s"} ready.`;
     } else if (rawFiles.length) {
-      summary.textContent = "Session files found but none are IFC files.";
+      summary.textContent = "No IFC files found in this session";
     } else {
-      summary.textContent = "No session files found.";
+      summary.textContent = "No IFC files found in this session";
     }
   }
   if (!list) return;
   if (!files.length) {
     if (qaState.isFetchingSessionFiles) {
-      list.innerHTML = "<li>Loading session files...</li>";
+      list.innerHTML = "<li>Loading session files…</li>";
       return;
     }
     if (String(qaState.fetchStatus || "").startsWith("error")) {
       list.innerHTML = `<li>Failed to fetch session files. ${qaState.lastFetchError || "Unknown error."}</li>`;
       return;
     }
-    if (!rawFiles.length) {
-      list.innerHTML = "<li>No session files found.</li>";
+    if (!rawFiles.length || !qaState.filteredIfcFilesCount) {
+      list.innerHTML = "<li>No IFC files found in this session</li>";
       return;
     }
     const skipRows = (qaState.filterSkipReasons || [])
@@ -724,14 +724,18 @@ function parseXhrJson(xhr) {
 }
 
 function getSessionFileName(file) {
+  if (typeof file === "string") {
+    const normalized = file.trim();
+    return normalized ? (normalized.split(/[\\/]/).pop() || normalized) : "";
+  }
   const raw = file && typeof file === "object" ? file : {};
   const candidates = [
     raw.name,
     raw.filename,
     raw.file_name,
     raw.original_name,
-    raw.path,
     raw.relative_path,
+    raw.path,
     raw.display_name,
   ];
   for (const value of candidates) {
@@ -812,6 +816,7 @@ async function fetchSessionFiles(sessionId) {
   qaState.fetchStatus = "loading";
   qaState.lastFetchError = "-";
   qaState.isFetchingSessionFiles = true;
+  console.info("[ifc-qa] fetching session files", qaState.fetchUrl);
   renderSessionFiles();
   renderDebugState();
   try {
@@ -838,12 +843,22 @@ async function fetchSessionFiles(sessionId) {
     const rawRecords = extractRawSessionFiles(payload);
     const allFiles = rawRecords.map((record) => (window.IFCSession?.normalizeSessionFile ? window.IFCSession.normalizeSessionFile(record) : record));
     reconcileSessionFiles(allFiles);
+    console.info("[ifc-qa] fetched session files", {
+      status: qaState.fetchStatus,
+      rawCount: qaState.rawSessionFilesCount,
+      filteredCount: qaState.filteredIfcFilesCount,
+    });
     return allFiles;
   } catch (err) {
     const status = err?.status || "error";
     const detail = String(err?.detail || err?.message || "Unknown error");
     qaState.fetchStatus = `error:${status}`;
     qaState.lastFetchError = detail;
+    console.info("[ifc-qa] fetched session files", {
+      status: qaState.fetchStatus,
+      rawCount: qaState.rawSessionFilesCount,
+      filteredCount: qaState.filteredIfcFilesCount,
+    });
     debugWarn("IFC QA session file fetch failed", {
       canonicalSessionId,
       fetchUrl: qaState.fetchUrl,
@@ -871,6 +886,27 @@ function maybeFetchSessionFiles({ force = false, reason = "unspecified" } = {}) 
   lastFetchedSessionId = canonicalSessionId;
   debugLog("IFC QA session file fetch trigger", { canonicalSessionId, force, reason });
   return fetchSessionFiles(canonicalSessionId);
+}
+
+function startMountSessionFetchRetry() {
+  const startedAt = Date.now();
+  const maxDurationMs = 5000;
+  const intervalMs = 250;
+  let startedFetch = false;
+  const timer = window.setInterval(() => {
+    const canonicalSessionId = String(qaState.canonicalSessionId || qaState.sessionId || "").trim();
+    const sessionReady = !!qaState.sessionReady;
+    console.info("[ifc-qa] session state", { sessionReady, canonicalSessionId });
+    if (!startedFetch && sessionReady && canonicalSessionId) {
+      startedFetch = true;
+      fetchSessionFiles(canonicalSessionId);
+      window.clearInterval(timer);
+      return;
+    }
+    if (Date.now() - startedAt >= maxDurationMs) {
+      window.clearInterval(timer);
+    }
+  }, intervalMs);
 }
 
 async function uploadSelectedFiles(targetStatuses = ["queued"]) {
@@ -1274,7 +1310,9 @@ function bindExtractor() {
     renderActionButtons();
   });
   qs("#qaRefreshSessionFilesBtn")?.addEventListener("click", async () => {
-    await maybeFetchSessionFiles({ force: true, reason: "manual_refresh" });
+    const canonicalSessionId = String(qaState.canonicalSessionId || qaState.sessionId || "").trim();
+    if (!canonicalSessionId) return;
+    await fetchSessionFiles(canonicalSessionId);
   });
   qs("#qaStartBtn")?.addEventListener("click", startRun);
   qs("#qaDownloadBtn")?.addEventListener("click", () => {
@@ -1318,6 +1356,7 @@ async function init() {
   loadQaConfig();
 
   if (page === "extractor") {
+    console.info("[ifc-qa] rendered component mounted");
     root.innerHTML = extractorTemplate();
     await loadBuildInfo();
     await loadUploadLimits();
@@ -1373,6 +1412,7 @@ async function init() {
         renderActionButtons();
         renderDebugState();
       });
+    startMountSessionFetchRetry();
     await loadQaConfig();
     renderActionButtons();
   } else if (page === "config") {
