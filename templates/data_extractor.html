@@ -9,8 +9,13 @@
 
   <div class="two-col">
     <div>
-      <label for="dataIfcFiles">IFC files (multiple)</label>
-      <input id="dataIfcFiles" type="file" multiple accept=".ifc" />
+      <label>Active session</label>
+      <div class="muted">Session ID: <code id="dataExtractorSessionId">session establishing…</code></div>
+      <label style="margin-top: 10px">IFC files from shared session</label>
+      <div class="file-list" id="dataExtractorIfcList">
+        <div class="muted">Session loading…</div>
+      </div>
+      <div class="muted">Uses files from <code>GET /api/session/{session_id}/files</code>. If nothing is selected, all IFC files are extracted.</div>
 
       <label for="dataExcludeFilter" style="margin-top: 10px">Exclude filter CSV (optional)</label>
       <input id="dataExcludeFilter" type="file" accept=".csv" />

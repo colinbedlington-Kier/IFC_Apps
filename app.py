@@ -5688,6 +5688,13 @@ def run_data_extractor_job(
     regexes: Dict[str, str],
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> None:
+    APP_LOGGER.info(
+        "data_extractor_job_start session_id=%s job_id=%s file_count=%s files=%s",
+        session_id,
+        job_id,
+        len(ifc_files or []),
+        ifc_files,
+    )
     session_root = Path(SESSION_STORE.ensure(session_id))
     work_dir = Path(tempfile.mkdtemp(prefix="data_extractor_", dir=session_root))
     timeout_seconds = int(os.getenv("IFC_JOB_TIMEOUT_SECONDS", "1200"))
@@ -5808,6 +5815,7 @@ def run_data_extractor_job(
         outputs=outputs,
         preview=preview_payload,
     )
+    APP_LOGGER.info("data_extractor_job_end session_id=%s job_id=%s status=done outputs=%s", session_id, job_id, len(outputs))
 
 def update_ifc_qa_job(job_id: str, **updates: Any) -> None:
     job = IFC_QA_JOBS.get(job_id)
@@ -7673,8 +7681,19 @@ async def ifc_qa_config_import(config_json: UploadFile = File(...)):
     payload = json.loads((await config_json.read()).decode("utf-8"))
     return {"config": payload}
 def _build_ifc_job_payload(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    root = Path(SESSION_STORE.ensure(session_id))
-    ifc_files = payload.get("ifc_files") or []
+    SESSION_STORE.cleanup_stale()
+    normalized = _require_valid_session_id(session_id)
+    if not SESSION_STORE.exists(normalized):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "SESSION_NOT_FOUND",
+                "message": "Session does not exist or has expired.",
+                "session_id": normalized,
+            },
+        )
+    root = Path(SESSION_STORE.ensure(normalized))
+    ifc_files = payload.get("ifc_files") or payload.get("file_ids") or []
     tables = payload.get("tables") or []
     project_slug = (payload.get("project_slug") or payload.get("slug") or "").strip() or None
     if not project_slug and isinstance(payload.get("project"), dict):
@@ -7685,8 +7704,40 @@ def _build_ifc_job_payload(session_id: str, payload: Dict[str, Any]) -> Dict[str
         if resolved_tables:
             tables = resolved_tables
 
+    session_records = []
+    for fname in sorted(os.listdir(root)):
+        fpath = root / fname
+        if fpath.is_file():
+            session_records.append(_build_session_file_metadata(str(root), fname))
+    APP_LOGGER.info(
+        "data_extractor_session_files session_id=%s files_found=%s",
+        normalized,
+        len(session_records),
+    )
+    if not session_records:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "SESSION_EMPTY",
+                "message": "Session contains no files. Upload IFC files first.",
+                "session_id": normalized,
+            },
+        )
+
+    available_ifc = {record["name"]: record for record in session_records if _is_ifc_compatible(record.get("name", ""))}
+    if not available_ifc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "NO_IFC_FILES",
+                "message": "No IFC-compatible files found in session (.ifc, .ifczip, .ifcxml).",
+                "session_id": normalized,
+            },
+        )
+
     if not ifc_files:
-        raise HTTPException(status_code=400, detail="IFC files are required")
+        ifc_files = list(available_ifc.keys())
+    APP_LOGGER.info("data_extractor_selected_files session_id=%s selected=%s", normalized, ifc_files)
     if not tables:
         hint = (
             f" No table mapping found for project slug '{project_slug}' in PROJECT_DATABASES_JSON."
@@ -7701,14 +7752,46 @@ def _build_ifc_job_payload(session_id: str, payload: Dict[str, Any]) -> Dict[str
 
     input_files = []
     total_bytes = 0
+    skipped_files = []
     for name in ifc_files:
         safe = sanitize_filename(name)
-        candidate = root / safe
-        if not candidate.exists():
-            raise HTTPException(status_code=400, detail=f"Missing upload: {safe}")
-        size = candidate.stat().st_size
+        if not safe:
+            skipped_files.append({"file": name, "reason": "empty_or_invalid_name"})
+            continue
+        if not _is_ifc_compatible(safe):
+            skipped_files.append({"file": safe, "reason": "unsupported_extension"})
+            continue
+        record = available_ifc.get(safe)
+        if record is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "SELECTED_FILE_NOT_IN_SESSION",
+                    "message": f"Selected file '{safe}' is not present in the active session.",
+                    "session_id": normalized,
+                    "file": safe,
+                },
+            )
+        candidate = (root / safe).resolve()
+        if root.resolve() not in candidate.parents:
+            raise HTTPException(status_code=400, detail=f"Invalid session file path: {safe}")
+        size = int(record.get("size", 0))
         total_bytes += size
         input_files.append({"name": safe, "size": size})
+        APP_LOGGER.info("data_extractor_resolved_path session_id=%s file=%s path=%s", normalized, safe, candidate)
+
+    if skipped_files:
+        APP_LOGGER.info("data_extractor_skipped_files session_id=%s skipped=%s", normalized, skipped_files)
+    if not input_files:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "NO_VALID_IFC_SELECTION",
+                "message": "No valid IFC files were selected for extraction.",
+                "session_id": normalized,
+                "skipped": skipped_files,
+            },
+        )
 
     max_bytes = int(os.getenv("IFC_MAX_TOTAL_BYTES", "500000000"))
     if total_bytes > max_bytes:
@@ -7741,7 +7824,7 @@ def _build_ifc_job_payload(session_id: str, payload: Dict[str, Any]) -> Dict[str
             pset_path = str(default_candidate)
 
     return {
-        "session_id": session_id,
+        "session_id": normalized,
         "ifc_files": [f["name"] for f in input_files],
         "input_files": input_files,
         "tables": tables,
