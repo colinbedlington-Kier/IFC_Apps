@@ -6,7 +6,7 @@
     <h2>IFC Data QA</h2>
     <span class="badge">IFCOpenShell extractor</span>
   </div>
-  <div id="ifc-qa-root" data-qa-page="{{ qa_page }}"></div>
+  <div id="ifc-qa-root" data-qa-page="{{ qa_page | default('extractor') }}"></div>
 </div>
 {% endblock %}
 
@@ -14,5 +14,5 @@
 <script>
   window.__IFC_QA_BUILD_ID__ = "{{ frontend_build_id }}";
 </script>
-<script src="{{ asset_url('ifc_qa_app.js') }}"></script>
+<script src="{{ resolve_asset_url('ifc_qa_app.js') }}"></script>
 {% endblock %}

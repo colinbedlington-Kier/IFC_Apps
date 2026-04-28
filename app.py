@@ -6393,6 +6393,7 @@ app = FastAPI(title="IFC Toolkit Hub", lifespan=lifespan)
 app.mount("/static", CacheControlledStaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 templates.env.globals["asset_url"] = resolve_asset_url
+templates.env.globals["resolve_asset_url"] = resolve_asset_url
 templates.env.globals["frontend_build_id"] = FRONTEND_BUILD_ID
 
 
