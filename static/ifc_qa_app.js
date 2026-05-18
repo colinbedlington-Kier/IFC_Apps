@@ -1347,7 +1347,8 @@ function bindExtractor() {
     renderActionButtons();
   });
   qs("#qaRefreshSessionFilesBtn")?.addEventListener("click", async () => {
-    await loadSessionFilesNow(qaState.canonicalSessionId || qaState.sessionId, "manual_refresh");
+    const sid = qaState.canonicalSessionId || qaState.sessionId || window.IFCSession?.getCurrentSessionId?.();
+    await loadSessionFilesNow(sid, "manual_refresh_direct");
   });
   qs("#qaStartBtn")?.addEventListener("click", startRun);
   qs("#qaDownloadBtn")?.addEventListener("click", () => {
@@ -1360,10 +1361,13 @@ function bindExtractor() {
 }
 
 function bootstrapSessionFileLoader(sessionIdHint = "", reason = "boot") {
-  if (qaState.sessionLoaderBootstrapped) return;
-  qaState.sessionLoaderBootstrapped = true;
+  const sid = String(sessionIdHint || qaState.canonicalSessionId || qaState.sessionId || "").trim();
+  if (!sid) {
+    markSessionLoaderExecuted(`${reason}_no_session_yet`);
+    return;
+  }
   markSessionLoaderExecuted(reason);
-  maybeAutoFetchSessionFiles(sessionIdHint, reason);
+  void loadSessionFilesNow(sid, reason);
 }
 
 function configTemplate() {
@@ -1455,11 +1459,14 @@ async function init() {
       }, { once: true });
     }
     ensureSession()
-      .then(async () => {
-        await refreshSessionSummary();
-        bootstrapSessionFileLoader(qaState.canonicalSessionId || qaState.sessionId, "ensureSession_resolved");
-        maybeAutoFetchSessionFiles(qaState.canonicalSessionId || qaState.sessionId, "session-ready");
-      })
+        .then(async () => {
+          const sid = qaState.canonicalSessionId || qaState.sessionId;
+          await refreshSessionSummary();
+      
+          // Direct, non-optional session file load for extractor page.
+          // This mirrors the working app.js flow: ensure session -> refresh files.
+          await loadSessionFilesNow(sid, "ensureSession_resolved_direct");
+        })
       .catch((err) => {
         console.error("IFC QA session bootstrap failed", err);
         qaState.sessionReady = false;
