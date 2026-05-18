@@ -1357,6 +1357,17 @@ function bindExtractor() {
     a.href = `/api/ifc-qa/result/${qaState.sessionId}`;
     a.click();
   });
+
+  void (async () => {
+    try {
+      const sid = String(qaState.canonicalSessionId || qaState.sessionId || await ensureSession() || "").trim();
+      if (!sid) return;
+      await refreshSessionSummary();
+      await loadSessionFilesNow(sid, "bindExtractor_autoload");
+    } catch (err) {
+      console.warn("[ifc-qa] bindExtractor autoload failed", err);
+    }
+  })();
   renderActionButtons();
 }
 

@@ -83,8 +83,10 @@ def test_ifc_data_qa_frontend_bootstraps_session_file_loader_and_refresh_uses_sa
     assert "bootstrapSessionFileLoader(qaState.canonicalSessionId || qaState.sessionId, \"mount_immediate\")" in qa_js
     assert "markSessionLoaderExecuted(\"extractor_boot_effect\")" in qa_js
     assert "qaRefreshSessionFilesBtn" in qa_js
+    assert "await loadSessionFilesNow(sid, \"bindExtractor_autoload\")" in qa_js
     assert "loadSessionFilesNow(qaState.canonicalSessionId || qaState.sessionId, \"manual_refresh\")" in qa_js
     assert "window.IFCSession.getSessionFiles(sid, {" in qa_js
+    assert "[ifc-qa] bindExtractor autoload failed" in qa_js
     assert "sharedSessionLoaderUsed = true;" in qa_js
     assert "sessionLoaderSource = \"IFCSession.getSessionFiles\";" in qa_js
     assert "Shared session loader unavailable: IFCSession.getSessionFiles" in qa_js
@@ -102,6 +104,7 @@ def test_ifc_data_qa_and_upload_page_use_shared_session_files_loader_contract():
     assert "const url = `/api/session/${sid}/files`;" in shared_js
     assert "state.files = await window.IFCSession.getSessionFiles(state.sessionId);" in upload_js
     assert "window.IFCSession.getSessionFiles(sid, {" in qa_js
+    assert "[ifc-qa] bindExtractor autoload failed" in qa_js
     assert "sharedSessionLoaderUsed = true;" in qa_js
     assert "sessionLoaderSource = \"IFCSession.getSessionFiles\";" in qa_js
     assert "Shared session loader unavailable: IFCSession.getSessionFiles" in qa_js
