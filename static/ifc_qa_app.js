@@ -1347,7 +1347,8 @@ function bindExtractor() {
     renderActionButtons();
   });
   qs("#qaRefreshSessionFilesBtn")?.addEventListener("click", async () => {
-    await loadSessionFilesNow(qaState.canonicalSessionId || qaState.sessionId, "manual_refresh");
+    const sid = qaState.canonicalSessionId || qaState.sessionId || window.IFCSession?.getCurrentSessionId?.();
+    await loadSessionFilesNow(sid, "manual_refresh_direct");
   });
   qs("#qaStartBtn")?.addEventListener("click", startRun);
   qs("#qaDownloadBtn")?.addEventListener("click", () => {
