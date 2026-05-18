@@ -907,50 +907,23 @@ async function loadSessionFilesNow(sessionIdFromCaller = "", reason = "direct") 
   qaState.fetchStatus = "loading";
   qaState.lastFetchError = "-";
   qaState.isFetchingSessionFiles = true;
-  qaState.sharedSessionLoaderUsed = !!window.IFCSession?.getSessionFiles;
-  qaState.sessionLoaderSource = qaState.sharedSessionLoaderUsed ? "IFCSession.getSessionFiles" : "extractor-fallback-fetch";
+  qaState.sharedSessionLoaderUsed = true;
+  qaState.sessionLoaderSource = "IFCSession.getSessionFiles";
   renderSessionFiles();
   renderDebugState();
 
   try {
-    let normalizedFiles = [];
-    if (window.IFCSession?.getSessionFiles) {
-      normalizedFiles = await window.IFCSession.getSessionFiles(sid, {
-        onResponse: (meta) => {
-          qaState.fetchUrl = meta?.url || url;
-          qaState.fetchStatus = String(meta?.status || "-");
-          qaState.rawResponseShape = meta?.shape || "-";
-        },
-      });
-      qaState.fetchStatus = qaState.fetchStatus || "200";
-    } else {
-      const res = await fetch(url, {
-        method: "GET",
-        credentials: "same-origin",
-        cache: "no-store",
-      });
-      const text = await res.text();
-      let data;
-      try {
-        data = text ? JSON.parse(text) : null;
-      } catch {
-        data = text;
-      }
-      const files =
-        Array.isArray(data) ? data
-          : Array.isArray(data?.files) ? data.files
-            : Array.isArray(data?.items) ? data.items
-              : Array.isArray(data?.session_files) ? data.session_files
-                : [];
-      normalizedFiles = files.map((record) => (window.IFCSession?.normalizeSessionFile ? window.IFCSession.normalizeSessionFile(record) : record));
-      qaState.fetchStatus = `${res.status} ${res.statusText}`;
-      qaState.rawResponseShape = Array.isArray(data)
-        ? "array"
-        : data && typeof data === "object"
-          ? Object.keys(data).join(",")
-          : typeof data;
-      if (!res.ok) throw new Error(`Failed to refresh session files (HTTP ${res.status})`);
+    if (!window.IFCSession?.getSessionFiles) {
+      throw new Error("Shared session loader unavailable: IFCSession.getSessionFiles");
     }
+    const normalizedFiles = await window.IFCSession.getSessionFiles(sid, {
+      onResponse: (meta) => {
+        qaState.fetchUrl = meta?.url || url;
+        qaState.fetchStatus = String(meta?.status || "-");
+        qaState.rawResponseShape = meta?.shape || "-";
+      },
+    });
+    qaState.fetchStatus = qaState.fetchStatus || "200";
 
     lastFetchedSessionId = sid;
     reconcileSessionFiles(normalizedFiles);
@@ -1387,10 +1360,14 @@ function bindExtractor() {
 }
 
 function bootstrapSessionFileLoader(sessionIdHint = "", reason = "boot") {
-  if (qaState.sessionLoaderBootstrapped) return;
+  const sid = String(sessionIdHint || qaState.canonicalSessionId || qaState.sessionId || "").trim();
+  if (!sid) {
+    qaState.sessionLoaderBootstrapped = false;
+    return Promise.resolve([]);
+  }
   qaState.sessionLoaderBootstrapped = true;
   markSessionLoaderExecuted(reason);
-  maybeAutoFetchSessionFiles(sessionIdHint, reason);
+  return loadSessionFilesNow(sid, reason);
 }
 
 function configTemplate() {
@@ -1483,9 +1460,9 @@ async function init() {
     }
     ensureSession()
       .then(async () => {
+        const sid = String(qaState.canonicalSessionId || qaState.sessionId || "").trim();
         await refreshSessionSummary();
-        bootstrapSessionFileLoader(qaState.canonicalSessionId || qaState.sessionId, "ensureSession_resolved");
-        maybeAutoFetchSessionFiles(qaState.canonicalSessionId || qaState.sessionId, "session-ready");
+        await loadSessionFilesNow(sid, "ensureSession_resolved_direct");
       })
       .catch((err) => {
         console.error("IFC QA session bootstrap failed", err);
