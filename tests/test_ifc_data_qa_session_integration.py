@@ -53,8 +53,6 @@ def test_ifc_data_qa_frontend_uses_shared_session_module_and_ifc_filtering():
     assert "ensureSession({ createIfMissing: true })" in qa_js
     assert "ifc-toolkit-session-changed" in qa_js
     assert "canonicalSessionId" in qa_js
-    assert "localStateSessionId" in qa_js
-    assert "legacySessionKeys" in qa_js
     assert "localStorage.getItem(\"ifc_session_id\")" not in qa_js
     assert ".ifcxml" in qa_js
     assert "ensureSession({ createIfMissing: true })" in upload_js
@@ -70,7 +68,6 @@ def test_ifc_data_qa_frontend_bootstraps_session_file_loader_and_refresh_uses_sa
     root = Path(__file__).resolve().parent.parent
     qa_js = (root / "static" / "ifc_qa_app.js").read_text(encoding="utf-8")
 
-    assert "function bootstrapSessionFileLoader" in qa_js
     assert "qaState.sessionLoaderBootstrapped = true;" in qa_js
     assert "function markSessionLoaderExecuted(reason = \"boot\")" in qa_js
     assert "function maybeAutoFetchSessionFiles(sessionIdHint = \"\", reason = \"auto_ready\")" in qa_js
@@ -89,6 +86,10 @@ def test_ifc_data_qa_frontend_bootstraps_session_file_loader_and_refresh_uses_sa
     assert "qaRefreshSessionFilesBtn" in qa_js
     assert "loadSessionFilesNow(qaState.canonicalSessionId || qaState.sessionId, \"manual_refresh\")" in qa_js
     assert "window.IFCSession.getSessionFiles(sid, {" in qa_js
+    assert "sharedSessionLoaderUsed = true;" in qa_js
+    assert "sessionLoaderSource = \"IFCSession.getSessionFiles\";" in qa_js
+    assert "Shared session loader unavailable: IFCSession.getSessionFiles" in qa_js
+    assert "extractor-fallback-fetch" not in qa_js
     assert "sharedSessionLoaderUsed: ${qaState.sharedSessionLoaderUsed}" in qa_js
     assert "sessionLoaderSource: ${qaState.sessionLoaderSource || \"-\"}" in qa_js
 
@@ -102,4 +103,8 @@ def test_ifc_data_qa_and_upload_page_use_shared_session_files_loader_contract():
     assert "const url = `/api/session/${sid}/files`;" in shared_js
     assert "state.files = await window.IFCSession.getSessionFiles(state.sessionId);" in upload_js
     assert "window.IFCSession.getSessionFiles(sid, {" in qa_js
+    assert "sharedSessionLoaderUsed = true;" in qa_js
+    assert "sessionLoaderSource = \"IFCSession.getSessionFiles\";" in qa_js
+    assert "Shared session loader unavailable: IFCSession.getSessionFiles" in qa_js
+    assert "extractor-fallback-fetch" not in qa_js
     assert "normalized.endsWith(\".ifc\") || normalized.endsWith(\".ifczip\") || normalized.endsWith(\".ifcxml\")" in qa_js
